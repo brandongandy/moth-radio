@@ -1,0 +1,23 @@
+{
+  "app": {
+    "name": "scrobble-recs",
+    "db_path": "./data/scrobbles.duckdb",
+    "cache_dir": "./data/cache",
+    "log_path": "./data/app.log"
+  },
+  "input": {
+    "lastfm_csv": "./tests/fixtures/tiny_lastfm_export.csv",
+    "timezone": "UTC",
+    "timestamp_column": "uts",
+    "csv_columns": [
+      "uts",
+      "utc_time",
+      "artist",
+      "artist_mbid",
+      "album",
+      "album_mbid",
+      "track",
+      "track_mbid"
+    ]
+  }
+}

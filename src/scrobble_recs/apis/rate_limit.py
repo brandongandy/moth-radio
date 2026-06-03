@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from math import isfinite
 
 
 class RateLimiter:
@@ -12,8 +13,8 @@ class RateLimiter:
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        if rate_limit_per_second <= 0:
-            raise ValueError("rate_limit_per_second must be greater than zero")
+        if not isfinite(rate_limit_per_second) or rate_limit_per_second <= 0:
+            raise ValueError("rate_limit_per_second must be finite and greater than zero")
         self._minimum_interval = 1.0 / rate_limit_per_second
         self._monotonic = monotonic
         self._sleep = sleep

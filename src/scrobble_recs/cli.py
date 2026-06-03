@@ -1,0 +1,59 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Annotated
+
+import typer
+from rich.console import Console
+
+from scrobble_recs.config import load_config
+from scrobble_recs.db import initialize_database
+from scrobble_recs.importers.lastfm_csv import ImportStats, get_import_stats, import_lastfm_csv
+
+app = typer.Typer(help="Local-first Last.fm recommendation tooling.")
+console = Console()
+
+
+@app.command("import")
+def import_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+) -> None:
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        stats = import_lastfm_csv(conn, resolved_config.input.lastfm_csv)
+    finally:
+        conn.close()
+
+    console.print(f"Imported {stats.scrobbles} scrobbles")
+    _print_stats(stats)
+
+
+@app.command("doctor")
+def doctor_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+) -> None:
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        stats = get_import_stats(conn)
+    finally:
+        conn.close()
+
+    console.print("Config: ok")
+    console.print("Database: ok")
+    if resolved_config.input.lastfm_csv.exists():
+        console.print("CSV: ok")
+    else:
+        console.print(f"CSV: missing at {resolved_config.input.lastfm_csv}")
+    console.print("API keys: not required for import/doctor")
+    _print_stats(stats)
+
+
+def _print_stats(stats: ImportStats) -> None:
+    console.print(f"raw scrobbles: {stats.raw_scrobbles}")
+    console.print(f"clean scrobbles: {stats.scrobbles}")
+    console.print(f"duplicate scrobbles: {stats.duplicate_scrobbles}")
+    console.print(f"distinct artists: {stats.distinct_artists}")
+    console.print(f"distinct tracks: {stats.distinct_tracks}")
+    console.print(f"null artist MBID scrobbles: {stats.null_artist_mbid_scrobbles}")

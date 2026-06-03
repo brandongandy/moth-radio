@@ -70,3 +70,20 @@ Verified:
 - `python -m ruff check .` -> All checks passed
 - `python -m ruff format --check .` -> 16 files already formatted
 - `python -m mypy src` -> Success, no issues found in 11 source files
+
+## 2026-06-03: Task 4 deterministic rate limiter
+
+Changed:
+
+- Added deterministic API rate limiter with injectable monotonic clock and sleep function.
+- Added rate limiter tests for waiting until the next allowed request and skipping sleep after the interval has elapsed.
+- Used approximate float assertion for the computed wait duration to avoid decimal representation brittleness.
+
+Verified:
+
+- `python -m pytest tests/test_rate_limit.py -v` before implementation -> failed with `ModuleNotFoundError: No module named 'scrobble_recs.apis.rate_limit'`
+- `python -m pytest tests/test_rate_limit.py -v` after implementation and precision assertion fix -> 2 passed
+- `python -m pytest` -> 36 passed
+- `python -m ruff check .` -> All checks passed
+- `python -m ruff format --check .` -> 18 files already formatted
+- `python -m mypy src` -> Success, no issues found in 12 source files

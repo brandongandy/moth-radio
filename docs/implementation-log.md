@@ -37,3 +37,18 @@ Verified:
 - `python -m ruff check .` -> All checks passed
 - `python -m ruff format --check .` -> 13 files already formatted
 - `python -m mypy src` -> Success, no issues found in 9 source files
+
+## 2026-06-03: Task 2 enrichment schema migration
+
+Changed:
+
+- Added DuckDB enrichment tables for API cache entries, artist similarity edges, artist tags, and tag top artists.
+- Added schema migration coverage for the enrichment tables.
+- Updated database initialization table assertions to include the enrichment schema.
+
+Verified:
+
+- `python -m pytest tests/test_api_cache.py::test_enrichment_migration_creates_cache_and_normalized_tables -v` -> 1 passed
+- `python -m pytest tests/test_config.py tests/test_api_cache.py -v` -> 6 passed
+- `python -m ruff check .` -> All checks passed
+- `python -m ruff format --check .` -> 14 files already formatted

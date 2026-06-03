@@ -87,10 +87,14 @@ def test_initialize_database_applies_initial_migration(tmp_path: Path) -> None:
         conn.close()
 
     assert tables == {
+        "api_cache",
         "artist",
         "artist_listening_fact",
+        "artist_similarity_edge",
+        "artist_tag",
         "raw_scrobble",
         "scrobble",
+        "tag_top_artist",
     }
     assert {"artist_key", "album_key", "track_key", "is_duplicate"} <= scrobble_columns
 

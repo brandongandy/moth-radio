@@ -19,5 +19,54 @@
       "track",
       "track_mbid"
     ]
+  },
+  "apis": {
+    "lastfm": {
+      "enabled": true,
+      "api_key": "${LASTFM_API_KEY}",
+      "base_url": "https://ws.audioscrobbler.com/2.0/",
+      "rate_limit_per_second": 2.0,
+      "cache_ttl_days": 180
+    },
+    "musicbrainz": {
+      "enabled": false,
+      "base_url": "https://musicbrainz.org/ws/2/",
+      "user_agent": "scrobble-recs/0.1.0",
+      "rate_limit_per_second": 1.0,
+      "cache_ttl_days": 3650
+    },
+    "listenbrainz": {
+      "enabled": false,
+      "dump_dir": "~/datasets/listenbrainz",
+      "use_recommendation_api": false
+    }
+  },
+  "recommendation": {
+    "default_mode": "balanced",
+    "seed_artist_limit": 250,
+    "similar_artists_per_seed": 100,
+    "min_seed_scrobbles": 3,
+    "max_knownness_default": 0.65,
+    "rediscovery_enabled": true,
+    "obviousness": {
+      "enabled": true,
+      "top_n_per_tag_penalty": 10,
+      "top_n_per_tag_hide": 3,
+      "tag_top_artists_limit": 100,
+      "penalty_weight": 0.25
+    },
+    "weights": {
+      "lastfm_similarity": 0.35,
+      "tag_similarity": 0.25,
+      "personal_cluster_fit": 0.15,
+      "rediscovery": 0.10,
+      "metadata_graph": 0.05,
+      "feedback_model": 0.10
+    },
+    "diversity": {
+      "enabled": true,
+      "lambda": 0.75,
+      "max_same_primary_tag_in_top_20": 4
+    }
   }
 }

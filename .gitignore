@@ -56,3 +56,6 @@ pip-wheel-metadata/
 # IDE / tooling
 .vscode/
 .idea/
+
+# Data
+data/

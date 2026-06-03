@@ -938,7 +938,7 @@ python -m pytest tests/test_rate_limit.py -v
 Expected:
 
 ```text
-2 passed
+8 passed
 ```
 
 - [x] **Step 5: Commit rate limiter**
@@ -951,6 +951,8 @@ git commit -m "feat: add api rate limiter"
 ```
 
 Deviation: the commit also stages the Task 4 plan checklist update and implementation-log entry because those files are part of the requested Task 4 write set.
+
+Follow-up: `b76f920 test: harden api rate limiter` added review-requested coverage for invalid rates and post-sleep state handling, plus finite-positive rate validation.
 
 ---
 

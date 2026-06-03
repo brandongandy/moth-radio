@@ -52,3 +52,21 @@ Verified:
 - `python -m pytest tests/test_config.py tests/test_api_cache.py -v` -> 6 passed
 - `python -m ruff check .` -> All checks passed
 - `python -m ruff format --check .` -> 14 files already formatted
+
+## 2026-06-03: Task 3 DuckDB API cache
+
+Changed:
+
+- Added the cache-first API package marker.
+- Added canonical API cache keys using sorted JSON parameters and SHA-256 digests.
+- Added DuckDB-backed cache writes and fresh cache reads for successful, unexpired responses.
+- Added transaction-protected cache replacement so failed writes do not discard existing fresh cache rows.
+- Added behavioral coverage for key stability, fresh and stale reads, non-2xx misses, and replacement rollback.
+
+Verified:
+
+- `python -m pytest tests/test_api_cache.py -v` -> 6 passed
+- `python -m pytest` -> 34 passed
+- `python -m ruff check .` -> All checks passed
+- `python -m ruff format --check .` -> 16 files already formatted
+- `python -m mypy src` -> Success, no issues found in 11 source files

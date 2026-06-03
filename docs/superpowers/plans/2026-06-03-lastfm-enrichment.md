@@ -807,7 +807,7 @@ Expected:
 3 passed
 ```
 
-- [x] **Step 6: Commit cache** _(Deviation note: the Task 3 commit was amended to include `docs/implementation-log.md` to satisfy the repository done criteria; this plan file remains untracked and was not added to the commit.)_
+- [x] **Step 6: Commit cache** _(Deviation note: the Task 3 commit was amended to include `docs/implementation-log.md` to satisfy the repository done criteria; the plan file was not added to the Task 3 commit, then was added by the Task 4 commit.)_
 
 Run:
 
@@ -889,6 +889,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from math import isfinite
 
 
 class RateLimiter:
@@ -899,8 +900,10 @@ class RateLimiter:
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        if rate_limit_per_second <= 0:
-            raise ValueError("rate_limit_per_second must be greater than zero")
+        if not isfinite(rate_limit_per_second) or rate_limit_per_second <= 0:
+            raise ValueError(
+                "rate_limit_per_second must be finite and greater than zero"
+            )
         self._minimum_interval = 1.0 / rate_limit_per_second
         self._monotonic = monotonic
         self._sleep = sleep
@@ -921,6 +924,8 @@ class RateLimiter:
 
         self._last_request_at = now
 ```
+
+Hardening deviation: review follow-up rejects non-finite rates such as `nan` and `inf` in addition to non-positive rates.
 
 - [x] **Step 4: Run rate limiter tests to verify they pass**
 

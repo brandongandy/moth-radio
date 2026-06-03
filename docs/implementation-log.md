@@ -77,13 +77,17 @@ Changed:
 
 - Added deterministic API rate limiter with injectable monotonic clock and sleep function.
 - Added rate limiter tests for waiting until the next allowed request and skipping sleep after the interval has elapsed.
+- Added review-follow-up coverage for invalid rates and the post-sleep state transition across a third wait call.
+- Hardened rate validation to reject non-finite values such as `nan` and `inf`.
 - Used approximate float assertion for the computed wait duration to avoid decimal representation brittleness.
 
 Verified:
 
 - `python -m pytest tests/test_rate_limit.py -v` before implementation -> failed with `ModuleNotFoundError: No module named 'scrobble_recs.apis.rate_limit'`
 - `python -m pytest tests/test_rate_limit.py -v` after implementation and precision assertion fix -> 2 passed
-- `python -m pytest` -> 36 passed
+- `python -m pytest tests/test_rate_limit.py -v` before finite-rate hardening -> 2 failed for `nan` and `inf`, 6 passed
+- `python -m pytest tests/test_rate_limit.py -v` after finite-rate hardening -> 8 passed
+- `python -m pytest` -> 42 passed
 - `python -m ruff check .` -> All checks passed
 - `python -m ruff format --check .` -> 18 files already formatted
 - `python -m mypy src` -> Success, no issues found in 12 source files

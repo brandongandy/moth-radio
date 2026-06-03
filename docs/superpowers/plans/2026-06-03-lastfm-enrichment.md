@@ -1511,7 +1511,7 @@ git commit -m "feat: select lastfm enrichment seed artists"
 - Create: `src/scrobble_recs/enrichment/lastfm.py`
 - Test: `tests/test_lastfm_enrichment.py`
 
-- [ ] **Step 1: Write failing enrichment service tests**
+- [x] **Step 1: Write failing enrichment service tests**
 
 Create `tests/test_lastfm_enrichment.py` with:
 
@@ -1650,7 +1650,7 @@ def test_run_lastfm_enrichment_skips_already_normalized_work_on_second_run(tmp_p
     conn.close()
 ```
 
-- [ ] **Step 2: Run enrichment service tests to verify they fail**
+- [x] **Step 2: Run enrichment service tests to verify they fail**
 
 Run:
 
@@ -1664,7 +1664,7 @@ Expected:
 ModuleNotFoundError: No module named 'scrobble_recs.enrichment'
 ```
 
-- [ ] **Step 3: Add enrichment package marker**
+- [x] **Step 3: Add enrichment package marker**
 
 Create `src/scrobble_recs/enrichment/__init__.py` with:
 
@@ -1672,7 +1672,7 @@ Create `src/scrobble_recs/enrichment/__init__.py` with:
 """Offline-first enrichment pipelines."""
 ```
 
-- [ ] **Step 4: Implement Last.fm enrichment service**
+- [x] **Step 4: Implement Last.fm enrichment service** _(Deviation note: review feedback showed row-count resume checks could repeat sparse/empty responses and skip partial artist-tag work. Added `enrichment_work` in `src/scrobble_recs/sql/002_enrichment.sql` as an explicit local completion ledger for Task 7. Final review also required natural-key unique indexes and conflict-safe inserts for enrichment rows, clearing profile-derived enrichment state from `src/scrobble_recs/importers/lastfm_csv.py` during re-import while preserving `api_cache`, and replacing completed limit-scoped similarity/top-artist rows when request limits change. Critical review required transactional limit-change replacement so previous completed rows and markers are preserved if the replacement API request or write fails. Final atomicity review required first-run normalized writes and completion markers to commit or roll back together.)_
 
 Create `src/scrobble_recs/enrichment/lastfm.py` with:
 
@@ -2021,7 +2021,7 @@ def _now() -> datetime:
     return datetime.now(tz=UTC).replace(tzinfo=None)
 ```
 
-- [ ] **Step 5: Run enrichment service tests to verify they pass**
+- [x] **Step 5: Run enrichment service tests to verify they pass** _(Deviation note: review-driven regression tests expanded the focused expected result to 11 passing tests covering sparse/empty completion, partial artist-tag retry, default-client close, re-import enrichment invalidation, limit-change replacement, failed replacement API preservation, failed replacement write rollback, first-run write rollback, and tag-top replacement rollback.)_
 
 Run:
 
@@ -2032,10 +2032,10 @@ python -m pytest tests/test_lastfm_enrichment.py -v
 Expected:
 
 ```text
-2 passed
+11 passed
 ```
 
-- [ ] **Step 6: Commit enrichment service**
+- [x] **Step 6: Commit enrichment service**
 
 Run:
 

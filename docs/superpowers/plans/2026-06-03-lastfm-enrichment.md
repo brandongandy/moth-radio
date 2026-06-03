@@ -1324,7 +1324,9 @@ git commit -m "feat: add cache-first lastfm client"
 - Create: `src/scrobble_recs/models/profile.py`
 - Test: `tests/test_profile.py`
 
-- [ ] **Step 1: Write failing seed selection tests**
+- [x] **Step 1: Write failing seed selection tests**
+
+Deviation: Added review-driven coverage for Last.fm name fallback and seed-weight source precedence after the original two Step 1 tests.
 
 Create `tests/test_profile.py` with:
 
@@ -1397,7 +1399,7 @@ def test_select_seed_artists_respects_min_scrobbles(tmp_path: Path) -> None:
     conn.close()
 ```
 
-- [ ] **Step 2: Run seed tests to verify they fail**
+- [x] **Step 2: Run seed tests to verify they fail**
 
 Run:
 
@@ -1411,7 +1413,7 @@ Expected:
 ModuleNotFoundError: No module named 'scrobble_recs.models'
 ```
 
-- [ ] **Step 3: Add models package marker**
+- [x] **Step 3: Add models package marker**
 
 Create `src/scrobble_recs/models/__init__.py` with:
 
@@ -1419,7 +1421,7 @@ Create `src/scrobble_recs/models/__init__.py` with:
 """Taste profile and recommendation model helpers."""
 ```
 
-- [ ] **Step 4: Implement seed selection**
+- [x] **Step 4: Implement seed selection**
 
 Create `src/scrobble_recs/models/profile.py` with:
 
@@ -1477,7 +1479,7 @@ def select_seed_artists(
     ]
 ```
 
-- [ ] **Step 5: Run seed tests to verify they pass**
+- [x] **Step 5: Run seed tests to verify they pass**
 
 Run:
 
@@ -1491,7 +1493,7 @@ Expected:
 2 passed
 ```
 
-- [ ] **Step 6: Commit seed selection**
+- [x] **Step 6: Commit seed selection**
 
 Run:
 

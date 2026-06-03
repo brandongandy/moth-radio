@@ -107,3 +107,23 @@ Verified:
 - `python -m pytest tests/test_lastfm_client.py -v` -> 9 passed
 - `python -m ruff check src/scrobble_recs/apis/lastfm.py tests/test_lastfm_client.py docs/implementation-log.md`
 - `python -m ruff format --check .`
+
+## 2026-06-03: Task 6 seed artist selection
+
+Changed:
+
+- Added the `scrobble_recs.models` package for taste profile and recommendation model helpers.
+- Added `SeedArtist` and `select_seed_artists()` to select enrichment seed artists from persisted local listening facts.
+- Ordered seed artists by seed weight descending, then canonical artist name ascending, with a minimum scrobble filter.
+- Added behavioral tests covering seed ordering, duplicate-aware play counts from the Last.fm fixture, minimum scrobble filtering, Last.fm name fallback, and seed-weight source precedence.
+- Updated the Task 6 plan checkboxes after each completed step.
+
+Verified:
+
+- `python -m pytest tests/test_profile.py -v` before implementation -> failed with `ModuleNotFoundError: No module named 'scrobble_recs.models'`
+- `python -m pytest tests/test_profile.py -v` after implementation -> 2 passed
+- `python -m pytest tests/test_profile.py -v` after review-driven coverage -> 3 passed
+- `python -m pytest` -> 54 passed
+- `python -m ruff check .` -> All checks passed
+- `python -m ruff format --check .` -> 23 files already formatted
+- `python -m mypy src` -> Success, no issues found in 15 source files

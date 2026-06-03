@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-from duckdb import ConversionException
+from duckdb import ConstraintException, ConversionException
 
 from scrobble_recs.apis.cache import ApiCache, build_cache_key
 from scrobble_recs.config import load_config
@@ -86,9 +86,82 @@ def test_enrichment_migration_creates_cache_and_normalized_tables(tmp_path: Path
     }
 
     assert "api_cache" in tables
+    assert "enrichment_work" in tables
     assert "artist_similarity_edge" in tables
     assert "artist_tag" in tables
     assert "tag_top_artist" in tables
+    conn.close()
+
+
+def test_enrichment_normalized_tables_enforce_natural_keys(tmp_path: Path) -> None:
+    conn = initialize_database(load_config(_write_minimal_config(tmp_path)))
+
+    rows = [
+        (
+            "enrichment_work",
+            """
+            INSERT INTO enrichment_work (
+                source,
+                endpoint,
+                subject_key,
+                request_limit,
+                completed_at,
+                evidence
+            )
+            VALUES ('lastfm', 'artist.getSimilar', 'the cure', 2, ?, '{}')
+            """,
+        ),
+        (
+            "artist_similarity_edge",
+            """
+            INSERT INTO artist_similarity_edge (
+                source_artist_id,
+                target_artist_id,
+                source,
+                source_score,
+                normalized_score,
+                evidence,
+                fetched_at
+            )
+            VALUES (1, 2, 'lastfm', 0.7, 0.7, '{}', ?)
+            """,
+        ),
+        (
+            "artist_tag",
+            """
+            INSERT INTO artist_tag (
+                artist_id,
+                tag,
+                source,
+                tag_count,
+                normalized_weight,
+                fetched_at
+            )
+            VALUES (1, 'post-punk', 'lastfm', 100.0, 1.0, ?)
+            """,
+        ),
+        (
+            "tag_top_artist",
+            """
+            INSERT INTO tag_top_artist (
+                tag,
+                artist_id,
+                source,
+                tag_rank,
+                tag_count,
+                fetched_at
+            )
+            VALUES ('post-punk', 1, 'lastfm', 1, 1000.0, ?)
+            """,
+        ),
+    ]
+
+    for table, insert_sql in rows:
+        conn.execute(insert_sql, [datetime(2026, 6, 3, 12, 0, 0)])
+        with pytest.raises(ConstraintException):
+            conn.execute(insert_sql, [datetime(2026, 6, 3, 12, 0, 1)])
+        assert conn.execute(f"SELECT count(*) FROM {table}").fetchone() == (1,)
+
     conn.close()
 
 

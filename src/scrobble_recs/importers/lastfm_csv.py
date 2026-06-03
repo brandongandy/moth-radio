@@ -255,6 +255,10 @@ def _insert_scrobbles(conn: DuckDBPyConnection, rows: list[_ValidatedScrobble]) 
 
 
 def _replace_import_tables(conn: DuckDBPyConnection) -> None:
+    conn.execute("DELETE FROM enrichment_work")
+    conn.execute("DELETE FROM artist_similarity_edge")
+    conn.execute("DELETE FROM artist_tag")
+    conn.execute("DELETE FROM tag_top_artist")
     conn.execute("DELETE FROM artist_listening_fact")
     conn.execute("DELETE FROM artist")
     conn.execute("DELETE FROM scrobble")

@@ -127,3 +127,26 @@ Verified:
 - `python -m ruff check .` -> All checks passed
 - `python -m ruff format --check .` -> 23 files already formatted
 - `python -m mypy src` -> Success, no issues found in 15 source files
+
+## 2026-06-03: Task 7 Last.fm enrichment service
+
+Changed:
+
+- Added the offline-first enrichment package and Last.fm enrichment service.
+- Added seed-based Last.fm similar artist, artist tag, and tag top artist persistence.
+- Added idempotent artist creation and normalized writes for similarity edges, artist tags, and tag top artists.
+- Added `enrichment_work` completion tracking so sparse, empty, and resumed work does not repeat completed requests or skip partial work.
+- Added natural-key unique indexes and conflict-safe enrichment inserts for durable idempotence.
+- Added re-import invalidation for profile-derived enrichment rows and completion markers while preserving `api_cache`.
+- Added transactional limit-change replacement for completed similarity and tag top artist work so changed request limits prune stale rows without losing previous completed data on replacement failure.
+- Added atomic first-run persistence so normalized rows and completion markers commit or roll back together.
+- Added default Last.fm client cleanup when the enrichment service creates the client.
+- Added behavioral coverage for persisted enrichment rows, resume behavior, sparse/empty completion, partial tag retry, natural-key uniqueness, re-import invalidation, successful limit-change replacement, failed replacement API preservation, failed replacement write rollback, first-run write rollback, tag-top replacement rollback, evidence JSON, timestamp shape, and client lifecycle.
+
+Verified:
+
+- `python -m pytest tests/test_lastfm_enrichment.py -v` -> 11 passed
+- `python -m pytest` -> 66 passed
+- `python -m ruff check .` -> All checks passed
+- `python -m ruff format --check .` -> 26 files already formatted
+- `python -m mypy src` -> Success, no issues found in 17 source files

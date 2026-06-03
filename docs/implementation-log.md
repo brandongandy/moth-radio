@@ -91,3 +91,19 @@ Verified:
 - `python -m ruff check .` -> All checks passed
 - `python -m ruff format --check .` -> 18 files already formatted
 - `python -m mypy src` -> Success, no issues found in 12 source files
+
+## 2026-06-03: Task 5 cache-first Last.fm client
+
+Changed:
+
+- Added a cache-first Last.fm client for `artist.getSimilar`, `artist.getTopTags`, and `tag.getTopArtists`.
+- Added cache-hit behavior that skips rate limiting and HTTP when a fresh response is available.
+- Added Last.fm response parsing that handles singleton and list payload shapes and normalizes missing numeric or MBID values.
+- Added HTTP client ownership handling with explicit `close()`, `__enter__`, and `__exit__` behavior for internally created clients.
+- Added behavioral tests for cache hits, config errors, payload normalization, default timeout, and lifecycle ownership.
+
+Verified:
+
+- `python -m pytest tests/test_lastfm_client.py -v` -> 9 passed
+- `python -m ruff check src/scrobble_recs/apis/lastfm.py tests/test_lastfm_client.py docs/implementation-log.md`
+- `python -m ruff format --check .`

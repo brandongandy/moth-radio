@@ -962,7 +962,7 @@ Follow-up: `b76f920 test: harden api rate limiter` added review-requested covera
 - Create: `src/scrobble_recs/apis/lastfm.py`
 - Test: `tests/test_lastfm_client.py`
 
-- [ ] **Step 1: Write failing Last.fm client tests**
+- [x] **Step 1: Write failing Last.fm client tests**
 
 Create `tests/test_lastfm_client.py` with:
 
@@ -1099,7 +1099,7 @@ def test_get_artist_tags_and_tag_top_artists_parse_lastfm_payloads(tmp_path: Pat
     conn.close()
 ```
 
-- [ ] **Step 2: Run Last.fm client tests to verify they fail**
+- [x] **Step 2: Run Last.fm client tests to verify they fail**
 
 Run:
 
@@ -1113,7 +1113,7 @@ Expected:
 ModuleNotFoundError: No module named 'scrobble_recs.apis.lastfm'
 ```
 
-- [ ] **Step 3: Implement Last.fm client**
+- [x] **Step 3: Implement Last.fm client**
 
 Create `src/scrobble_recs/apis/lastfm.py` with:
 
@@ -1292,7 +1292,7 @@ def _float_value(value: Any) -> float:
         return 0.0
 ```
 
-- [ ] **Step 4: Run Last.fm client tests to verify they pass**
+- [x] **Step 4: Run Last.fm client tests to verify they pass**
 
 Run:
 
@@ -1306,7 +1306,7 @@ Expected:
 2 passed
 ```
 
-- [ ] **Step 5: Commit Last.fm client**
+- [x] **Step 5: Commit Last.fm client** _(Deviation note: the final Task 5 commit also updates `docs/implementation-log.md` to satisfy the repository Done requirement; that file is outside the Task 5 file list.)_
 
 Run:
 

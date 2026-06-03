@@ -29,3 +29,16 @@ python -m mypy src
 scrobble-recs import --config config.example.json
 scrobble-recs doctor --config config.example.json
 ```
+
+## Verification
+
+Milestone 1 was verified with:
+
+```bash
+python -m pytest
+python -m ruff check .
+python -m ruff format --check .
+python -m mypy src
+scrobble-recs import --config config.example.json
+scrobble-recs doctor --config config.example.json
+```

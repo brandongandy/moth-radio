@@ -52,6 +52,48 @@ def write_config(tmp_path: Path) -> Path:
     return config_path
 
 
+def write_config_with_obviousness_disabled(tmp_path: Path) -> Path:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "scrobble-recs",
+                    "db_path": str(tmp_path / "scrobbles.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": "tests/fixtures/tiny_lastfm_export.csv",
+                    "timezone": "UTC",
+                    "timestamp_column": "uts",
+                    "csv_columns": [
+                        "uts",
+                        "utc_time",
+                        "artist",
+                        "artist_mbid",
+                        "album",
+                        "album_mbid",
+                        "track",
+                        "track_mbid",
+                    ],
+                },
+                "recommendation": {
+                    "seed_artist_limit": 10,
+                    "similar_artists_per_seed": 10,
+                    "min_seed_scrobbles": 2,
+                    "obviousness": {
+                        "enabled": False,
+                        "tag_top_artists_limit": 100,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return config_path
+
+
 def test_recommendation_migration_creates_run_and_result_tables(tmp_path: Path) -> None:
     config = load_config(write_config(tmp_path))
     conn = initialize_database(config)
@@ -478,6 +520,52 @@ def test_generate_recommendations_hard_hides_obvious_high_affinity_artist(
     conn.close()
 
 
+def test_generate_recommendations_keeps_obvious_candidate_when_obviousness_disabled(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config_with_obviousness_disabled(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=104,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=104, tag="post-punk", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=104,
+        candidate_id=105,
+        candidate_name="Obvious Rank Two",
+        tag="post-punk",
+        tag_rank=2,
+        similarity=0.95,
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=5,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    assert _recommendation_names(conn, stats.run_id) == ["Obvious Rank Two"]
+    (obviousness, explanation_json) = conn.execute(
+        "SELECT obviousness, explanation FROM recommendation WHERE run_id = ? AND rank = 1",
+        [stats.run_id],
+    ).fetchone()
+    explanation = json.loads(explanation_json)
+    assert obviousness == 0.0
+    assert explanation["penalties"]["obviousness"] == 0.0
+    assert explanation["classification"]["is_obvious"] is False
+    conn.close()
+
+
 def test_generate_recommendations_keeps_obvious_rediscovery_candidate(
     tmp_path: Path,
 ) -> None:
@@ -676,6 +764,66 @@ def test_tag_focus_mode_boosts_matching_candidate_tags(tmp_path: Path) -> None:
         "Lower Similarity Gothic Fit",
         "Higher Similarity Punk Fit",
     ]
+    (explanation_json,) = conn.execute(
+        """
+        SELECT r.explanation
+        FROM recommendation r
+        JOIN artist a ON a.artist_id = r.artist_id
+        WHERE r.run_id = ?
+          AND a.canonical_name = 'Lower Similarity Gothic Fit'
+        """,
+        [stats.run_id],
+    ).fetchone()
+    explanation = json.loads(explanation_json)
+    assert explanation["tags"][0]["tag"] == "gothic rock"
+    assert explanation["tags"][0]["user_weight"] == pytest.approx(1.0)
+    conn.close()
+
+
+def test_tag_focus_mode_persists_effective_mode_scoring_metadata(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=140,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=140, tag="post-punk", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=140,
+        candidate_id=141,
+        candidate_name="Gothic Metadata Fit",
+        tag="gothic rock",
+        tag_rank=25,
+        similarity=0.55,
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=1,
+        mode="tag:gothic rock",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    (scoring_weights_json,) = conn.execute(
+        "SELECT scoring_weights FROM recommendation_run WHERE run_id = ?",
+        [stats.run_id],
+    ).fetchone()
+    scoring_weights = json.loads(scoring_weights_json)
+    mode = scoring_weights["mode"]
+    assert mode["lastfm_similarity_multiplier"] == pytest.approx(1.0)
+    assert mode["tag_similarity_multiplier"] == pytest.approx(1.25)
+    assert mode["rediscovery_multiplier"] == pytest.approx(1.0)
+    assert mode["tag_focus_boost"] == pytest.approx(1.60)
+    assert mode["high_affinity_tag_weight"] == pytest.approx(0.75)
+    assert mode["obviousness_enabled"] is True
     conn.close()
 
 

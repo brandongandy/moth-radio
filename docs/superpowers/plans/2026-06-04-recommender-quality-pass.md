@@ -1165,6 +1165,13 @@ at least one recommendation behavior test fails because mode settings and hard-h
 
 - [x] **Step 3: Wire mode settings into recommendation generation**
 
+Deviation note: mode metadata was extended beyond the original snippet to persist
+the effective scoring and hide knobs used at runtime
+(`lastfm_similarity_multiplier`, `tag_similarity_multiplier`,
+`rediscovery_multiplier`, `tag_focus_boost`, `high_affinity_tag_weight`, and
+`obviousness_enabled`) after code quality review found the run metadata was
+otherwise incomplete.
+
 Modify imports in `src/scrobble_recs/models/recommend.py`:
 
 ```python

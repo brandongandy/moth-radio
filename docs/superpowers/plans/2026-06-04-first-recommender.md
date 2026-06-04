@@ -1408,7 +1408,7 @@ git commit -m "feat: export persisted recommendations"
 - Modify: `src/scrobble_recs/cli.py`
 - Modify: `tests/test_cli.py`
 
-- [ ] **Step 1: Add failing CLI tests**
+- [x] **Step 1: Add failing CLI tests**
 
 Append these tests to `tests/test_cli.py`:
 
@@ -1471,7 +1471,7 @@ def test_export_command_writes_requested_format(tmp_path: Path, monkeypatch) -> 
     assert "Exported 3 recommendations" in result.output
 ```
 
-- [ ] **Step 2: Run CLI tests to verify they fail**
+- [x] **Step 2: Run CLI tests to verify they fail**
 
 Run:
 
@@ -1486,7 +1486,7 @@ FAILED tests/test_cli.py::test_recommend_command_generates_persisted_run
 FAILED tests/test_cli.py::test_export_command_writes_requested_format
 ```
 
-- [ ] **Step 3: Add CLI imports**
+- [x] **Step 3: Add CLI imports**
 
 Modify `src/scrobble_recs/cli.py` imports to include:
 
@@ -1497,7 +1497,7 @@ from scrobble_recs.export import ExportFormat, export_recommendations
 from scrobble_recs.models.recommend import RecommendationStats, generate_recommendations
 ```
 
-- [ ] **Step 4: Add recommend and export commands**
+- [x] **Step 4: Add recommend and export commands**
 
 Add these commands after `enrich_command` in `src/scrobble_recs/cli.py`:
 
@@ -1557,7 +1557,10 @@ def _print_recommendation_stats(stats: RecommendationStats) -> None:
     console.print(f"recommendations: {stats.recommendations}")
 ```
 
-- [ ] **Step 5: Run CLI tests to verify they pass**
+Deviation: Review-driven CLI error handling was added beyond the original happy-path command
+block, with focused validation tests for non-positive `--limit` and service `ValueError` output.
+
+- [x] **Step 5: Run CLI tests to verify they pass**
 
 Run:
 
@@ -1571,7 +1574,11 @@ Expected:
 5 passed
 ```
 
-- [ ] **Step 6: Commit CLI commands**
+Deviation: The plan expected `5 passed`, but current `python -m pytest tests/test_cli.py -v`
+produces `11 passed`: five original CLI tests, two Task 5 plan tests, and four
+review-driven validation/error tests.
+
+- [x] **Step 6: Commit CLI commands**
 
 Run:
 

@@ -152,3 +152,163 @@ def test_enrich_command_reports_disabled_lastfm_before_missing_key(tmp_path: Pat
     assert result.exit_code != 0
     assert "Last.fm enrichment is disabled" in result.output
     assert "Last.fm API key is required for enrichment" not in result.output
+
+
+def test_recommend_command_generates_persisted_run(tmp_path: Path, monkeypatch) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    calls: list[tuple[str, int, str | None]] = []
+
+    class FakeRecommendationStats:
+        run_id = "00000000-0000-0000-0000-000000000001"
+        mode = "balanced"
+        recommendations = 5
+
+    def fake_generate(conn, config, *, limit, mode=None):
+        calls.append((config.app.name, limit, mode))
+        return FakeRecommendationStats()
+
+    monkeypatch.setattr("scrobble_recs.cli.generate_recommendations", fake_generate)
+
+    result = runner.invoke(app, ["recommend", "--config", str(config_path), "--limit", "5"])
+
+    assert result.exit_code == 0
+    assert calls == [("scrobble-recs", 5, None)]
+    assert "Recommendation run complete" in result.output
+    assert "run id: 00000000-0000-0000-0000-000000000001" in result.output
+    assert "recommendations: 5" in result.output
+
+
+def test_recommend_command_passes_mode(tmp_path: Path, monkeypatch) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    calls: list[tuple[str, int, str | None]] = []
+
+    class FakeRecommendationStats:
+        run_id = "00000000-0000-0000-0000-000000000001"
+        mode = "fresh"
+        recommendations = 5
+
+    def fake_generate(conn, config, *, limit, mode=None):
+        calls.append((config.app.name, limit, mode))
+        return FakeRecommendationStats()
+
+    monkeypatch.setattr("scrobble_recs.cli.generate_recommendations", fake_generate)
+
+    result = runner.invoke(
+        app,
+        [
+            "recommend",
+            "--config",
+            str(config_path),
+            "--limit",
+            "5",
+            "--mode",
+            "fresh",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [("scrobble-recs", 5, "fresh")]
+    assert "mode: fresh" in result.output
+
+
+def test_recommend_command_rejects_nonpositive_limit(tmp_path: Path, monkeypatch) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    calls: list[int] = []
+
+    class FakeRecommendationStats:
+        run_id = "00000000-0000-0000-0000-000000000001"
+        mode = "balanced"
+        recommendations = 0
+
+    def fake_generate(conn, config, *, limit, mode=None):
+        calls.append(limit)
+        return FakeRecommendationStats()
+
+    monkeypatch.setattr("scrobble_recs.cli.generate_recommendations", fake_generate)
+
+    result = runner.invoke(app, ["recommend", "--config", str(config_path), "--limit", "0"])
+
+    assert result.exit_code == 1
+    assert calls == []
+    assert "Error: limit must be at least 1" in result.output
+
+
+def test_recommend_command_prints_generation_value_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+
+    def fake_generate(conn, config, *, limit, mode=None):
+        raise ValueError("no recommendation candidates found")
+
+    monkeypatch.setattr("scrobble_recs.cli.generate_recommendations", fake_generate)
+
+    result = runner.invoke(app, ["recommend", "--config", str(config_path), "--limit", "5"])
+
+    assert result.exit_code == 1
+    assert "Error: no recommendation candidates found" in result.output
+
+
+def test_export_command_writes_requested_format(tmp_path: Path, monkeypatch) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    output = tmp_path / "recs.csv"
+    calls: list[tuple[Path, str, str | None]] = []
+
+    def fake_export(conn, output_path, *, format_name, run_id=None):
+        calls.append((output_path, format_name, run_id))
+        output_path.write_text("rank,artist\n", encoding="utf-8")
+        return 3
+
+    monkeypatch.setattr("scrobble_recs.cli.export_recommendations", fake_export)
+
+    result = runner.invoke(
+        app,
+        [
+            "export",
+            "--config",
+            str(config_path),
+            "--format",
+            "csv",
+            "--output",
+            str(output),
+            "--run-id",
+            "00000000-0000-0000-0000-000000000001",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [(output, "csv", "00000000-0000-0000-0000-000000000001")]
+    assert "Exported 3 recommendations" in result.output
+
+
+def test_export_command_prints_export_value_error(tmp_path: Path, monkeypatch) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    output = tmp_path / "recs.csv"
+
+    def fake_export(conn, output_path, *, format_name, run_id=None):
+        raise ValueError("no recommendation runs exist")
+
+    monkeypatch.setattr("scrobble_recs.cli.export_recommendations", fake_export)
+
+    result = runner.invoke(
+        app,
+        [
+            "export",
+            "--config",
+            str(config_path),
+            "--format",
+            "csv",
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Error: no recommendation runs exist" in result.output

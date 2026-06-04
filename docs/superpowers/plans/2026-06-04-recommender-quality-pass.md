@@ -397,7 +397,7 @@ git commit -m "feat: add recommendation mode settings"
 - Modify: `src/scrobble_recs/models/profile.py`
 - Modify: `tests/test_profile.py`
 
-- [ ] **Step 1: Add failing profile-region tests**
+- [x] **Step 1: Add failing profile-region tests**
 
 Append these tests to `tests/test_profile.py`:
 
@@ -566,7 +566,7 @@ def _insert_profile_artist(
     )
 ```
 
-- [ ] **Step 2: Run profile tests to verify they fail**
+- [x] **Step 2: Run profile tests to verify they fail**
 
 Run:
 
@@ -580,7 +580,16 @@ Expected:
 TypeError: select_seed_artists() got an unexpected keyword argument 'regions'
 ```
 
-- [ ] **Step 3: Update seed model and selection algorithm**
+- [x] **Step 3: Update seed model and selection algorithm**
+
+  Deviation: normalized each mode region limit against the caller `limit` before
+  selecting per-region seeds. The literal snippet used the mode's large absolute
+  region limits directly, which caused small seed selections to include every
+  artist in multiple regions and failed the Step 1 behavioral tests.
+
+  Deviation: treated an explicit empty `regions=()` sequence as no seed regions
+  instead of falling back to the default recent region, so `None` is the only
+  value that requests default recent selection.
 
 Modify `src/scrobble_recs/models/profile.py` to:
 
@@ -732,7 +741,7 @@ def _region_score(row: dict[str, object], region_name: str) -> float:
     return log1p(play_count)
 ```
 
-- [ ] **Step 4: Run profile tests to verify they pass**
+- [x] **Step 4: Run profile tests to verify they pass**
 
 Run:
 
@@ -746,7 +755,7 @@ Expected:
 5 passed
 ```
 
-- [ ] **Step 5: Run recommendation tests to catch integration failures**
+- [x] **Step 5: Run recommendation tests to catch integration failures**
 
 Run:
 
@@ -762,7 +771,7 @@ all existing recommendation tests pass
 
 If this fails because `generate_recommendations()` has not passed `regions` yet, keep the fallback behavior in `select_seed_artists()` as shown in Step 3 and defer the recommender integration to Task 3.
 
-- [ ] **Step 6: Commit multi-region seed selection**
+- [x] **Step 6: Commit multi-region seed selection**
 
 Run:
 

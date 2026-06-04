@@ -74,6 +74,7 @@ def generate_recommendations(
     )
     seed_ids = {seed.artist_id for seed in seeds}
     tag_profile = _load_user_tag_profile(conn, seeds)
+    effective_tag_profile = _apply_tag_focus(tag_profile, mode_settings)
     scoring_data = _load_scoring_data(conn, seed_ids)
     scores = _score_candidates(config, mode_settings, seeds, seed_ids, tag_profile, scoring_data)
     ranked_without_explanations = sorted(
@@ -87,7 +88,7 @@ def generate_recommendations(
                 score,
                 scoring_data,
                 seed_weight_by_id={seed.artist_id: seed.seed_weight for seed in seeds},
-                tag_profile=tag_profile,
+                tag_profile=effective_tag_profile,
             ),
         )
         for score in ranked_without_explanations
@@ -253,6 +254,7 @@ def _score_candidates(
     total_seed_weight = sum(seed_weight_by_id.values()) or 1.0
     scores: list[_CandidateScore] = []
     focused_tag_profile = _apply_tag_focus(tag_profile, mode)
+    obviousness_enabled = config.recommendation.obviousness.enabled
     for artist_id in scoring_data.candidates:
         if artist_id in seed_ids:
             continue
@@ -267,8 +269,12 @@ def _score_candidates(
             scoring_data.similarity_by_target,
         )
         tag_score = _tag_similarity_score(artist_id, focused_tag_profile, scoring_data)
-        obviousness = _obviousness(artist_id, focused_tag_profile, scoring_data)
-        if _hard_hides_obvious_candidate(
+        obviousness = (
+            _obviousness(artist_id, focused_tag_profile, scoring_data)
+            if obviousness_enabled
+            else 0.0
+        )
+        if obviousness_enabled and _hard_hides_obvious_candidate(
             artist_id,
             mode,
             focused_tag_profile,
@@ -284,7 +290,9 @@ def _score_candidates(
             rediscovery * mode.rediscovery_multiplier,
         )
         knownness_penalty = 0.40 * max(0.0, knownness - mode.max_knownness)
-        obviousness_penalty = mode.obviousness_penalty_weight * obviousness
+        obviousness_penalty = (
+            mode.obviousness_penalty_weight * obviousness if obviousness_enabled else 0.0
+        )
         final_score = raw_score - knownness_penalty - obviousness_penalty
         if final_score <= 0:
             continue
@@ -544,6 +552,14 @@ def _persist_run(
                             "hard_hide_top_tag_rank": mode_settings.hard_hide_top_tag_rank,
                             "same_primary_tag_cap": mode_settings.same_primary_tag_cap,
                             "focus_tags": list(mode_settings.focus_tags),
+                            "lastfm_similarity_multiplier": (
+                                mode_settings.lastfm_similarity_multiplier
+                            ),
+                            "tag_similarity_multiplier": (mode_settings.tag_similarity_multiplier),
+                            "rediscovery_multiplier": mode_settings.rediscovery_multiplier,
+                            "tag_focus_boost": mode_settings.tag_focus_boost,
+                            "high_affinity_tag_weight": mode_settings.high_affinity_tag_weight,
+                            "obviousness_enabled": config.recommendation.obviousness.enabled,
                         },
                     },
                     sort_keys=True,

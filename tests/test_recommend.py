@@ -10,6 +10,7 @@ from scrobble_recs.config import load_config
 from scrobble_recs.db import initialize_database
 from scrobble_recs.enrichment.lastfm import run_lastfm_enrichment
 from scrobble_recs.importers.lastfm_csv import import_lastfm_csv
+from scrobble_recs.models.feedback import record_feedback_event
 from scrobble_recs.models.recommend import generate_recommendations
 
 
@@ -944,6 +945,786 @@ def test_generate_recommendations_persists_diversity_penalty_for_similar_followu
     conn.close()
 
 
+def test_generate_recommendations_applies_direct_feedback_scores(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=300,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=300, tag="post-punk", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=300,
+        candidate_id=301,
+        candidate_name="Lower Similarity Saved",
+        tag="post-punk",
+        tag_rank=30,
+        similarity=0.62,
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=300,
+        candidate_id=302,
+        candidate_name="Higher Similarity Neutral",
+        tag="post-punk",
+        tag_rank=31,
+        similarity=0.70,
+    )
+    _insert_run_for_feedback(conn, run_id="00000000-0000-0000-0000-000000000301")
+    record_feedback_event(
+        conn,
+        run_id="00000000-0000-0000-0000-000000000301",
+        artist_id=301,
+        action="save",
+        context={"tags": ["post-punk"]},
+        feedback_id="00000000-0000-0000-0000-000000000401",
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=2,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    assert _recommendation_names(conn, stats.run_id) == [
+        "Lower Similarity Saved",
+        "Higher Similarity Neutral",
+    ]
+    row = conn.execute(
+        """
+        SELECT r.feedback_score, r.explanation
+        FROM recommendation r
+        WHERE r.run_id = ?
+          AND r.artist_id = 301
+        """,
+        [stats.run_id],
+    ).fetchone()
+    assert row[0] > 0.0
+    explanation = json.loads(row[1])
+    assert explanation["feedback"]["score"] == pytest.approx(row[0])
+    assert explanation["feedback"]["effects"] == ["artist"]
+    assert explanation["feedback"]["contributions"]["artist"] > 0.0
+    assert explanation["feedback"]["contributions"]["tag"] == 0.0
+    assert explanation["feedback"]["contributions"]["neighborhood"] == 0.0
+    conn.close()
+
+
+def test_generate_recommendations_keeps_saved_current_candidate_with_outgoing_edges(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=330,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=330, tag="post-punk", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=330,
+        candidate_id=331,
+        candidate_name="Saved Candidate With Edges",
+        tag="post-punk",
+        tag_rank=30,
+        similarity=0.62,
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=330,
+        candidate_id=332,
+        candidate_name="Higher Similarity Neutral",
+        tag="post-punk",
+        tag_rank=31,
+        similarity=0.70,
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=331,
+        candidate_id=333,
+        candidate_name="Saved Candidate Neighbor",
+        tag="coldwave",
+        tag_rank=40,
+        similarity=0.95,
+    )
+    _insert_run_for_feedback(conn, run_id="00000000-0000-0000-0000-000000000304")
+    record_feedback_event(
+        conn,
+        run_id="00000000-0000-0000-0000-000000000304",
+        artist_id=331,
+        action="save",
+        context={"tags": ["post-punk"]},
+        feedback_id="00000000-0000-0000-0000-000000000404",
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=3,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    assert _recommendation_names(conn, stats.run_id)[:2] == [
+        "Saved Candidate With Edges",
+        "Higher Similarity Neutral",
+    ]
+    row = conn.execute(
+        """
+        SELECT r.feedback_score, r.explanation
+        FROM recommendation r
+        WHERE r.run_id = ?
+          AND r.artist_id = 331
+        """,
+        [stats.run_id],
+    ).fetchone()
+    assert row[0] > 0.0
+    explanation = json.loads(row[1])
+    assert explanation["feedback"]["effects"] == ["artist"]
+    assert explanation["feedback"]["contributions"]["artist"] > 0.0
+
+    (seed_summary_json,) = conn.execute(
+        "SELECT seed_summary FROM recommendation_run WHERE run_id = ?",
+        [stats.run_id],
+    ).fetchone()
+    seed_summary = json.loads(seed_summary_json)
+    assert "feedback" not in seed_summary["regions"]
+    conn.close()
+
+
+def test_generate_recommendations_excludes_hidden_feedback_artist(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=310,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=310, tag="post-punk", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=310,
+        candidate_id=311,
+        candidate_name="Hidden Artist",
+        tag="post-punk",
+        tag_rank=30,
+        similarity=0.90,
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=310,
+        candidate_id=312,
+        candidate_name="Visible Artist",
+        tag="post-punk",
+        tag_rank=31,
+        similarity=0.70,
+    )
+    _insert_run_for_feedback(conn, run_id="00000000-0000-0000-0000-000000000302")
+    record_feedback_event(
+        conn,
+        run_id="00000000-0000-0000-0000-000000000302",
+        artist_id=311,
+        action="hide_artist",
+        feedback_id="00000000-0000-0000-0000-000000000402",
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=2,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    assert _recommendation_names(conn, stats.run_id) == ["Visible Artist"]
+    conn.close()
+
+
+def test_generate_recommendations_uses_more_like_this_as_future_seed(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=320,
+        name="Original Seed",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=320, tag="post-punk", weight=100.0)
+    _insert_scoring_artist(
+        conn,
+        artist_id=321,
+        name="Feedback Seed",
+        play_count=0,
+        lifetime_weight=0.0,
+        recent_weight=0.0,
+        knownness=0.0,
+        rediscovery_score=0.0,
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=321,
+        candidate_id=322,
+        candidate_name="Feedback Neighborhood Artist",
+        tag="coldwave",
+        tag_rank=40,
+        similarity=0.95,
+    )
+    _insert_run_for_feedback(conn, run_id="00000000-0000-0000-0000-000000000303")
+    record_feedback_event(
+        conn,
+        run_id="00000000-0000-0000-0000-000000000303",
+        artist_id=321,
+        action="more_like_this",
+        context={"tags": ["coldwave"]},
+        feedback_id="00000000-0000-0000-0000-000000000403",
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=2,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    assert _recommendation_names(conn, stats.run_id) == ["Feedback Neighborhood Artist"]
+    row = conn.execute(
+        "SELECT feedback_score FROM recommendation WHERE run_id = ? AND artist_id = 322",
+        [stats.run_id],
+    ).fetchone()
+    assert row[0] > 0.0
+    (explanation_json,) = conn.execute(
+        "SELECT explanation FROM recommendation WHERE run_id = ? AND artist_id = 322",
+        [stats.run_id],
+    ).fetchone()
+    explanation = json.loads(explanation_json)
+    assert "neighborhood" in explanation["feedback"]["effects"]
+    assert "artist" not in explanation["feedback"]["effects"]
+    assert explanation["feedback"]["contributions"]["neighborhood"] > 0.0
+    assert explanation["feedback"]["contributions"]["artist"] == 0.0
+    (seed_summary_json,) = conn.execute(
+        "SELECT seed_summary FROM recommendation_run WHERE run_id = ?",
+        [stats.run_id],
+    ).fetchone()
+    seed_summary = json.loads(seed_summary_json)
+    assert seed_summary["regions"]["feedback"] == 1
+    conn.close()
+
+
+def test_generate_recommendations_does_not_mode_multiply_feedback_seed_weight(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=380,
+        name="Original Seed",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=380, tag="post-punk", weight=100.0)
+    _insert_scoring_artist(
+        conn,
+        artist_id=381,
+        name="Feedback Seed",
+        play_count=0,
+        lifetime_weight=0.0,
+        recent_weight=0.0,
+        knownness=0.0,
+        rediscovery_score=0.0,
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=381,
+        candidate_id=382,
+        candidate_name="Feedback Neighbor",
+        tag="coldwave",
+        tag_rank=40,
+        similarity=0.95,
+    )
+    _insert_run_for_feedback(conn, run_id="00000000-0000-0000-0000-000000000309")
+    record_feedback_event(
+        conn,
+        run_id="00000000-0000-0000-0000-000000000309",
+        artist_id=381,
+        action="more_like_this",
+        feedback_id="00000000-0000-0000-0000-000000000409",
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=1,
+        mode="safe",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    (seed_summary_json,) = conn.execute(
+        "SELECT seed_summary FROM recommendation_run WHERE run_id = ?",
+        [stats.run_id],
+    ).fetchone()
+    seed_summary = json.loads(seed_summary_json)
+    feedback_seed = next(
+        seed for seed in seed_summary["top_seeds"] if seed["artist"] == "Feedback Seed"
+    )
+    assert feedback_seed["seed_weight"] == pytest.approx(0.25)
+    assert seed_summary["regions"]["feedback"] == 1
+    assert set(seed_summary["regions"]) == {"feedback", "lifetime", "recent"}
+    conn.close()
+
+
+def test_generate_recommendations_applies_tag_feedback_scores(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=340,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=340, tag="post-punk", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=340,
+        candidate_id=341,
+        candidate_name="Lower Similarity Boosted Tag",
+        tag="coldwave",
+        tag_rank=30,
+        similarity=0.62,
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=340,
+        candidate_id=342,
+        candidate_name="Higher Similarity Neutral Tag",
+        tag="noise",
+        tag_rank=31,
+        similarity=0.65,
+    )
+    _insert_run_for_feedback(conn, run_id="00000000-0000-0000-0000-000000000305")
+    record_feedback_event(
+        conn,
+        run_id="00000000-0000-0000-0000-000000000305",
+        artist_id=341,
+        action="boost_tag",
+        context={"tags": ["coldwave"]},
+        feedback_id="00000000-0000-0000-0000-000000000405",
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=2,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    assert _recommendation_names(conn, stats.run_id) == [
+        "Lower Similarity Boosted Tag",
+        "Higher Similarity Neutral Tag",
+    ]
+    row = conn.execute(
+        """
+        SELECT r.feedback_score, r.explanation
+        FROM recommendation r
+        WHERE r.run_id = ?
+          AND r.artist_id = 341
+        """,
+        [stats.run_id],
+    ).fetchone()
+    assert row[0] > 0.0
+    explanation = json.loads(row[1])
+    assert explanation["feedback"]["effects"] == ["tag"]
+    assert explanation["feedback"]["contributions"]["artist"] == 0.0
+    assert explanation["feedback"]["contributions"]["tag"] > 0.0
+    assert explanation["feedback"]["contributions"]["neighborhood"] == 0.0
+    conn.close()
+
+
+def test_generate_recommendations_matches_feedback_to_mixed_case_candidate_tags(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=390,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=390, tag="Post-Punk", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=390,
+        candidate_id=391,
+        candidate_name="Lower Similarity Mixed Case Tag",
+        tag="ColdWave",
+        tag_rank=30,
+        similarity=0.62,
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=390,
+        candidate_id=392,
+        candidate_name="Higher Similarity Neutral Tag",
+        tag="Noise",
+        tag_rank=31,
+        similarity=0.65,
+    )
+    _insert_run_for_feedback(conn, run_id="00000000-0000-0000-0000-000000000310")
+    record_feedback_event(
+        conn,
+        run_id="00000000-0000-0000-0000-000000000310",
+        artist_id=391,
+        action="boost_tag",
+        context={"tags": ["coldwave"]},
+        feedback_id="00000000-0000-0000-0000-000000000410",
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=2,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    assert _recommendation_names(conn, stats.run_id) == [
+        "Lower Similarity Mixed Case Tag",
+        "Higher Similarity Neutral Tag",
+    ]
+    row = conn.execute(
+        """
+        SELECT r.feedback_score, r.explanation
+        FROM recommendation r
+        WHERE r.run_id = ?
+          AND r.artist_id = 391
+        """,
+        [stats.run_id],
+    ).fetchone()
+    assert row[0] > 0.0
+    explanation = json.loads(row[1])
+    assert explanation["feedback"]["effects"] == ["tag"]
+    assert explanation["feedback"]["contributions"]["tag"] > 0.0
+    conn.close()
+
+
+def test_generate_recommendations_marks_already_known_candidates_with_knownness_penalty(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=350,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=350, tag="post-punk", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=350,
+        candidate_id=351,
+        candidate_name="Already Known Candidate",
+        tag="coldwave",
+        tag_rank=30,
+        similarity=0.95,
+    )
+    _insert_run_for_feedback(conn, run_id="00000000-0000-0000-0000-000000000306")
+    record_feedback_event(
+        conn,
+        run_id="00000000-0000-0000-0000-000000000306",
+        artist_id=351,
+        action="already_know",
+        feedback_id="00000000-0000-0000-0000-000000000406",
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=1,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    row = conn.execute(
+        """
+        SELECT r.knownness, r.feedback_score, r.explanation
+        FROM recommendation r
+        WHERE r.run_id = ?
+          AND r.artist_id = 351
+        """,
+        [stats.run_id],
+    ).fetchone()
+    assert row[0] == pytest.approx(1.0)
+    assert row[1] < 0.0
+    explanation = json.loads(row[2])
+    assert explanation["penalties"]["knownness"] > 0.0
+    assert explanation["feedback"]["effects"] == ["artist"]
+    conn.close()
+
+
+def test_generate_recommendations_applies_too_obvious_tag_feedback_penalty(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=360,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=360, tag="post-punk", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=360,
+        candidate_id=361,
+        candidate_name="Too Obvious Tag Candidate",
+        tag="synthpop",
+        tag_rank=30,
+        similarity=0.95,
+    )
+    _insert_run_for_feedback(conn, run_id="00000000-0000-0000-0000-000000000307")
+    record_feedback_event(
+        conn,
+        run_id="00000000-0000-0000-0000-000000000307",
+        artist_id=999,
+        action="too_obvious",
+        context={"tags": ["synthpop"]},
+        feedback_id="00000000-0000-0000-0000-000000000407",
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=1,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    row = conn.execute(
+        """
+        SELECT r.obviousness, r.feedback_score, r.explanation
+        FROM recommendation r
+        WHERE r.run_id = ?
+          AND r.artist_id = 361
+        """,
+        [stats.run_id],
+    ).fetchone()
+    assert row[0] > 0.0
+    assert row[1] < 0.0
+    explanation = json.loads(row[2])
+    assert explanation["penalties"]["obviousness"] > 0.0
+    assert explanation["feedback"]["effects"] == ["tag"]
+    assert explanation["feedback"]["contributions"]["artist"] == 0.0
+    assert explanation["feedback"]["contributions"]["tag"] < 0.0
+    assert explanation["feedback"]["contributions"]["neighborhood"] == 0.0
+    conn.close()
+
+
+def test_generate_recommendations_demotes_suppressed_feedback_candidate(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=370,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=370, tag="post-punk", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=370,
+        candidate_id=371,
+        candidate_name="Higher Similarity Suppressed",
+        tag="post-punk",
+        tag_rank=30,
+        similarity=0.76,
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=370,
+        candidate_id=372,
+        candidate_name="Lower Similarity Neutral",
+        tag="post-punk",
+        tag_rank=31,
+        similarity=0.70,
+    )
+    _insert_run_for_feedback(conn, run_id="00000000-0000-0000-0000-000000000308")
+    record_feedback_event(
+        conn,
+        run_id="00000000-0000-0000-0000-000000000308",
+        artist_id=371,
+        action="less_like_this",
+        feedback_id="00000000-0000-0000-0000-000000000408",
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=2,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    assert _recommendation_names(conn, stats.run_id) == [
+        "Lower Similarity Neutral",
+        "Higher Similarity Suppressed",
+    ]
+    row = conn.execute(
+        """
+        SELECT r.feedback_score, r.explanation
+        FROM recommendation r
+        WHERE r.run_id = ?
+          AND r.artist_id = 371
+        """,
+        [stats.run_id],
+    ).fetchone()
+    assert row[0] < 0.0
+    explanation = json.loads(row[1])
+    assert explanation["feedback"]["effects"] == ["artist"]
+    assert explanation["feedback"]["contributions"]["artist"] < 0.0
+    conn.close()
+
+
+def test_generate_recommendations_applies_suppressed_feedback_neighborhood(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=400,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=400, tag="post-punk", weight=100.0)
+    _insert_scoring_artist(
+        conn,
+        artist_id=401,
+        name="Suppressed Feedback Source",
+        play_count=0,
+        lifetime_weight=0.0,
+        recent_weight=0.0,
+        knownness=0.0,
+        rediscovery_score=0.0,
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=400,
+        candidate_id=402,
+        candidate_name="Suppressed Neighborhood Candidate",
+        tag="post-punk",
+        tag_rank=30,
+        similarity=0.80,
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=401,
+        candidate_id=402,
+        candidate_name="Suppressed Neighborhood Candidate",
+        tag="darkwave",
+        tag_rank=30,
+        similarity=0.95,
+        insert_artist=False,
+    )
+    _insert_run_for_feedback(conn, run_id="00000000-0000-0000-0000-000000000311")
+    record_feedback_event(
+        conn,
+        run_id="00000000-0000-0000-0000-000000000311",
+        artist_id=401,
+        action="less_like_this",
+        feedback_id="00000000-0000-0000-0000-000000000411",
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=1,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    row = conn.execute(
+        """
+        SELECT r.feedback_score, r.explanation
+        FROM recommendation r
+        WHERE r.run_id = ?
+          AND r.artist_id = 402
+        """,
+        [stats.run_id],
+    ).fetchone()
+    assert row[0] < 0.0
+    explanation = json.loads(row[1])
+    assert explanation["feedback"]["effects"] == ["neighborhood"]
+    assert explanation["feedback"]["contributions"]["artist"] == 0.0
+    assert explanation["feedback"]["contributions"]["tag"] == 0.0
+    assert explanation["feedback"]["contributions"]["neighborhood"] < 0.0
+    conn.close()
+
+
 def _insert_scoring_artist(
     conn,
     *,
@@ -1020,19 +1801,26 @@ def _insert_candidate_from_seed(
     tag: str,
     tag_rank: int,
     similarity: float,
+    insert_artist: bool = True,
 ) -> None:
-    conn.execute(
-        """
-        INSERT INTO artist (
-            artist_id,
-            canonical_name,
-            artist_key,
-            lastfm_name
+    if insert_artist:
+        conn.execute(
+            """
+            INSERT INTO artist (
+                artist_id,
+                canonical_name,
+                artist_key,
+                lastfm_name
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                candidate_id,
+                candidate_name,
+                candidate_name.casefold().replace(" ", "-"),
+                candidate_name,
+            ],
         )
-        VALUES (?, ?, ?, ?)
-        """,
-        [candidate_id, candidate_name, candidate_name.casefold().replace(" ", "-"), candidate_name],
-    )
     conn.execute(
         """
         INSERT INTO artist_similarity_edge (
@@ -1078,3 +1866,19 @@ def _recommendation_names(conn, run_id: str) -> list[str]:
             [run_id],
         ).fetchall()
     ]
+
+
+def _insert_run_for_feedback(conn, *, run_id: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO recommendation_run (
+            run_id,
+            config_hash,
+            mode,
+            seed_summary,
+            scoring_weights
+        )
+        VALUES (?, 'hash', 'balanced', '{}', '{}')
+        """,
+        [run_id],
+    )

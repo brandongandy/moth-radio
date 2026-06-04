@@ -11,6 +11,12 @@ from uuid import uuid4
 from duckdb import DuckDBPyConnection
 
 from scrobble_recs.config import RecommendationWeightsConfig, ScrobbleRecsConfig
+from scrobble_recs.models.feedback import (
+    FeedbackProfile,
+    apply_feedback_to_tag_profile,
+    feedback_obviousness_for_candidate,
+    load_feedback_profile,
+)
 from scrobble_recs.models.knownness import ArtistListeningInput, compute_artist_listening_scores
 from scrobble_recs.models.modes import RecommendationModeSettings, resolve_recommendation_mode
 from scrobble_recs.models.profile import SeedArtist, select_seed_artists
@@ -31,6 +37,9 @@ class _CandidateScore:
     raw_score: float
     lastfm_similarity_score: float
     tag_similarity_score: float
+    feedback_score: float
+    feedback_contributions: dict[str, float]
+    feedback_effects: list[str]
     rediscovery_score: float
     knownness: float
     obviousness: float
@@ -46,9 +55,17 @@ class _ScoringData:
     artist_names: dict[int, str]
     candidates: set[int]
     similarity_by_target: dict[int, list[tuple[int, float]]]
+    feedback_similarity_by_target: dict[int, list[tuple[int, float]]]
     direct_tags_by_artist: dict[int, dict[str, float]]
     tag_ranks_by_artist: dict[int, list[tuple[str, int]]]
     listening_by_artist: dict[int, tuple[float, float]]
+
+
+@dataclass(frozen=True)
+class _FeedbackScore:
+    score: float
+    contributions: dict[str, float]
+    effects: list[str]
 
 
 def generate_recommendations(
@@ -66,17 +83,30 @@ def generate_recommendations(
     resolved_mode = mode_settings.name
     resolved_as_of = as_of or datetime.now(tz=UTC).replace(tzinfo=None)
     _refresh_artist_listening_scores(conn, resolved_as_of)
+    feedback_profile = load_feedback_profile(conn)
     seeds = select_seed_artists(
         conn,
         limit=config.recommendation.seed_artist_limit,
         min_scrobbles=config.recommendation.min_seed_scrobbles,
         regions=mode_settings.seed_regions,
     )
+    seeds = _add_feedback_seed_artists(conn, seeds, feedback_profile)
     seed_ids = {seed.artist_id for seed in seeds}
     tag_profile = _load_user_tag_profile(conn, seeds)
-    effective_tag_profile = _apply_tag_focus(tag_profile, mode_settings)
-    scoring_data = _load_scoring_data(conn, seed_ids)
-    scores = _score_candidates(config, mode_settings, seeds, seed_ids, tag_profile, scoring_data)
+    effective_tag_profile = apply_feedback_to_tag_profile(
+        _apply_tag_focus(tag_profile, mode_settings),
+        feedback_profile,
+    )
+    scoring_data = _load_scoring_data(conn, seed_ids, feedback_profile)
+    scores = _score_candidates(
+        config,
+        mode_settings,
+        seeds,
+        seed_ids,
+        effective_tag_profile,
+        scoring_data,
+        feedback_profile,
+    )
     ranked_without_explanations = _rerank_for_diversity(
         scores,
         mode_settings,
@@ -100,6 +130,75 @@ def generate_recommendations(
     run_id = str(uuid4())
     _persist_run(conn, run_id, resolved_mode, config, mode_settings, seeds, ranked)
     return RecommendationStats(run_id=run_id, mode=resolved_mode, recommendations=len(ranked))
+
+
+def _add_feedback_seed_artists(
+    conn: DuckDBPyConnection,
+    seeds: list[SeedArtist],
+    feedback_profile: FeedbackProfile,
+) -> list[SeedArtist]:
+    existing_seed_ids = {seed.artist_id for seed in seeds}
+    current_candidate_ids = _candidate_targets_from_seeds(conn, existing_seed_ids)
+    feedback_seed_ids = sorted(
+        feedback_profile.boosted_seed_artist_ids
+        - feedback_profile.hidden_artist_ids
+        - feedback_profile.suppressed_seed_artist_ids
+        - existing_seed_ids
+        - current_candidate_ids
+    )
+    if not feedback_seed_ids:
+        return seeds
+    rows = conn.execute(
+        """
+        SELECT
+            a.artist_id,
+            a.canonical_name,
+            a.artist_key,
+            coalesce(nullif(a.lastfm_name, ''), a.canonical_name) AS lastfm_name
+        FROM artist a
+        WHERE a.artist_id IN (
+            SELECT source_artist_id
+            FROM artist_similarity_edge
+            WHERE source = 'lastfm'
+              AND source_artist_id IN (SELECT unnest(?))
+        )
+        ORDER BY a.canonical_name
+        """,
+        [feedback_seed_ids],
+    ).fetchall()
+    feedback_seeds = [
+        SeedArtist(
+            artist_id=int(row[0]),
+            name=str(row[1]),
+            artist_key=str(row[2]),
+            lastfm_name=str(row[3]),
+            play_count=0,
+            seed_weight=max(0.25, feedback_profile.artist_adjustments.get(int(row[0]), 0.0)),
+            regions=("feedback",),
+        )
+        for row in rows
+    ]
+    return seeds + feedback_seeds
+
+
+def _candidate_targets_from_seeds(
+    conn: DuckDBPyConnection,
+    seed_ids: set[int],
+) -> set[int]:
+    if not seed_ids:
+        return set()
+    return {
+        int(target_artist_id)
+        for (target_artist_id,) in conn.execute(
+            """
+            SELECT DISTINCT target_artist_id
+            FROM artist_similarity_edge
+            WHERE source = 'lastfm'
+              AND source_artist_id IN (SELECT unnest(?))
+            """,
+            [sorted(seed_ids)],
+        ).fetchall()
+    }
 
 
 def _refresh_artist_listening_scores(conn: DuckDBPyConnection, as_of: datetime) -> None:
@@ -166,7 +265,10 @@ def _load_user_tag_profile(
         seed_weight = seed_weight_by_id.get(int(artist_id))
         if seed_weight is None:
             continue
-        profile[str(tag)] = profile.get(str(tag), 0.0) + seed_weight * float(normalized_weight)
+        normalized_tag = _normalize_tag_key(tag)
+        profile[normalized_tag] = profile.get(normalized_tag, 0.0) + seed_weight * float(
+            normalized_weight
+        )
 
     max_weight = max(profile.values(), default=0.0)
     if max_weight <= 0:
@@ -174,7 +276,11 @@ def _load_user_tag_profile(
     return {tag: weight / max_weight for tag, weight in profile.items()}
 
 
-def _load_scoring_data(conn: DuckDBPyConnection, seed_ids: set[int]) -> _ScoringData:
+def _load_scoring_data(
+    conn: DuckDBPyConnection,
+    seed_ids: set[int],
+    feedback_profile: FeedbackProfile,
+) -> _ScoringData:
     similarity_by_target: dict[int, list[tuple[int, float]]] = {}
     candidates = set[int]()
     for source_artist_id, target_artist_id, normalized_score in conn.execute(
@@ -190,6 +296,27 @@ def _load_scoring_data(conn: DuckDBPyConnection, seed_ids: set[int]) -> _Scoring
             (int(source_artist_id), float(normalized_score))
         )
 
+    feedback_similarity_by_target: dict[int, list[tuple[int, float]]] = {}
+    feedback_neighborhood_source_ids = (
+        feedback_profile.boosted_seed_artist_ids | feedback_profile.suppressed_seed_artist_ids
+    ) - feedback_profile.hidden_artist_ids
+    if feedback_neighborhood_source_ids:
+        for source_artist_id, target_artist_id, normalized_score in conn.execute(
+            """
+            SELECT source_artist_id, target_artist_id, normalized_score
+            FROM artist_similarity_edge
+            WHERE source = 'lastfm'
+              AND source_artist_id IN (SELECT unnest(?))
+            """,
+            [sorted(feedback_neighborhood_source_ids)],
+        ).fetchall():
+            source_id = int(source_artist_id)
+            target_id = int(target_artist_id)
+            candidates.add(target_id)
+            feedback_similarity_by_target.setdefault(target_id, []).append(
+                (source_id, float(normalized_score))
+            )
+
     direct_tags_by_artist: dict[int, dict[str, float]] = {}
     for artist_id, tag, normalized_weight in conn.execute(
         """
@@ -198,7 +325,9 @@ def _load_scoring_data(conn: DuckDBPyConnection, seed_ids: set[int]) -> _Scoring
         WHERE source = 'lastfm'
         """
     ).fetchall():
-        direct_tags_by_artist.setdefault(int(artist_id), {})[str(tag)] = float(normalized_weight)
+        direct_tags_by_artist.setdefault(int(artist_id), {})[_normalize_tag_key(tag)] = float(
+            normalized_weight
+        )
 
     tag_ranks_by_artist: dict[int, list[tuple[str, int]]] = {}
     for artist_id, tag, tag_rank in conn.execute(
@@ -210,7 +339,7 @@ def _load_scoring_data(conn: DuckDBPyConnection, seed_ids: set[int]) -> _Scoring
     ).fetchall():
         artist = int(artist_id)
         candidates.add(artist)
-        tag_ranks_by_artist.setdefault(artist, []).append((str(tag), int(tag_rank)))
+        tag_ranks_by_artist.setdefault(artist, []).append((_normalize_tag_key(tag), int(tag_rank)))
 
     listening_by_artist = {
         int(artist_id): (float(knownness), float(rediscovery_score))
@@ -239,6 +368,7 @@ def _load_scoring_data(conn: DuckDBPyConnection, seed_ids: set[int]) -> _Scoring
         artist_names=artist_names,
         candidates=candidates - seed_ids,
         similarity_by_target=similarity_by_target,
+        feedback_similarity_by_target=feedback_similarity_by_target,
         direct_tags_by_artist=direct_tags_by_artist,
         tag_ranks_by_artist=tag_ranks_by_artist,
         listening_by_artist=listening_by_artist,
@@ -252,35 +382,63 @@ def _score_candidates(
     seed_ids: set[int],
     tag_profile: dict[str, float],
     scoring_data: _ScoringData,
+    feedback_profile: FeedbackProfile,
 ) -> list[_CandidateScore]:
     seed_weight_by_id = {seed.artist_id: seed.seed_weight for seed in seeds}
     total_seed_weight = sum(seed_weight_by_id.values()) or 1.0
     scores: list[_CandidateScore] = []
-    focused_tag_profile = _apply_tag_focus(tag_profile, mode)
     obviousness_enabled = config.recommendation.obviousness.enabled
     for artist_id in scoring_data.candidates:
         if artist_id in seed_ids:
+            continue
+        if artist_id in feedback_profile.hidden_artist_ids:
             continue
         artist_name = scoring_data.artist_names.get(artist_id)
         if artist_name is None:
             continue
         knownness, rediscovery = scoring_data.listening_by_artist.get(artist_id, (0.0, 0.0))
+        candidate_tags = _candidate_tag_vector(artist_id, scoring_data)
+        feedback_neighborhood_score = _feedback_neighborhood_score(
+            artist_id,
+            scoring_data,
+            feedback_profile,
+        )
+        feedback = _feedback_score_for_candidate(
+            feedback_profile=feedback_profile,
+            artist_id=artist_id,
+            candidate_tags=candidate_tags,
+            direct_candidate_intent_score=_feedback_direct_candidate_intent_score(
+                artist_id,
+                seed_ids,
+                feedback_profile,
+            ),
+            neighborhood_score=feedback_neighborhood_score,
+        )
+        if artist_id in feedback_profile.known_artist_ids:
+            knownness = max(knownness, 1.0)
         lastfm_score = _lastfm_similarity_score(
             artist_id,
             seed_weight_by_id,
             total_seed_weight,
             scoring_data.similarity_by_target,
         )
-        tag_score = _tag_similarity_score(artist_id, focused_tag_profile, scoring_data)
+        tag_score = _tag_similarity_score(artist_id, tag_profile, scoring_data)
         obviousness = (
-            _obviousness(artist_id, focused_tag_profile, scoring_data)
+            min(
+                1.0,
+                _obviousness(artist_id, tag_profile, scoring_data)
+                + feedback_obviousness_for_candidate(
+                    feedback_profile,
+                    candidate_tags=candidate_tags,
+                ),
+            )
             if obviousness_enabled
             else 0.0
         )
         if obviousness_enabled and _hard_hides_obvious_candidate(
             artist_id,
             mode,
-            focused_tag_profile,
+            tag_profile,
             scoring_data,
             rediscovery_score=rediscovery,
         ):
@@ -291,6 +449,7 @@ def _score_candidates(
             lastfm_score * mode.lastfm_similarity_multiplier,
             tag_score * mode.tag_similarity_multiplier,
             rediscovery * mode.rediscovery_multiplier,
+            feedback.score,
         )
         knownness_penalty = 0.40 * max(0.0, knownness - mode.max_knownness)
         obviousness_penalty = (
@@ -307,13 +466,16 @@ def _score_candidates(
                 raw_score=raw_score,
                 lastfm_similarity_score=lastfm_score,
                 tag_similarity_score=tag_score,
+                feedback_score=feedback.score,
+                feedback_contributions=feedback.contributions,
+                feedback_effects=feedback.effects,
                 rediscovery_score=rediscovery,
                 knownness=knownness,
                 obviousness=obviousness,
                 knownness_penalty=knownness_penalty,
                 obviousness_penalty=obviousness_penalty,
                 diversity_penalty=0.0,
-                primary_tag=_primary_tag(artist_id, focused_tag_profile, scoring_data),
+                primary_tag=_primary_tag(artist_id, tag_profile, scoring_data),
                 explanation={},
             )
         )
@@ -421,6 +583,10 @@ def _candidate_tag_vector(
     return {**ranked_tags, **direct_tags}
 
 
+def _normalize_tag_key(tag: object) -> str:
+    return str(tag).strip().casefold()
+
+
 def _apply_tag_focus(
     tag_profile: dict[str, float],
     mode: RecommendationModeSettings,
@@ -429,7 +595,8 @@ def _apply_tag_focus(
         return tag_profile
     focused = dict(tag_profile)
     for tag in mode.focus_tags:
-        focused[tag] = max(focused.get(tag, 0.0), 1.0) * mode.tag_focus_boost
+        normalized_tag = _normalize_tag_key(tag)
+        focused[normalized_tag] = max(focused.get(normalized_tag, 0.0), 1.0) * mode.tag_focus_boost
     max_weight = max(focused.values(), default=0.0)
     if max_weight <= 0.0:
         return {}
@@ -525,16 +692,78 @@ def _obviousness(
     )
 
 
+def _feedback_neighborhood_score(
+    artist_id: int,
+    scoring_data: _ScoringData,
+    feedback_profile: FeedbackProfile,
+) -> float:
+    score = 0.0
+    for source_artist_id, similarity in scoring_data.feedback_similarity_by_target.get(
+        artist_id,
+        [],
+    ):
+        source_adjustment = feedback_profile.artist_adjustments.get(source_artist_id, 0.0)
+        if source_adjustment > 0.0:
+            score += 0.15 * similarity
+        elif source_adjustment < 0.0:
+            score -= 0.15 * similarity
+    return score
+
+
+def _feedback_direct_candidate_intent_score(
+    artist_id: int,
+    seed_ids: set[int],
+    feedback_profile: FeedbackProfile,
+) -> float:
+    if artist_id in seed_ids:
+        return 0.0
+    if artist_id in feedback_profile.boosted_seed_artist_ids:
+        return 0.10
+    if artist_id in feedback_profile.suppressed_seed_artist_ids:
+        return -0.10
+    return 0.0
+
+
+def _feedback_score_for_candidate(
+    *,
+    feedback_profile: FeedbackProfile,
+    artist_id: int,
+    candidate_tags: dict[str, float],
+    direct_candidate_intent_score: float,
+    neighborhood_score: float,
+) -> _FeedbackScore:
+    contributions = {
+        "artist": feedback_profile.artist_adjustments.get(artist_id, 0.0)
+        + direct_candidate_intent_score,
+        "tag": sum(
+            feedback_profile.tag_adjustments.get(tag, 0.0) * weight
+            for tag, weight in candidate_tags.items()
+        ),
+        "neighborhood": neighborhood_score,
+    }
+    score = max(-1.0, min(1.0, sum(contributions.values())))
+    effects = [
+        source for source in ("artist", "tag", "neighborhood") if contributions[source] != 0.0
+    ]
+    return _FeedbackScore(
+        score=score,
+        contributions=contributions,
+        effects=effects,
+    )
+
+
 def _raw_score(
     weights: RecommendationWeightsConfig,
     lastfm_similarity_score: float,
     tag_similarity_score: float,
     rediscovery_score: float,
+    feedback_score: float,
 ) -> float:
     return (
         weights.lastfm_similarity * lastfm_similarity_score
         + weights.tag_similarity * tag_similarity_score
         + weights.rediscovery * rediscovery_score
+        + weights.feedback_model * feedback_score
     )
 
 
@@ -591,12 +820,33 @@ def _explanation(
             "obviousness": score.obviousness_penalty,
             "diversity": score.diversity_penalty,
         },
+        "feedback": {
+            "score": score.feedback_score,
+            "effects": score.feedback_effects,
+            "contributions": score.feedback_contributions,
+        },
         "classification": {
             "is_new": score.knownness == 0.0,
             "is_rediscovery": score.rediscovery_score > 0.0,
             "is_obvious": score.obviousness >= 0.75,
         },
     }
+
+
+def _seed_region_counts(
+    seeds: list[SeedArtist],
+    mode_settings: RecommendationModeSettings,
+) -> dict[str, int]:
+    configured_regions = {region for region, _limit, _multiplier in mode_settings.seed_regions}
+    counts: dict[str, int] = {
+        region: sum(1 for seed in seeds if region in seed.regions)
+        for region, _limit, _multiplier in mode_settings.seed_regions
+    }
+    for seed in seeds:
+        for region in seed.regions:
+            if region not in configured_regions:
+                counts[region] = counts.get(region, 0) + 1
+    return counts
 
 
 def _persist_run(
@@ -629,10 +879,7 @@ def _persist_run(
                 json.dumps(
                     {
                         "seed_count": len(seeds),
-                        "regions": {
-                            region: sum(1 for seed in seeds if region in seed.regions)
-                            for region, _limit, _multiplier in mode_settings.seed_regions
-                        },
+                        "regions": _seed_region_counts(seeds, mode_settings),
                         "top_seeds": [
                             {
                                 "artist": seed.name,
@@ -704,7 +951,7 @@ def _persist_run(
                     0.0,
                     score.rediscovery_score,
                     0.0,
-                    0.0,
+                    score.feedback_score,
                     score.knownness,
                     score.obviousness,
                     score.diversity_penalty,

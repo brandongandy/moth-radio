@@ -2052,7 +2052,7 @@ git commit -m "feat: persist lastfm enrichment results"
 - Modify: `src/scrobble_recs/cli.py`
 - Modify: `tests/test_cli.py`
 
-- [ ] **Step 1: Add failing CLI enrich test**
+- [x] **Step 1: Add failing CLI enrich test**
 
 Append this test to `tests/test_cli.py`:
 
@@ -2088,7 +2088,7 @@ def test_enrich_command_dispatches_lastfm_source(tmp_path: Path, monkeypatch) ->
     assert "similar artist requests: 1" in result.output
 ```
 
-- [ ] **Step 2: Run CLI test to verify it fails**
+- [x] **Step 2: Run CLI test to verify it fails** _(Deviation note: the exact test failed before command dispatch because it monkeypatches `scrobble_recs.cli.run_lastfm_enrichment` while that symbol is not imported yet. The observed red failure was `AttributeError: 'module' object at scrobble_recs.cli has no attribute 'run_lastfm_enrichment'`, not `No such command 'enrich'`.)_
 
 Run:
 
@@ -2102,7 +2102,7 @@ Expected:
 No such command 'enrich'
 ```
 
-- [ ] **Step 3: Add CLI command**
+- [x] **Step 3: Add CLI command**
 
 Modify `src/scrobble_recs/cli.py`:
 
@@ -2148,7 +2148,7 @@ def _print_enrichment_stats(stats: LastFmEnrichmentStats) -> None:
     console.print(f"tag top artists: {stats.tag_top_artists}")
 ```
 
-- [ ] **Step 4: Run CLI enrich test to verify it passes**
+- [x] **Step 4: Run CLI enrich test to verify it passes**
 
 Run:
 
@@ -2162,7 +2162,7 @@ Expected:
 1 passed
 ```
 
-- [ ] **Step 5: Commit CLI enrich command**
+- [x] **Step 5: Commit CLI enrich command** _(Deviation note: staged `docs/superpowers/plans/2026-06-03-lastfm-enrichment.md` for required Task 8 checkbox updates and `docs/implementation-log.md` for the repository Done requirement, in addition to the plan's listed CLI/test files.)_
 
 Run:
 

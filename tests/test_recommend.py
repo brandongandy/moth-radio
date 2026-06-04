@@ -513,7 +513,7 @@ def test_generate_recommendations_keeps_obvious_rediscovery_candidate(
             first_played_at,
             last_played_at
         )
-        VALUES (111, 5, 3, 2, '2018-01-01', '2019-01-01')
+        VALUES (111, 1, 1, 1, '2018-01-01', '2019-01-01')
         """
     )
 
@@ -533,6 +533,57 @@ def test_generate_recommendations_keeps_obvious_rediscovery_candidate(
     explanation = json.loads(explanation_json)
     assert explanation["classification"]["is_obvious"] is True
     assert explanation["classification"]["is_rediscovery"] is True
+    conn.close()
+
+
+def test_generate_recommendations_skips_rediscovery_candidate_selected_as_seed(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=112,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=112, tag="post-punk", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=112,
+        candidate_id=113,
+        candidate_name="Seeded Dormant Rank Two",
+        tag="post-punk",
+        tag_rank=2,
+        similarity=0.95,
+    )
+    conn.execute(
+        """
+        INSERT INTO artist_listening_fact (
+            artist_id,
+            play_count,
+            track_count,
+            active_months,
+            first_played_at,
+            last_played_at
+        )
+        VALUES (113, 5, 3, 2, '2018-01-01', '2019-01-01')
+        """
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=5,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    assert _recommendation_names(conn, stats.run_id) == []
     conn.close()
 
 

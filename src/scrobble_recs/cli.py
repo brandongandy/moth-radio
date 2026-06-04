@@ -62,7 +62,11 @@ def enrich_command(
     resolved_config = load_config(config)
     conn = initialize_database(resolved_config)
     try:
-        stats = run_lastfm_enrichment(conn, resolved_config)
+        try:
+            stats = run_lastfm_enrichment(conn, resolved_config)
+        except RuntimeError as exc:
+            console.print(f"Error: {exc}")
+            raise typer.Exit(code=1) from exc
     finally:
         conn.close()
 

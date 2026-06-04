@@ -2179,7 +2179,7 @@ git commit -m "feat: add lastfm enrich cli command"
 - Modify: `README.md`
 - Modify: `docs/implementation-log.md`
 
-- [ ] **Step 1: Run full pytest suite**
+- [x] **Step 1: Run full pytest suite** _(Deviation note: the expected count was stale. Initial verification passed with 67 tests before the Step 6 regression fix; final verification passed with 68 tests after adding coverage for no-key live enrichment.)_
 
 Run:
 
@@ -2193,7 +2193,7 @@ Expected:
 39 passed
 ```
 
-- [ ] **Step 2: Run ruff check**
+- [x] **Step 2: Run ruff check**
 
 Run:
 
@@ -2207,7 +2207,7 @@ Expected:
 All checks passed!
 ```
 
-- [ ] **Step 3: Run ruff format check**
+- [x] **Step 3: Run ruff format check** _(Deviation note: the command succeeded with `26 files already formatted`, not `All checks passed!`.)_
 
 Run:
 
@@ -2221,7 +2221,7 @@ Expected:
 All checks passed!
 ```
 
-- [ ] **Step 4: Run mypy**
+- [x] **Step 4: Run mypy** _(Deviation note: the command succeeded with `Success: no issues found in 17 source files`, which includes file-count detail beyond the expected snippet.)_
 
 Run:
 
@@ -2235,7 +2235,7 @@ Expected:
 Success: no issues found
 ```
 
-- [ ] **Step 5: Verify CLI still runs without API keys for import and doctor**
+- [x] **Step 5: Verify CLI still runs without API keys for import and doctor** _(Deviation note: the `scrobble-recs` console script was unavailable in this shell, so verification used the equivalent local Typer target: `python -c "from scrobble_recs.cli import app; app()" ...`. The commands succeeded and printed the expected lines plus import statistics.)_
 
 Run:
 
@@ -2254,7 +2254,7 @@ CSV: ok
 API keys: not required for import/doctor
 ```
 
-- [ ] **Step 6: Verify enrich fails clearly without a Last.fm key**
+- [x] **Step 6: Verify enrich fails clearly without a Last.fm key** _(Deviation note: the first local-entrypoint check incorrectly succeeded with zero seed artists and no API key because key validation only happened when a request was made. Added service and CLI regression tests, fixed `run_lastfm_enrichment` to fail before seed selection when live enrichment has no key, converted expected CLI `RuntimeError` failures into visible Typer output, and validated disabled Last.fm before the missing-key check. Final verification failed clearly with `RuntimeError: Last.fm API key is required for enrichment`.)_
 
 Run:
 
@@ -2268,7 +2268,7 @@ Expected:
 RuntimeError: Last.fm API key is required for enrichment
 ```
 
-- [ ] **Step 7: Update README**
+- [x] **Step 7: Update README**
 
 Append this section to `README.md`:
 
@@ -2293,7 +2293,7 @@ scrobble-recs enrich --config config.example.json --source lastfm
 Set `LASTFM_API_KEY` in the environment before running live enrichment.
 ```
 
-- [ ] **Step 8: Update implementation log**
+- [x] **Step 8: Update implementation log** _(Deviation note: the appended log entry includes the requested milestone bullets plus the Step 6 regression fix discovered during verification.)_
 
 Append this entry to `docs/implementation-log.md`:
 
@@ -2322,7 +2322,7 @@ Verified:
 - `scrobble-recs enrich --config config.example.json --source lastfm` without `LASTFM_API_KEY` fails with a clear key-required error.
 ```
 
-- [ ] **Step 9: Commit docs and verification**
+- [x] **Step 9: Commit docs and verification** _(Deviation note: the commit includes the Task 9 plan checkbox updates and the Step 6 service and CLI regression fixes/tests in addition to README and implementation-log updates.)_
 
 Run:
 

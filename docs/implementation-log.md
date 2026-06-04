@@ -330,3 +330,22 @@ Verified:
 - `python -m ruff check .`
 - `python -m ruff format --check .`
 - `python -m mypy src`
+
+## 2026-06-04: Recommender quality pass
+
+Changed:
+
+- Added recommendation mode settings for balanced, explore, safe, rediscovery, recent, old, anti-obvious, and tag-focused modes.
+- Changed seed selection to combine lifetime, recent, old-obsession, and underexplored local taste regions.
+- Added mode-specific knownness thresholds, obviousness penalties, rediscovery weighting, and tag-focus boosts.
+- Added default hard-hide behavior for rank 1-3 high-affinity top-tag artists, with rediscovery candidates allowed through.
+- Added maximal marginal relevance diversity reranking and a same-primary-tag cap for the top 20.
+- Persisted diversity penalties and richer mode/seed metadata in recommendation runs.
+
+Verified:
+
+- `python -m pytest tests/test_modes.py tests/test_profile.py tests/test_recommend.py tests/test_cli.py -v`
+- `python -m pytest`
+- `python -m ruff check .`
+- `python -m ruff format --check .`
+- `python -m mypy src`

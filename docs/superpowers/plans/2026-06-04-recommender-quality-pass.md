@@ -1761,7 +1761,7 @@ git commit -m "feat: diversify recommendation ranking"
 - Modify: `docs/implementation-log.md`
 - Modify: `config.example.json` only if Task 1 changes default config fields.
 
-- [ ] **Step 1: Run focused quality-pass tests**
+- [x] **Step 1: Run focused quality-pass tests**
 
 Run:
 
@@ -1775,7 +1775,7 @@ Expected:
 all selected tests pass
 ```
 
-- [ ] **Step 2: Run full pytest suite**
+- [x] **Step 2: Run full pytest suite**
 
 Run:
 
@@ -1789,7 +1789,7 @@ Expected:
 all tests pass
 ```
 
-- [ ] **Step 3: Run ruff check**
+- [x] **Step 3: Run ruff check**
 
 Run:
 
@@ -1803,7 +1803,7 @@ Expected:
 All checks passed!
 ```
 
-- [ ] **Step 4: Run ruff format check**
+- [x] **Step 4: Run ruff format check**
 
 Run:
 
@@ -1817,7 +1817,7 @@ Expected:
 all files already formatted
 ```
 
-- [ ] **Step 5: Run mypy**
+- [x] **Step 5: Run mypy**
 
 Run:
 
@@ -1831,7 +1831,7 @@ Expected:
 Success: no issues found
 ```
 
-- [ ] **Step 6: Update README**
+- [x] **Step 6: Update README**
 
 Append this section to `README.md` after the Milestone 3 section:
 
@@ -1859,7 +1859,7 @@ during `recommend`; run `enrich --source lastfm` first when the local graph need
 new Last.fm similarity or tag data.
 ```
 
-- [ ] **Step 7: Update implementation log**
+- [x] **Step 7: Update implementation log**
 
 Append this entry to `docs/implementation-log.md`:
 
@@ -1884,7 +1884,7 @@ Verified:
 - `python -m mypy src`
 ```
 
-- [ ] **Step 8: Commit docs and verification**
+- [x] **Step 8: Commit docs and verification**
 
 Run:
 

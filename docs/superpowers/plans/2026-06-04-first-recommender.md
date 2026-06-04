@@ -49,7 +49,7 @@ This plan deliberately does not build:
 - Create: `src/scrobble_recs/sql/003_recommendations.sql`
 - Test: `tests/test_recommend.py`
 
-- [ ] **Step 1: Write the failing schema test**
+- [x] **Step 1: Write the failing schema test**
 
 Create `tests/test_recommend.py` with:
 
@@ -122,7 +122,9 @@ def test_recommendation_migration_creates_run_and_result_tables(tmp_path: Path) 
     conn.close()
 ```
 
-- [ ] **Step 2: Run schema test to verify it fails**
+Deviation: Code-quality review required this test to verify the schema contract beyond table existence, so it now also asserts requested column types, duplicate `run_id` rejection, duplicate `(run_id, rank)` rejection, duplicate `(run_id, artist_id)` rejection, and closes the connection with `try/finally`.
+
+- [x] **Step 2: Run schema test to verify it fails**
 
 Run:
 
@@ -137,7 +139,7 @@ FAILED tests/test_recommend.py::test_recommendation_migration_creates_run_and_re
 AssertionError: assert 'recommendation_run' in ...
 ```
 
-- [ ] **Step 3: Add recommendation migration**
+- [x] **Step 3: Add recommendation migration**
 
 Create `src/scrobble_recs/sql/003_recommendations.sql` with:
 
@@ -181,7 +183,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS recommendation_run_artist_key
 ON recommendation (run_id, artist_id);
 ```
 
-- [ ] **Step 4: Run schema test to verify it passes**
+- [x] **Step 4: Run schema test to verify it passes**
 
 Run:
 
@@ -195,7 +197,11 @@ Expected:
 1 passed
 ```
 
-- [ ] **Step 5: Commit recommendation schema**
+Deviation: Full-suite verification found `tests/test_config.py` still asserted the old exact table set, so the expected initialized schema was updated to include `recommendation_run` and `recommendation`.
+
+- [x] **Step 5: Commit recommendation schema**
+
+Deviation: Post-commit spec compliance review found `AGENTS.md` still required an implementation-log entry for Task 1, so `docs/implementation-log.md` was added to the amended Task 1 commit even though the original commit command did not list it.
 
 Run:
 

@@ -789,7 +789,7 @@ git commit -m "feat: select seeds from profile regions"
 - Modify: `tests/test_recommend.py`
 - Modify: `tests/test_cli.py`
 
-- [ ] **Step 1: Add failing hard-hide and mode tests**
+- [x] **Step 1: Add failing hard-hide and mode tests**
 
 Append these tests to `tests/test_recommend.py`:
 
@@ -1149,7 +1149,7 @@ def test_recommend_command_prints_invalid_mode_error(tmp_path: Path, monkeypatch
     assert "Error: unsupported recommendation mode 'fresh'" in result.output
 ```
 
-- [ ] **Step 2: Run focused tests to verify they fail**
+- [x] **Step 2: Run focused tests to verify they fail**
 
 Run:
 
@@ -1163,7 +1163,12 @@ Expected:
 at least one recommendation behavior test fails because mode settings and hard-hide behavior are not wired into generate_recommendations()
 ```
 
-- [ ] **Step 3: Wire mode settings into recommendation generation**
+- [x] **Step 3: Wire mode settings into recommendation generation**
+
+Deviation note: rediscovery candidates are kept eligible even if multi-region seed
+selection also picked them as seeds, but only with non-self similarity evidence
+from another seed; otherwise dormant low-play artists with candidate evidence are
+excluded before the rediscovery bypass can apply.
 
 Modify imports in `src/scrobble_recs/models/recommend.py`:
 
@@ -1410,7 +1415,7 @@ Use this scoring weights JSON:
                 ),
 ```
 
-- [ ] **Step 4: Run focused tests to verify they pass**
+- [x] **Step 4: Run focused tests to verify they pass**
 
 Run:
 
@@ -1424,7 +1429,7 @@ Expected:
 5 passed
 ```
 
-- [ ] **Step 5: Run existing recommendation tests**
+- [x] **Step 5: Run existing recommendation tests**
 
 Run:
 
@@ -1438,7 +1443,7 @@ Expected:
 all selected tests pass
 ```
 
-- [ ] **Step 6: Commit mode-aware scoring**
+- [x] **Step 6: Commit mode-aware scoring**
 
 Run:
 

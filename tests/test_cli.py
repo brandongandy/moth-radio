@@ -254,6 +254,24 @@ def test_recommend_command_prints_generation_value_error(
     assert "Error: no recommendation candidates found" in result.output
 
 
+def test_recommend_command_prints_invalid_mode_error(tmp_path: Path, monkeypatch) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+
+    def fake_generate(conn, config, *, limit, mode=None):
+        raise ValueError("unsupported recommendation mode 'fresh'")
+
+    monkeypatch.setattr("scrobble_recs.cli.generate_recommendations", fake_generate)
+
+    result = runner.invoke(
+        app,
+        ["recommend", "--config", str(config_path), "--limit", "5", "--mode", "fresh"],
+    )
+
+    assert result.exit_code == 1
+    assert "Error: unsupported recommendation mode 'fresh'" in result.output
+
+
 def test_export_command_writes_requested_format(tmp_path: Path, monkeypatch) -> None:
     runner = CliRunner()
     config_path = write_config(tmp_path)

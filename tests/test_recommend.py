@@ -224,7 +224,7 @@ def test_generate_recommendations_persists_ranked_run_with_explanations(
         as_of=datetime(2026, 6, 4),
     )
 
-    assert stats.recommendations == 3
+    assert stats.recommendations == 2
     assert stats.mode == "balanced"
 
     rows = conn.execute(
@@ -241,9 +241,8 @@ def test_generate_recommendations_persists_ranked_run_with_explanations(
     assert [row[1] for row in rows] == [
         "Siouxsie and the Banshees",
         "Bauhaus",
-        "Joy Division",
     ]
-    assert rows[0][2] > rows[1][2] > rows[2][2]
+    assert rows[0][2] > rows[1][2]
     assert rows[0][3] == 0.0
     assert rows[1][4] > 0.0
 
@@ -429,3 +428,337 @@ def _artist_id(conn, artist_name: str) -> int:
         [artist_name],
     ).fetchone()
     return int(artist_id)
+
+
+def test_generate_recommendations_hard_hides_obvious_high_affinity_artist(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=100,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=100, tag="post-punk", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=100,
+        candidate_id=101,
+        candidate_name="Obvious Rank Two",
+        tag="post-punk",
+        tag_rank=2,
+        similarity=0.95,
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=100,
+        candidate_id=102,
+        candidate_name="Less Obvious Rank Twenty",
+        tag="post-punk",
+        tag_rank=20,
+        similarity=0.75,
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=5,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    names = _recommendation_names(conn, stats.run_id)
+    assert names == ["Less Obvious Rank Twenty"]
+    conn.close()
+
+
+def test_generate_recommendations_keeps_obvious_rediscovery_candidate(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=110,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=110, tag="post-punk", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=110,
+        candidate_id=111,
+        candidate_name="Dormant Rank Two",
+        tag="post-punk",
+        tag_rank=2,
+        similarity=0.95,
+    )
+    conn.execute(
+        """
+        INSERT INTO artist_listening_fact (
+            artist_id,
+            play_count,
+            track_count,
+            active_months,
+            first_played_at,
+            last_played_at
+        )
+        VALUES (111, 5, 3, 2, '2018-01-01', '2019-01-01')
+        """
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=5,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    assert _recommendation_names(conn, stats.run_id) == ["Dormant Rank Two"]
+    (explanation_json,) = conn.execute(
+        "SELECT explanation FROM recommendation WHERE run_id = ? AND rank = 1",
+        [stats.run_id],
+    ).fetchone()
+    explanation = json.loads(explanation_json)
+    assert explanation["classification"]["is_obvious"] is True
+    assert explanation["classification"]["is_rediscovery"] is True
+    conn.close()
+
+
+def test_anti_obvious_mode_uses_stricter_top_tag_hide(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=120,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=120, tag="post-punk", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=120,
+        candidate_id=121,
+        candidate_name="Rank Eight Mainstream",
+        tag="post-punk",
+        tag_rank=8,
+        similarity=0.95,
+    )
+
+    balanced = generate_recommendations(
+        conn,
+        config,
+        limit=5,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+    anti_obvious = generate_recommendations(
+        conn,
+        config,
+        limit=5,
+        mode="anti-obvious",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    assert _recommendation_names(conn, balanced.run_id) == ["Rank Eight Mainstream"]
+    assert _recommendation_names(conn, anti_obvious.run_id) == []
+    conn.close()
+
+
+def test_tag_focus_mode_boosts_matching_candidate_tags(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=130,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=130, tag="post-punk", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=130,
+        candidate_id=131,
+        candidate_name="Lower Similarity Gothic Fit",
+        tag="gothic rock",
+        tag_rank=25,
+        similarity=0.55,
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=130,
+        candidate_id=132,
+        candidate_name="Higher Similarity Punk Fit",
+        tag="punk",
+        tag_rank=25,
+        similarity=0.70,
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=2,
+        mode="tag:gothic rock",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    assert _recommendation_names(conn, stats.run_id) == [
+        "Lower Similarity Gothic Fit",
+        "Higher Similarity Punk Fit",
+    ]
+    conn.close()
+
+
+def _insert_scoring_artist(
+    conn,
+    *,
+    artist_id: int,
+    name: str,
+    play_count: int,
+    lifetime_weight: float,
+    recent_weight: float,
+    knownness: float,
+    rediscovery_score: float,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO artist (
+            artist_id,
+            canonical_name,
+            artist_key,
+            lastfm_name
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        [artist_id, name, name.casefold().replace(" ", "-"), name],
+    )
+    conn.execute(
+        """
+        INSERT INTO artist_listening_fact (
+            artist_id,
+            play_count,
+            track_count,
+            active_months,
+            first_played_at,
+            last_played_at,
+            lifetime_weight,
+            recent_weight,
+            knownness,
+            rediscovery_score
+        )
+        VALUES (?, ?, 10, 10, '2024-01-01', '2026-05-01', ?, ?, ?, ?)
+        """,
+        [
+            artist_id,
+            play_count,
+            lifetime_weight,
+            recent_weight,
+            knownness,
+            rediscovery_score,
+        ],
+    )
+
+
+def _insert_artist_tag(conn, *, artist_id: int, tag: str, weight: float) -> None:
+    conn.execute(
+        """
+        INSERT INTO artist_tag (
+            artist_id,
+            tag,
+            source,
+            tag_count,
+            normalized_weight,
+            fetched_at
+        )
+        VALUES (?, ?, 'lastfm', ?, ?, current_timestamp)
+        """,
+        [artist_id, tag, weight, weight / 100.0],
+    )
+
+
+def _insert_candidate_from_seed(
+    conn,
+    *,
+    seed_id: int,
+    candidate_id: int,
+    candidate_name: str,
+    tag: str,
+    tag_rank: int,
+    similarity: float,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO artist (
+            artist_id,
+            canonical_name,
+            artist_key,
+            lastfm_name
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        [candidate_id, candidate_name, candidate_name.casefold().replace(" ", "-"), candidate_name],
+    )
+    conn.execute(
+        """
+        INSERT INTO artist_similarity_edge (
+            source_artist_id,
+            target_artist_id,
+            source,
+            source_score,
+            normalized_score,
+            evidence,
+            fetched_at
+        )
+        VALUES (?, ?, 'lastfm', ?, ?, '{}', current_timestamp)
+        """,
+        [seed_id, candidate_id, similarity, similarity],
+    )
+    conn.execute(
+        """
+        INSERT INTO tag_top_artist (
+            tag,
+            artist_id,
+            source,
+            tag_rank,
+            tag_count,
+            fetched_at
+        )
+        VALUES (?, ?, 'lastfm', ?, 1.0, current_timestamp)
+        """,
+        [tag, candidate_id, tag_rank],
+    )
+
+
+def _recommendation_names(conn, run_id: str) -> list[str]:
+    return [
+        str(row[0])
+        for row in conn.execute(
+            """
+            SELECT a.canonical_name
+            FROM recommendation r
+            JOIN artist a ON a.artist_id = r.artist_id
+            WHERE r.run_id = ?
+            ORDER BY r.rank
+            """,
+            [run_id],
+        ).fetchall()
+    ]

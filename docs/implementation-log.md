@@ -369,3 +369,41 @@ Verified:
 - `python -m ruff check .` -> All checks passed
 - `python -m ruff format --check .` -> 35 files already formatted
 - `python -m mypy src` -> Success, no issues found in 21 source files
+
+## 2026-06-04: Task 2 feedback event API and profile
+
+Changed:
+
+- Added the local feedback model API for immutable `feedback_event` writes with allowed-action validation, deterministic context normalization, compact sorted JSON serialization, optional deterministic timestamps, and generated feedback IDs.
+- Added deterministic feedback profile derivation from persisted events, including direct artist adjustments, tag adjustments, obviousness tag adjustments, and hidden/known/boosted/suppressed seed sets.
+- Added feedback helper functions for later recommendation scoring and tag profile adjustment.
+- Added behavioral tests for feedback event persistence, unsupported action rejection, and artist/tag/seed profile derivation.
+- Strengthened the event persistence test after review to verify optional `created_at` persistence plus sorted JSON keys and sorted/normalized/de-duplicated context tags.
+- Fixed review-reported profile loading so explicit persisted `value=0.0` remains zero instead of defaulting to `1.0`.
+- Added behavioral tests for `feedback_adjustment_for_candidate`, `feedback_obviousness_for_candidate`, and `apply_feedback_to_tag_profile`, covering clamping plus tag normalization and suppression behavior.
+- Updated the Task 2 feedback-loop plan checklist and documented deviations for DuckDB UUID assertion casting, the strengthened context/timestamp assertion, expanded review coverage, and including the implementation log in the commit.
+
+Verified:
+
+- `python -m pytest tests/test_feedback.py::test_record_feedback_event_validates_action_and_persists_json_context tests/test_feedback.py::test_record_feedback_event_rejects_unknown_action tests/test_feedback.py::test_load_feedback_profile_derives_artist_tag_and_seed_adjustments -v` before implementation -> failed with `ModuleNotFoundError: No module named 'scrobble_recs.models.feedback'`
+- `python -m pytest tests/test_feedback.py::test_record_feedback_event_validates_action_and_persists_json_context tests/test_feedback.py::test_record_feedback_event_rejects_unknown_action tests/test_feedback.py::test_load_feedback_profile_derives_artist_tag_and_seed_adjustments -v` after initial implementation -> 1 failed, 2 passed because DuckDB returned `run_id` as `uuid.UUID`; the test now casts `run_id` to `VARCHAR` before comparison.
+- `python -m pytest tests/test_feedback.py::test_record_feedback_event_validates_action_and_persists_json_context tests/test_feedback.py::test_record_feedback_event_rejects_unknown_action tests/test_feedback.py::test_load_feedback_profile_derives_artist_tag_and_seed_adjustments -v` after UUID assertion adjustment -> 3 passed
+- `python -m pytest tests/test_feedback.py -v` -> 4 passed
+- `python -m ruff check src/scrobble_recs/models/feedback.py tests/test_feedback.py` -> All checks passed
+- `python -m mypy src` -> Success, no issues found in 22 source files
+- `python -m pytest` -> 125 passed
+- `python -m ruff check .` -> All checks passed
+- `python -m ruff format --check .` -> 36 files already formatted
+- Review follow-up: `python -m pytest tests/test_feedback.py::test_record_feedback_event_validates_action_and_persists_json_context tests/test_feedback.py::test_record_feedback_event_rejects_unknown_action tests/test_feedback.py::test_load_feedback_profile_derives_artist_tag_and_seed_adjustments -v` -> 3 passed
+- Review follow-up: `python -m pytest tests/test_feedback.py -v` -> 4 passed
+- Second review follow-up: `python -m pytest tests/test_feedback.py::test_load_feedback_profile_preserves_explicit_zero_value -v` before fix -> failed with `assert 0.15 == 0.0`
+- Second review follow-up: `python -m pytest tests/test_feedback.py::test_load_feedback_profile_preserves_explicit_zero_value -v` after fix -> 1 passed
+- Second review follow-up: `python -m pytest tests/test_feedback.py::test_load_feedback_profile_preserves_explicit_zero_value tests/test_feedback.py::test_feedback_adjustment_for_candidate_combines_sources_and_clamps tests/test_feedback.py::test_feedback_obviousness_for_candidate_weights_tags_and_clamps tests/test_feedback.py::test_apply_feedback_to_tag_profile_suppresses_and_normalizes_tags -v` -> 4 passed
+- Second review follow-up: `python -m pytest tests/test_feedback.py -v` -> 8 passed
+- Second review follow-up: `python -m ruff check src/scrobble_recs/models/feedback.py tests/test_feedback.py` -> All checks passed
+- Second review follow-up: `python -m mypy src` -> Success, no issues found in 22 source files
+- Final review follow-up: `python -m ruff format --check .` before formatting -> failed with `Would reformat: tests\test_feedback.py`
+- Final review follow-up: `python -m ruff format tests/test_feedback.py` -> 1 file reformatted
+- Final review follow-up: `python -m ruff format --check .` -> 36 files already formatted
+- Final review follow-up: `python -m pytest tests/test_feedback.py -v` -> 8 passed
+- Final review follow-up: `python -m ruff check src/scrobble_recs/models/feedback.py tests/test_feedback.py` -> All checks passed

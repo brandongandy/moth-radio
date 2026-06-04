@@ -263,7 +263,11 @@ git commit -m "feat: add feedback event schema"
 - Create: `src/scrobble_recs/models/feedback.py`
 - Modify: `tests/test_feedback.py`
 
-- [ ] **Step 1: Add failing event and profile tests**
+- [x] **Step 1: Add failing event and profile tests**
+
+Deviation note: the persistence test casts `run_id` to `VARCHAR` in the SELECT because DuckDB returns UUID columns as `uuid.UUID` objects in Python; the review follow-up also extends the packet assertion to verify `created_at` persistence plus sorted JSON keys and sorted/normalized/de-duplicated context tags.
+
+Deviation note: a second review follow-up expands Task 2 test scope with a red regression test for explicit `value=0.0` profile loading and focused behavioral coverage for `feedback_adjustment_for_candidate`, `feedback_obviousness_for_candidate`, and `apply_feedback_to_tag_profile`; all feedback tests now total 8 instead of the packet's original 4.
 
 Append these tests to `tests/test_feedback.py`:
 
@@ -405,7 +409,7 @@ def _insert_run(conn, *, run_id: str) -> None:
     )
 ```
 
-- [ ] **Step 2: Run event/profile tests to verify they fail**
+- [x] **Step 2: Run event/profile tests to verify they fail**
 
 Run:
 
@@ -419,7 +423,7 @@ Expected:
 ModuleNotFoundError: No module named 'scrobble_recs.models.feedback'
 ```
 
-- [ ] **Step 3: Implement feedback model**
+- [x] **Step 3: Implement feedback model**
 
 Create `src/scrobble_recs/models/feedback.py` with:
 
@@ -720,7 +724,7 @@ def _context_tags(context: dict[str, Any]) -> list[str]:
     )
 ```
 
-- [ ] **Step 4: Run event/profile tests to verify they pass**
+- [x] **Step 4: Run event/profile tests to verify they pass**
 
 Run:
 
@@ -734,7 +738,9 @@ Expected:
 3 passed
 ```
 
-- [ ] **Step 5: Run all feedback tests**
+- [x] **Step 5: Run all feedback tests**
+
+Deviation note: review-driven Task 2 coverage expanded the all-feedback test file from the packet's original 4 tests to 8 tests; the verified result is `8 passed`.
 
 Run:
 
@@ -748,7 +754,9 @@ Expected:
 4 passed
 ```
 
-- [ ] **Step 6: Commit feedback model**
+- [x] **Step 6: Commit feedback model**
+
+Deviation note: include `docs/implementation-log.md` in the commit because `AGENTS.md` requires implementation log updates for done.
 
 Run:
 

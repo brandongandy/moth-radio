@@ -253,3 +253,29 @@ Verified:
 - `python -m ruff check src/scrobble_recs/models/recommend.py tests/test_recommend.py docs/implementation-log.md` -> All checks passed
 - `python -m ruff format --check src/scrobble_recs/models/recommend.py tests/test_recommend.py` -> 2 files already formatted
 - `python -m ruff format --check --preview docs/implementation-log.md` -> 1 file already formatted
+
+## 2026-06-04: Task 4 export persisted recommendations
+
+Changed:
+
+- Added CSV and JSONL export for persisted recommendation runs.
+- Export rows are loaded from local DuckDB recommendation tables and joined to artist names.
+- CSV output includes rank, artist, score, primary tags, knownness, obviousness, rediscovery flag, explanation summary, and source URLs without embedding full explanation JSON.
+- JSONL output includes the full row with inspectable explanation JSON.
+- Updated the Task 4 plan checklist and documented the `format_name` typing deviation.
+- Addressed review findings by validating unsupported formats before DB reads or writes, URL-encoding Last.fm artist path segments, and adding a deterministic latest-run fallback tie-breaker.
+
+Verified:
+
+- `python -m pytest tests/test_export.py -v` before implementation -> failed with `ModuleNotFoundError: No module named 'scrobble_recs.export'`
+- `python -m pytest tests/test_export.py -v` after implementation -> 2 passed
+- `python -m pytest` -> 85 passed
+- `python -m ruff check .` -> All checks passed
+- `python -m ruff format --check .` -> 32 files already formatted
+- `python -m mypy src` -> Success, no issues found in 20 source files
+- `python -m pytest tests/test_export.py -v` with review regression tests before fixes -> 3 failed and 2 passed; failures covered invalid-format precedence, Last.fm URL encoding, and latest-run tie-breaking.
+- `python -m pytest tests/test_export.py -v` after review fixes -> 5 passed
+- `python -m pytest` after review fixes -> 88 passed
+- `python -m mypy src` after review fixes -> Success, no issues found in 20 source files
+- `python -m ruff check .` after review fixes -> All checks passed
+- `python -m ruff format --check .` after review fixes -> 32 files already formatted

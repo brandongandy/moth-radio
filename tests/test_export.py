@@ -1,0 +1,242 @@
+import csv
+import json
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+
+from scrobble_recs.apis.lastfm import LastFmArtistTag, LastFmSimilarArtist, LastFmTagTopArtist
+from scrobble_recs.config import load_config
+from scrobble_recs.db import initialize_database
+from scrobble_recs.enrichment.lastfm import run_lastfm_enrichment
+from scrobble_recs.export import export_recommendations
+from scrobble_recs.importers.lastfm_csv import import_lastfm_csv
+from scrobble_recs.models.recommend import generate_recommendations
+
+
+class ExportFakeLastFmClient:
+    def get_similar_artists(self, artist: str, *, limit: int) -> list[LastFmSimilarArtist]:
+        return [LastFmSimilarArtist("Bauhaus", None, 0.72)]
+
+    def get_artist_tags(self, artist: str) -> list[LastFmArtistTag]:
+        return [LastFmArtistTag("gothic rock", 100.0)]
+
+    def get_tag_top_artists(self, tag: str, *, limit: int) -> list[LastFmTagTopArtist]:
+        return [LastFmTagTopArtist(4, "Bauhaus", None, 700.0)]
+
+
+def write_config(tmp_path: Path) -> Path:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "scrobble-recs",
+                    "db_path": str(tmp_path / "scrobbles.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": "tests/fixtures/tiny_lastfm_export.csv",
+                    "timezone": "UTC",
+                    "timestamp_column": "uts",
+                    "csv_columns": [
+                        "uts",
+                        "utc_time",
+                        "artist",
+                        "artist_mbid",
+                        "album",
+                        "album_mbid",
+                        "track",
+                        "track_mbid",
+                    ],
+                },
+                "recommendation": {
+                    "seed_artist_limit": 10,
+                    "similar_artists_per_seed": 10,
+                    "min_seed_scrobbles": 2,
+                    "obviousness": {"tag_top_artists_limit": 100},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _prepared_run(tmp_path: Path) -> tuple[object, str]:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    import_lastfm_csv(conn, Path("tests/fixtures/tiny_lastfm_export.csv"))
+    run_lastfm_enrichment(conn, config, client=ExportFakeLastFmClient())
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=1,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+    return conn, stats.run_id
+
+
+def test_export_recommendations_writes_csv(tmp_path: Path) -> None:
+    conn, run_id = _prepared_run(tmp_path)
+    output = tmp_path / "recs.csv"
+
+    exported = export_recommendations(conn, output, format_name="csv", run_id=run_id)
+
+    assert exported == 1
+    with output.open("r", encoding="utf-8", newline="") as file:
+        rows = list(csv.DictReader(file))
+    assert rows[0]["rank"] == "1"
+    assert rows[0]["artist"] == "Bauhaus"
+    assert rows[0]["primary_tags"] == "gothic rock"
+    assert rows[0]["why"].startswith("Bauhaus is similar")
+    conn.close()
+
+
+def test_export_recommendations_writes_jsonl(tmp_path: Path) -> None:
+    conn, run_id = _prepared_run(tmp_path)
+    output = tmp_path / "recs.jsonl"
+
+    exported = export_recommendations(conn, output, format_name="jsonl", run_id=run_id)
+
+    assert exported == 1
+    row = json.loads(output.read_text(encoding="utf-8").strip())
+    assert row["rank"] == 1
+    assert row["artist"] == "Bauhaus"
+    assert row["explanation"]["tags"][0]["tag"] == "gothic rock"
+    conn.close()
+
+
+def test_export_recommendations_rejects_invalid_format_before_run_lookup(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    output = tmp_path / "recs.txt"
+
+    with pytest.raises(ValueError, match="format_name must be 'csv' or 'jsonl'"):
+        export_recommendations(conn, output, format_name="txt")
+
+    assert not output.exists()
+    conn.close()
+
+
+def test_export_recommendations_url_encodes_lastfm_artist_path(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    run_id = "00000000-0000-0000-0000-000000000010"
+    _insert_export_row(
+        conn,
+        run_id=run_id,
+        artist_id=501,
+        artist_name="AC/DC ?#é",
+        rank=1,
+        created_at=datetime(2026, 6, 4, 12, 0, 0),
+    )
+    output = tmp_path / "recs.jsonl"
+
+    export_recommendations(conn, output, format_name="jsonl", run_id=run_id)
+
+    row = json.loads(output.read_text(encoding="utf-8").strip())
+    assert row["lastfm_url"] == "https://www.last.fm/music/AC%2FDC%20%3F%23%C3%A9"
+    conn.close()
+
+
+def test_export_recommendations_uses_deterministic_latest_run_fallback(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    older_run_id = "00000000-0000-0000-0000-000000000001"
+    latest_run_id = "00000000-0000-0000-0000-000000000002"
+    shared_created_at = datetime(2026, 6, 4, 12, 0, 0)
+    _insert_export_row(
+        conn,
+        run_id=older_run_id,
+        artist_id=601,
+        artist_name="Earlier Artist",
+        rank=1,
+        created_at=shared_created_at,
+    )
+    _insert_export_row(
+        conn,
+        run_id=latest_run_id,
+        artist_id=602,
+        artist_name="Tie Break Artist",
+        rank=1,
+        created_at=shared_created_at,
+    )
+    output = tmp_path / "latest.jsonl"
+
+    export_recommendations(conn, output, format_name="jsonl")
+
+    row = json.loads(output.read_text(encoding="utf-8").strip())
+    assert row["artist"] == "Tie Break Artist"
+    conn.close()
+
+
+def _insert_export_row(
+    conn,
+    *,
+    run_id: str,
+    artist_id: int,
+    artist_name: str,
+    rank: int,
+    created_at: datetime,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO artist (artist_id, canonical_name, artist_key)
+        VALUES (?, ?, ?)
+        """,
+        [artist_id, artist_name, artist_name.casefold()],
+    )
+    conn.execute(
+        """
+        INSERT INTO recommendation_run (
+            run_id,
+            created_at,
+            config_hash,
+            mode,
+            seed_summary,
+            scoring_weights
+        )
+        VALUES (?, ?, 'hash', 'balanced', '{}', '{}')
+        """,
+        [run_id, created_at],
+    )
+    conn.execute(
+        """
+        INSERT INTO recommendation (
+            run_id,
+            rank,
+            artist_id,
+            final_score,
+            raw_score,
+            lastfm_similarity_score,
+            tag_similarity_score,
+            cluster_fit_score,
+            rediscovery_score,
+            metadata_graph_score,
+            feedback_score,
+            knownness,
+            obviousness,
+            diversity_penalty,
+            explanation
+        )
+        VALUES (?, ?, ?, 0.9, 0.9, 0.7, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ?)
+        """,
+        [
+            run_id,
+            rank,
+            artist_id,
+            json.dumps(
+                {
+                    "summary": f"{artist_name} is similar to seed artists.",
+                    "tags": [{"tag": "test tag"}],
+                }
+            ),
+        ],
+    )

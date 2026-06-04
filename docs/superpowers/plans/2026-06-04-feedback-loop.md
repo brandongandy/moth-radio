@@ -773,7 +773,7 @@ git commit -m "feat: derive local feedback profile"
 - Modify: `src/scrobble_recs/models/recommend.py`
 - Modify: `tests/test_recommend.py`
 
-- [ ] **Step 1: Add failing scoring tests**
+- [x] **Step 1: Add failing scoring tests**
 
 Append these tests to `tests/test_recommend.py`:
 
@@ -986,7 +986,7 @@ def _insert_run_for_feedback(conn, *, run_id: str) -> None:
     )
 ```
 
-- [ ] **Step 2: Run scoring tests to verify they fail**
+- [x] **Step 2: Run scoring tests to verify they fail**
 
 Run:
 
@@ -1000,7 +1000,34 @@ Expected:
 at least one test fails because recommendation generation currently persists feedback_score as 0.0 and ignores feedback events
 ```
 
-- [ ] **Step 3: Wire feedback into recommendation generation**
+- [x] **Step 3: Wire feedback into recommendation generation**
+
+Deviation note: `_add_feedback_seed_artists()` excludes boosted feedback artists that
+are already candidate targets from the current selected seed IDs. This keeps direct
+`save` feedback recommendable even when the saved candidate has outgoing Last.fm
+similarity edges, while still allowing `more_like_this` artists that are not current
+candidates to seed future recommendation neighborhoods.
+
+Deviation note: recommendation scoring keeps direct candidate intent as a first-class
+artist feedback contribution. Explanations now persist contribution values and source
+effects for `artist`, `tag`, and `neighborhood` instead of sign-only effect labels.
+
+Deviation note: feedback seed construction uses the profile-derived base seed weight
+without applying `mode.lastfm_similarity_multiplier`; the mode multiplier is applied
+once later during scoring.
+
+Deviation note: recommendation scoring normalizes tag keys with `casefold()` while
+loading local tag profiles and candidate tag vectors so feedback context tags match
+Last.fm tags regardless of stored casing. Explanation tag labels now use these
+normalized keys.
+
+Deviation note: persisted seed region counts include all configured mode seed regions
+with zero counts when absent, and add `feedback` when feedback seeds are present.
+
+Deviation note: feedback neighborhood edge loading includes both boosted and
+suppressed non-hidden feedback artists so positive and negative similarity-neighborhood
+effects can contribute to future candidate scores. Feedback seed promotion remains
+limited to boosted non-hidden non-suppressed current non-candidates.
 
 Modify imports in `src/scrobble_recs/models/recommend.py`:
 
@@ -1272,7 +1299,7 @@ def _feedback_effect_labels(feedback_score: float) -> list[str]:
 
 Modify `_persist_run()` to insert `score.feedback_score` instead of `0.0` for `feedback_score`.
 
-- [ ] **Step 4: Run scoring tests to verify they pass**
+- [x] **Step 4: Run scoring tests to verify they pass**
 
 Run:
 
@@ -1286,7 +1313,7 @@ Expected:
 3 passed
 ```
 
-- [ ] **Step 5: Run recommendation tests**
+- [x] **Step 5: Run recommendation tests**
 
 Run:
 
@@ -1300,7 +1327,10 @@ Expected:
 all recommendation tests pass
 ```
 
-- [ ] **Step 6: Commit feedback-aware scoring**
+- [x] **Step 6: Commit feedback-aware scoring**
+
+Deviation note: include `docs/implementation-log.md` in the commit because
+`AGENTS.md` requires updating the implementation log for done criteria.
 
 Run:
 

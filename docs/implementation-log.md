@@ -407,3 +407,43 @@ Verified:
 - Final review follow-up: `python -m ruff format --check .` -> 36 files already formatted
 - Final review follow-up: `python -m pytest tests/test_feedback.py -v` -> 8 passed
 - Final review follow-up: `python -m ruff check src/scrobble_recs/models/feedback.py tests/test_feedback.py` -> All checks passed
+
+## 2026-06-04: Task 3 feedback-aware recommendation scoring
+
+Changed:
+
+- Added recommendation tests for direct feedback score boosts, hidden feedback artists, saved current candidates with outgoing edges, feedback seed weights in non-balanced modes, tag feedback, mixed-case tag feedback matching, knownness overrides, obviousness feedback, negative candidate demotion, and `more_like_this` feedback as a future local seed.
+- Loaded the derived feedback profile during recommendation generation.
+- Applied feedback-adjusted tag profiles, hidden artist exclusion, known-artist overrides, direct artist/tag feedback scores, and feedback-neighborhood scoring.
+- Persisted nonzero `feedback_score` values and added contribution-tracked feedback metadata to recommendation explanations.
+- Added feedback seed promotion for local artists with outgoing Last.fm similarity edges, while preserving boosted artists that are already current candidate targets.
+- Kept feedback seed weights profile-derived so mode Last.fm multipliers apply only once during scoring.
+- Normalized recommendation tag keys with `casefold()` for tag-profile, candidate-tag, feedback-score, and obviousness matching.
+- Added direct candidate intent as a first-class artist feedback contribution when boosted or suppressed feedback artists remain candidates.
+- Loaded feedback neighborhood edges for boosted and suppressed non-hidden feedback artists so both positive and negative neighborhood effects influence future candidates.
+- Included configured zero-count mode regions and feedback seed counts in persisted recommendation run seed summaries.
+- Updated the Task 3 feedback-loop plan checklist and documented the seed-promotion, feedback-neighborhood loading, feedback-seed weighting, tag-normalization, contribution-tracking, seed-summary, and implementation-log commit deviations.
+
+Verified:
+
+- `python -m pytest tests/test_recommend.py::test_generate_recommendations_applies_direct_feedback_scores tests/test_recommend.py::test_generate_recommendations_excludes_hidden_feedback_artist tests/test_recommend.py::test_generate_recommendations_uses_more_like_this_as_future_seed -v` before implementation -> 3 failed because saved feedback was not scored, hidden artists were still returned, and feedback seeds were ignored.
+- `python -m pytest tests/test_recommend.py::test_generate_recommendations_applies_direct_feedback_scores tests/test_recommend.py::test_generate_recommendations_excludes_hidden_feedback_artist tests/test_recommend.py::test_generate_recommendations_uses_more_like_this_as_future_seed -v` after initial implementation -> 1 failed, 2 passed because the default `feedback_model` weight was not enough for the direct-save ranking fixture.
+- `python -m pytest tests/test_recommend.py::test_generate_recommendations_applies_direct_feedback_scores tests/test_recommend.py::test_generate_recommendations_excludes_hidden_feedback_artist tests/test_recommend.py::test_generate_recommendations_uses_more_like_this_as_future_seed -v` after the candidate seed-intent adjustment -> 3 passed.
+- Review follow-up: `python -m pytest tests/test_recommend.py::test_generate_recommendations_applies_direct_feedback_scores tests/test_recommend.py::test_generate_recommendations_keeps_saved_current_candidate_with_outgoing_edges tests/test_recommend.py::test_generate_recommendations_uses_more_like_this_as_future_seed tests/test_recommend.py::test_generate_recommendations_applies_tag_feedback_scores tests/test_recommend.py::test_generate_recommendations_marks_already_known_candidates_with_knownness_penalty tests/test_recommend.py::test_generate_recommendations_applies_too_obvious_tag_feedback_penalty tests/test_recommend.py::test_generate_recommendations_demotes_suppressed_feedback_candidate -v` before follow-up implementation -> 7 failed because effects were not contribution-based, saved current candidates with outgoing edges could be promoted out of candidates, and feedback contributions were not persisted.
+- Review follow-up: `python -m pytest tests/test_recommend.py::test_generate_recommendations_applies_direct_feedback_scores tests/test_recommend.py::test_generate_recommendations_keeps_saved_current_candidate_with_outgoing_edges tests/test_recommend.py::test_generate_recommendations_uses_more_like_this_as_future_seed tests/test_recommend.py::test_generate_recommendations_applies_tag_feedback_scores tests/test_recommend.py::test_generate_recommendations_marks_already_known_candidates_with_knownness_penalty tests/test_recommend.py::test_generate_recommendations_applies_too_obvious_tag_feedback_penalty tests/test_recommend.py::test_generate_recommendations_demotes_suppressed_feedback_candidate -v` after follow-up implementation -> 7 passed.
+- Review follow-up: `python -m pytest tests/test_recommend.py::test_generate_recommendations_applies_direct_feedback_scores tests/test_recommend.py::test_generate_recommendations_excludes_hidden_feedback_artist tests/test_recommend.py::test_generate_recommendations_uses_more_like_this_as_future_seed -v` -> 3 passed.
+- Review follow-up: `python -m pytest tests/test_recommend.py -v` -> 22 passed.
+- Review follow-up: `python -m pytest` -> 137 passed.
+- Second review follow-up: `python -m pytest tests/test_recommend.py::test_generate_recommendations_does_not_mode_multiply_feedback_seed_weight tests/test_recommend.py::test_generate_recommendations_matches_feedback_to_mixed_case_candidate_tags -v` before follow-up implementation -> 2 failed because safe-mode feedback seed weight was mode-multiplied to `0.30` and lowercase feedback did not match mixed-case stored candidate tags.
+- Second review follow-up: `python -m pytest tests/test_recommend.py::test_generate_recommendations_does_not_mode_multiply_feedback_seed_weight tests/test_recommend.py::test_generate_recommendations_matches_feedback_to_mixed_case_candidate_tags -v` after follow-up implementation -> 2 passed.
+- Second review follow-up: `python -m pytest tests/test_recommend.py::test_generate_recommendations_applies_direct_feedback_scores tests/test_recommend.py::test_generate_recommendations_excludes_hidden_feedback_artist tests/test_recommend.py::test_generate_recommendations_uses_more_like_this_as_future_seed -v` -> 3 passed.
+- Second review follow-up: `python -m pytest tests/test_recommend.py -v` -> 24 passed.
+- Second review follow-up: `python -m pytest` -> 139 passed.
+- Final review follow-up: `python -m pytest tests/test_recommend.py::test_generate_recommendations_applies_suppressed_feedback_neighborhood -v` before follow-up implementation -> failed because the future candidate's feedback score was `0.0`; suppressed feedback source neighborhood edges were not loaded.
+- Final review follow-up: `python -m pytest tests/test_recommend.py::test_generate_recommendations_applies_suppressed_feedback_neighborhood -v` after follow-up implementation -> 1 passed.
+- Final review follow-up: `python -m pytest tests/test_recommend.py::test_generate_recommendations_applies_direct_feedback_scores tests/test_recommend.py::test_generate_recommendations_excludes_hidden_feedback_artist tests/test_recommend.py::test_generate_recommendations_uses_more_like_this_as_future_seed -v` -> 3 passed.
+- Final review follow-up: `python -m pytest tests/test_recommend.py -v` -> 25 passed.
+- Final review follow-up: `python -m pytest` -> 140 passed.
+- `python -m ruff check .` -> All checks passed.
+- `python -m ruff format --check .` -> 36 files already formatted.
+- `python -m mypy src` -> Success, no issues found in 22 source files.

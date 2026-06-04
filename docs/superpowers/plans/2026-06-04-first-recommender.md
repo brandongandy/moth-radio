@@ -551,7 +551,7 @@ ModuleNotFoundError: No module named 'scrobble_recs.models.recommend'
 
 - [x] **Step 3: Implement persisted recommendation generation**
 
-Deviation: The implementation block ordered explanation tags by candidate tag rank, but the approved behavior test expects the strongest local user-profile tag first. `_explanation()` now orders explanation tags by user tag weight, then candidate rank, then tag name.
+Deviation: The implementation block ordered explanation tags by candidate tag rank, but the approved behavior test expects the strongest local user-profile tag first. `_explanation()` now orders explanation tags by user tag weight, then candidate rank, then tag name. Code review also required batch-loaded scoring inputs and deferred explanation construction instead of per-candidate DuckDB queries, plus filtering explanation seed artists to current-run seed edges ordered by actual seed contribution.
 
 Create `src/scrobble_recs/models/recommend.py` with:
 
@@ -1121,7 +1121,7 @@ git commit -m "feat: generate persisted recommendations"
 - Create: `src/scrobble_recs/export.py`
 - Test: `tests/test_export.py`
 
-- [ ] **Step 1: Write failing export tests**
+- [x] **Step 1: Write failing export tests**
 
 Create `tests/test_export.py` with:
 
@@ -1237,7 +1237,7 @@ def test_export_recommendations_writes_jsonl(tmp_path: Path) -> None:
     conn.close()
 ```
 
-- [ ] **Step 2: Run export tests to verify they fail**
+- [x] **Step 2: Run export tests to verify they fail**
 
 Run:
 
@@ -1251,7 +1251,13 @@ Expected:
 ModuleNotFoundError: No module named 'scrobble_recs.export'
 ```
 
-- [ ] **Step 3: Implement CSV and JSONL export**
+- [x] **Step 3: Implement CSV and JSONL export**
+
+Note: `export_recommendations()` accepts `format_name: str` while still exporting `ExportFormat`
+so unsupported formats can reach the required runtime `ValueError`.
+
+Review fix: format validation now happens before run lookup or filesystem writes, Last.fm artist
+URLs are path-segment encoded, and latest-run fallback uses `created_at DESC, run_id DESC`.
 
 Create `src/scrobble_recs/export.py` with:
 
@@ -1368,7 +1374,7 @@ def _write_jsonl(output_path: Path, rows: list[dict[str, object]]) -> None:
             file.write(json.dumps(row, sort_keys=True) + "\n")
 ```
 
-- [ ] **Step 4: Run export tests to verify they pass**
+- [x] **Step 4: Run export tests to verify they pass**
 
 Run:
 
@@ -1382,7 +1388,10 @@ Expected:
 2 passed
 ```
 
-- [ ] **Step 5: Commit export support**
+- [x] **Step 5: Commit export support**
+
+Note: Task execution also stages this plan file and `docs/implementation-log.md` because the user
+explicitly requested plan checkbox updates and the repo done rule requires the implementation log.
 
 Run:
 

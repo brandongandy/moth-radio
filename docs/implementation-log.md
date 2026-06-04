@@ -279,3 +279,23 @@ Verified:
 - `python -m mypy src` after review fixes -> Success, no issues found in 20 source files
 - `python -m ruff check .` after review fixes -> All checks passed
 - `python -m ruff format --check .` after review fixes -> 32 files already formatted
+
+## 2026-06-04: Milestone 3 first recommender
+
+Changed:
+
+- Added recommendation run and recommendation result tables.
+- Added listening weight, knownness, and rediscovery score formulas.
+- Added offline recommendation generation from persisted Last.fm similarity and tag data.
+- Added knownness and obviousness penalties.
+- Added inspectable JSON explanations for each persisted recommendation.
+- Added CSV and JSONL export for persisted recommendation runs.
+- Added `recommend` and `export` CLI commands.
+
+Verified:
+
+- `python -m pytest tests/test_knownness.py tests/test_recommend.py tests/test_export.py tests/test_cli.py -v`
+- `python -m pytest`
+- `python -m ruff check .`
+- `python -m ruff format --check .`
+- `python -m mypy src`

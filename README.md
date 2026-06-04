@@ -85,3 +85,21 @@ Testing guidelines:
 
 When behavior changes, update the relevant docs and `docs/implementation-log.md`
 with what changed and how it was verified.
+
+## Milestone 3
+
+This slice adds the first persisted recommender:
+
+- Recomputes local listening weights, knownness, and rediscovery scores.
+- Generates recommendations from persisted Last.fm similarity and tag enrichment.
+- Penalizes known and obvious top-tag artists.
+- Persists recommendation runs with inspectable JSON explanations.
+- Exports persisted runs to CSV or JSONL.
+
+```bash
+scrobble-recs recommend --config config.example.json --limit 500
+scrobble-recs export --config config.example.json --format csv --output recs.csv
+scrobble-recs export --config config.example.json --format jsonl --output recs.jsonl
+```
+
+`recommend` does not call live APIs. Run `enrich --source lastfm` first to populate the local graph.

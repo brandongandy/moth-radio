@@ -168,3 +168,27 @@ Verified:
 - `python -m ruff check .` -> All checks passed
 - `python -m ruff format --check .` -> 26 files already formatted
 - `python -m mypy src` -> Success, no issues found in 17 source files
+
+## 2026-06-03: Milestone 2 Last.fm enrichment
+
+Changed:
+
+- Added API and recommendation config defaults.
+- Added DuckDB enrichment tables for API cache, artist similarity edges, artist tags, and tag top artists.
+- Added canonical Last.fm cache keys that do not include API secrets.
+- Added a deterministic rate limiter.
+- Added a cache-first Last.fm client for `artist.getSimilar`, `artist.getTopTags`, and `tag.getTopArtists`.
+- Added local seed artist selection from `artist_listening_fact`.
+- Added idempotent Last.fm enrichment that can resume without repeating normalized work.
+- Added `enrich --source lastfm`.
+- Added an early key-required failure for live Last.fm enrichment before seed selection.
+
+Verified:
+
+- `python -m pytest`
+- `python -m ruff check .`
+- `python -m ruff format --check .`
+- `python -m mypy src`
+- `scrobble-recs import --config config.example.json`
+- `scrobble-recs doctor --config config.example.json`
+- `scrobble-recs enrich --config config.example.json --source lastfm` without `LASTFM_API_KEY` fails with a clear key-required error.

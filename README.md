@@ -30,6 +30,25 @@ scrobble-recs import --config config.example.json
 scrobble-recs doctor --config config.example.json
 ```
 
+## Milestone 2
+
+This slice adds cache-first Last.fm enrichment:
+
+- Select seed artists from persisted local listening facts.
+- Fetch Last.fm similar artists and artist tags.
+- Fetch Last.fm top artists for discovered tags.
+- Persist every raw Last.fm response in `api_cache`.
+- Persist normalized similarity, artist tag, and tag top artist rows.
+- Resume without repeating normalized enrichment work.
+
+Tests use mocked clients and mocked HTTP. CI must not call the live Last.fm API.
+
+```bash
+scrobble-recs enrich --config config.example.json --source lastfm
+```
+
+Set `LASTFM_API_KEY` in the environment before running live enrichment.
+
 ## Verification
 
 Milestone 1 was verified with:

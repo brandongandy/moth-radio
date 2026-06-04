@@ -39,6 +39,45 @@ def write_config(tmp_path: Path) -> Path:
     return config_path
 
 
+def write_config_with_disabled_lastfm(tmp_path: Path) -> Path:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "scrobble-recs",
+                    "db_path": str(tmp_path / "scrobbles.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": "tests/fixtures/tiny_lastfm_export.csv",
+                    "timezone": "UTC",
+                    "timestamp_column": "uts",
+                    "csv_columns": [
+                        "uts",
+                        "utc_time",
+                        "artist",
+                        "artist_mbid",
+                        "album",
+                        "album_mbid",
+                        "track",
+                        "track_mbid",
+                    ],
+                },
+                "apis": {
+                    "lastfm": {
+                        "enabled": False,
+                        "api_key": None,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return config_path
+
+
 def test_import_command_prints_stats(tmp_path: Path) -> None:
     runner = CliRunner()
 
@@ -92,3 +131,24 @@ def test_enrich_command_dispatches_lastfm_source(tmp_path: Path, monkeypatch) ->
     assert "Last.fm enrichment complete" in result.output
     assert "seed artists: 1" in result.output
     assert "similar artist requests: 1" in result.output
+
+
+def test_enrich_command_prints_clear_error_without_lastfm_api_key(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+
+    result = runner.invoke(app, ["enrich", "--config", str(config_path), "--source", "lastfm"])
+
+    assert result.exit_code != 0
+    assert "Last.fm API key is required for enrichment" in result.output
+
+
+def test_enrich_command_reports_disabled_lastfm_before_missing_key(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = write_config_with_disabled_lastfm(tmp_path)
+
+    result = runner.invoke(app, ["enrich", "--config", str(config_path), "--source", "lastfm"])
+
+    assert result.exit_code != 0
+    assert "Last.fm enrichment is disabled" in result.output
+    assert "Last.fm API key is required for enrichment" not in result.output

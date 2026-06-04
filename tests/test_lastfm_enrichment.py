@@ -117,6 +117,8 @@ class InvalidTagTopArtistCountLastFmClient(LimitHonoringLastFmClient):
 def _config(
     tmp_path: Path,
     *,
+    lastfm_enabled: bool = True,
+    lastfm_api_key: str | None = "test-key",
     similar_artists_per_seed: int = 2,
     tag_top_artists_limit: int = 2,
 ) -> ScrobbleRecsConfig:
@@ -145,6 +147,12 @@ def _config(
                         "track_mbid",
                     ],
                 },
+                "apis": {
+                    "lastfm": {
+                        "enabled": lastfm_enabled,
+                        "api_key": lastfm_api_key,
+                    }
+                },
                 "recommendation": {
                     "seed_artist_limit": 1,
                     "similar_artists_per_seed": similar_artists_per_seed,
@@ -156,6 +164,30 @@ def _config(
         encoding="utf-8",
     )
     return load_config(path)
+
+
+def test_run_lastfm_enrichment_requires_api_key_before_seed_selection(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, lastfm_api_key=None)
+    conn = initialize_database(config)
+
+    with pytest.raises(RuntimeError, match="Last.fm API key is required for enrichment"):
+        run_lastfm_enrichment(conn, config)
+
+    conn.close()
+
+
+def test_run_lastfm_enrichment_reports_disabled_before_missing_key(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, lastfm_enabled=False, lastfm_api_key=None)
+    conn = initialize_database(config)
+
+    with pytest.raises(RuntimeError, match="Last.fm enrichment is disabled"):
+        run_lastfm_enrichment(conn, config)
+
+    conn.close()
 
 
 def test_run_lastfm_enrichment_persists_edges_tags_and_top_artists(

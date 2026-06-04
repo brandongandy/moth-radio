@@ -55,6 +55,11 @@ def run_lastfm_enrichment(
     client: LastFmClientProtocol | None = None,
 ) -> LastFmEnrichmentStats:
     owns_client = client is None
+    if owns_client and not config.apis.lastfm.enabled:
+        raise RuntimeError("Last.fm enrichment is disabled")
+    if owns_client and config.apis.lastfm.api_key is None:
+        raise RuntimeError("Last.fm API key is required for enrichment")
+
     resolved_client: LastFmClientProtocol = client or LastFmClient(
         config=config.apis.lastfm,
         cache=ApiCache(conn),

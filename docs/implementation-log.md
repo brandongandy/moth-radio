@@ -231,3 +231,25 @@ Verified:
 - `python -m ruff check .` -> All checks passed
 - `python -m ruff format --check .` -> 29 files already formatted
 - `python -m mypy src` -> Success, no issues found in 18 source files
+
+## 2026-06-04: Task 3 persisted recommendation scoring
+
+Changed:
+
+- Added offline recommendation generation from persisted Last.fm similarity, artist tag, and tag top artist tables.
+- Added persisted recommendation runs with score components, knownness and obviousness penalties, and inspectable explanation JSON.
+- Added deterministic recommendation tests covering ranked run persistence, run isolation, explanation tag ordering, and stale similarity edges from non-current seeds.
+- Fixed explanation tag selection to fetch all candidate tag rows, sort by local user tag weight, candidate rank, and tag name, then slice to five.
+- Batch-loaded scoring inputs for candidate names, similarity edges, direct tags, tag ranks, and local listening facts, and deferred explanation construction until after top-N ranking.
+- Fixed explanations to include only current seed similarity edges, ordered by actual seed contribution.
+
+Verified:
+
+- `python -m pytest tests/test_recommend.py -v` before implementation -> failed with `ModuleNotFoundError: No module named 'scrobble_recs.models.recommend'`
+- `python -m pytest tests/test_recommend.py::test_generate_recommendations_orders_explanation_tags_before_slicing -v` before the tag-ordering fix -> failed with `AssertionError: assert 'post-punk' == 'coldwave'`
+- `python -m pytest tests/test_recommend.py::test_generate_recommendations_explanation_uses_current_seed_edges_only -v` before the current-seed filter fix -> failed with `AssertionError: assert ['Cocteau Twins', 'The Cure'] == ['The Cure']`
+- `python -m pytest tests/test_recommend.py -v` -> 5 passed
+- `python -m mypy src` -> Success, no issues found in 19 source files
+- `python -m ruff check src/scrobble_recs/models/recommend.py tests/test_recommend.py docs/implementation-log.md` -> All checks passed
+- `python -m ruff format --check src/scrobble_recs/models/recommend.py tests/test_recommend.py` -> 2 files already formatted
+- `python -m ruff format --check --preview docs/implementation-log.md` -> 1 file already formatted

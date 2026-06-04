@@ -406,7 +406,7 @@ git commit -m "feat: compute artist listening scores"
 - Create: `src/scrobble_recs/models/recommend.py`
 - Modify: `tests/test_recommend.py`
 
-- [ ] **Step 1: Add failing recommendation behavior tests**
+- [x] **Step 1: Add failing recommendation behavior tests**
 
 Append these tests to `tests/test_recommend.py`:
 
@@ -535,7 +535,7 @@ def test_generate_recommendations_replaces_existing_rows_for_new_run_only(tmp_pa
     conn.close()
 ```
 
-- [ ] **Step 2: Run recommendation tests to verify they fail**
+- [x] **Step 2: Run recommendation tests to verify they fail**
 
 Run:
 
@@ -549,7 +549,9 @@ Expected:
 ModuleNotFoundError: No module named 'scrobble_recs.models.recommend'
 ```
 
-- [ ] **Step 3: Implement persisted recommendation generation**
+- [x] **Step 3: Implement persisted recommendation generation**
+
+Deviation: The implementation block ordered explanation tags by candidate tag rank, but the approved behavior test expects the strongest local user-profile tag first. `_explanation()` now orders explanation tags by user tag weight, then candidate rank, then tag name.
 
 Create `src/scrobble_recs/models/recommend.py` with:
 
@@ -1084,7 +1086,7 @@ def _config_hash(config: ScrobbleRecsConfig) -> str:
     return sha256(payload.encode("utf-8")).hexdigest()
 ```
 
-- [ ] **Step 4: Run recommendation tests and fix strict typing failures**
+- [x] **Step 4: Run recommendation tests and fix strict typing failures**
 
 Run:
 
@@ -1102,7 +1104,7 @@ Success: no issues found
 
 If mypy reports that DuckDB row values are `Any`, add explicit `int(...)`, `float(...)`, or `str(...)` conversions at the read boundary in `src/scrobble_recs/models/recommend.py`.
 
-- [ ] **Step 5: Commit recommendation generation**
+- [x] **Step 5: Commit recommendation generation**
 
 Run:
 

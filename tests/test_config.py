@@ -94,6 +94,8 @@ def test_initialize_database_applies_initial_migration(tmp_path: Path) -> None:
         "artist_tag",
         "enrichment_work",
         "raw_scrobble",
+        "recommendation",
+        "recommendation_run",
         "scrobble",
         "tag_top_artist",
     }

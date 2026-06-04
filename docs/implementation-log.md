@@ -192,3 +192,21 @@ Verified:
 - `scrobble-recs import --config config.example.json`
 - `scrobble-recs doctor --config config.example.json`
 - `scrobble-recs enrich --config config.example.json --source lastfm` without `LASTFM_API_KEY` fails with a clear key-required error.
+
+## 2026-06-04: Task 1 recommendation schema migration
+
+Changed:
+
+- Added DuckDB `recommendation_run` and `recommendation` tables with unique indexes for run IDs, run ranks, and run artists.
+- Added schema migration coverage that initializes a temporary DuckDB database, asserts the recommendation tables and column types exist, and verifies unique index behavior with duplicate inserts.
+- Updated the existing database initialization schema expectation to include the recommendation tables.
+- Updated the Task 1 plan checklist and noted the full-suite schema assertion deviation.
+
+Verified:
+
+- `python -m pytest tests/test_recommend.py::test_recommendation_migration_creates_run_and_result_tables -v` before migration -> failed with `AssertionError: assert 'recommendation_run' in ...`
+- `python -m pytest tests/test_recommend.py::test_recommendation_migration_creates_run_and_result_tables -v` after migration -> 1 passed
+- `python -m pytest` -> 72 passed
+- `python -m ruff check .` -> All checks passed
+- `python -m ruff format --check .` -> 27 files already formatted
+- `python -m mypy src` -> Success, no issues found in 17 source files

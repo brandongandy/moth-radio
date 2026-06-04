@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 import typer
 from rich.console import Console
@@ -9,7 +9,9 @@ from rich.console import Console
 from scrobble_recs.config import load_config
 from scrobble_recs.db import initialize_database
 from scrobble_recs.enrichment.lastfm import LastFmEnrichmentStats, run_lastfm_enrichment
+from scrobble_recs.export import ExportFormat, export_recommendations
 from scrobble_recs.importers.lastfm_csv import ImportStats, get_import_stats, import_lastfm_csv
+from scrobble_recs.models.recommend import RecommendationStats, generate_recommendations
 
 app = typer.Typer(help="Local-first Last.fm recommendation tooling.")
 console = Console()
@@ -74,6 +76,67 @@ def enrich_command(
     _print_enrichment_stats(stats)
 
 
+@app.command("recommend")
+def recommend_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    limit: Annotated[
+        int,
+        typer.Option("--limit", help="Number of recommendations to persist."),
+    ] = 500,
+    mode: Annotated[str | None, typer.Option("--mode", help="Recommendation mode.")] = None,
+) -> None:
+    if limit < 1:
+        console.print("Error: limit must be at least 1")
+        raise typer.Exit(code=1)
+
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        try:
+            stats = generate_recommendations(conn, resolved_config, limit=limit, mode=mode)
+        except ValueError as exc:
+            console.print(f"Error: {exc}")
+            raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+
+    console.print("Recommendation run complete")
+    _print_recommendation_stats(stats)
+
+
+@app.command("export")
+def export_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    output: Annotated[Path, typer.Option("--output", "-o", help="Output file path.")],
+    format_name: Annotated[
+        str,
+        typer.Option("--format", help="Export format: csv or jsonl."),
+    ] = "csv",
+    run_id: Annotated[str | None, typer.Option("--run-id", help="Recommendation run UUID.")] = None,
+) -> None:
+    if format_name not in {"csv", "jsonl"}:
+        raise typer.BadParameter("format must be csv or jsonl")
+
+    resolved_format = cast(ExportFormat, format_name)
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        try:
+            exported = export_recommendations(
+                conn,
+                output,
+                format_name=resolved_format,
+                run_id=run_id,
+            )
+        except ValueError as exc:
+            console.print(f"Error: {exc}")
+            raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+
+    console.print(f"Exported {exported} recommendations to {output}")
+
+
 def _print_stats(stats: ImportStats) -> None:
     console.print(f"raw scrobbles: {stats.raw_scrobbles}")
     console.print(f"clean scrobbles: {stats.scrobbles}")
@@ -92,3 +155,9 @@ def _print_enrichment_stats(stats: LastFmEnrichmentStats) -> None:
     console.print(f"similarity edges: {stats.similarity_edges}")
     console.print(f"artist tags: {stats.artist_tags}")
     console.print(f"tag top artists: {stats.tag_top_artists}")
+
+
+def _print_recommendation_stats(stats: RecommendationStats) -> None:
+    console.print(f"run id: {stats.run_id}")
+    console.print(f"mode: {stats.mode}")
+    console.print(f"recommendations: {stats.recommendations}")

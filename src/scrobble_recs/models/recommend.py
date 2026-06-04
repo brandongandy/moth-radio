@@ -12,6 +12,7 @@ from duckdb import DuckDBPyConnection
 
 from scrobble_recs.config import RecommendationWeightsConfig, ScrobbleRecsConfig
 from scrobble_recs.models.knownness import ArtistListeningInput, compute_artist_listening_scores
+from scrobble_recs.models.modes import RecommendationModeSettings, resolve_recommendation_mode
 from scrobble_recs.models.profile import SeedArtist, select_seed_artists
 
 
@@ -35,6 +36,8 @@ class _CandidateScore:
     obviousness: float
     knownness_penalty: float
     obviousness_penalty: float
+    diversity_penalty: float
+    primary_tag: str | None
     explanation: dict[str, object]
 
 
@@ -59,18 +62,20 @@ def generate_recommendations(
     if limit < 1:
         raise ValueError("limit must be at least 1")
 
-    resolved_mode = mode or config.recommendation.default_mode
+    mode_settings = resolve_recommendation_mode(mode, config)
+    resolved_mode = mode_settings.name
     resolved_as_of = as_of or datetime.now(tz=UTC).replace(tzinfo=None)
     _refresh_artist_listening_scores(conn, resolved_as_of)
     seeds = select_seed_artists(
         conn,
         limit=config.recommendation.seed_artist_limit,
         min_scrobbles=config.recommendation.min_seed_scrobbles,
+        regions=mode_settings.seed_regions,
     )
     seed_ids = {seed.artist_id for seed in seeds}
     tag_profile = _load_user_tag_profile(conn, seeds)
     scoring_data = _load_scoring_data(conn, seed_ids)
-    scores = _score_candidates(config, seeds, seed_ids, tag_profile, scoring_data)
+    scores = _score_candidates(config, mode_settings, seeds, seed_ids, tag_profile, scoring_data)
     ranked_without_explanations = sorted(
         scores,
         key=lambda item: (-item.final_score, item.artist_name.casefold()),
@@ -89,7 +94,7 @@ def generate_recommendations(
     ]
 
     run_id = str(uuid4())
-    _persist_run(conn, run_id, resolved_mode, config, seeds, ranked)
+    _persist_run(conn, run_id, resolved_mode, config, mode_settings, seeds, ranked)
     return RecommendationStats(run_id=run_id, mode=resolved_mode, recommendations=len(ranked))
 
 
@@ -228,7 +233,7 @@ def _load_scoring_data(conn: DuckDBPyConnection, seed_ids: set[int]) -> _Scoring
 
     return _ScoringData(
         artist_names=artist_names,
-        candidates=candidates - seed_ids,
+        candidates=candidates,
         similarity_by_target=similarity_by_target,
         direct_tags_by_artist=direct_tags_by_artist,
         tag_ranks_by_artist=tag_ranks_by_artist,
@@ -238,6 +243,7 @@ def _load_scoring_data(conn: DuckDBPyConnection, seed_ids: set[int]) -> _Scoring
 
 def _score_candidates(
     config: ScrobbleRecsConfig,
+    mode: RecommendationModeSettings,
     seeds: list[SeedArtist],
     seed_ids: set[int],
     tag_profile: dict[str, float],
@@ -246,11 +252,20 @@ def _score_candidates(
     seed_weight_by_id = {seed.artist_id: seed.seed_weight for seed in seeds}
     total_seed_weight = sum(seed_weight_by_id.values()) or 1.0
     scores: list[_CandidateScore] = []
+    focused_tag_profile = _apply_tag_focus(tag_profile, mode)
     for artist_id in scoring_data.candidates:
-        if artist_id in seed_ids:
-            continue
         artist_name = scoring_data.artist_names.get(artist_id)
         if artist_name is None:
+            continue
+        knownness, rediscovery = scoring_data.listening_by_artist.get(artist_id, (0.0, 0.0))
+        if artist_id in seed_ids and (
+            rediscovery <= 0.0
+            or not _has_non_self_seed_similarity(
+                artist_id,
+                seed_ids,
+                scoring_data.similarity_by_target,
+            )
+        ):
             continue
         lastfm_score = _lastfm_similarity_score(
             artist_id,
@@ -258,13 +273,25 @@ def _score_candidates(
             total_seed_weight,
             scoring_data.similarity_by_target,
         )
-        tag_score = _tag_similarity_score(artist_id, tag_profile, scoring_data)
-        knownness, rediscovery = scoring_data.listening_by_artist.get(artist_id, (0.0, 0.0))
-        obviousness = _obviousness(artist_id, tag_profile, scoring_data)
+        tag_score = _tag_similarity_score(artist_id, focused_tag_profile, scoring_data)
+        obviousness = _obviousness(artist_id, focused_tag_profile, scoring_data)
+        if _hard_hides_obvious_candidate(
+            artist_id,
+            mode,
+            focused_tag_profile,
+            scoring_data,
+            rediscovery_score=rediscovery,
+        ):
+            continue
         weights = config.recommendation.weights
-        raw_score = _raw_score(weights, lastfm_score, tag_score, rediscovery)
-        knownness_penalty = 0.40 * max(0.0, knownness - config.recommendation.max_knownness_default)
-        obviousness_penalty = config.recommendation.obviousness.penalty_weight * obviousness
+        raw_score = _raw_score(
+            weights,
+            lastfm_score * mode.lastfm_similarity_multiplier,
+            tag_score * mode.tag_similarity_multiplier,
+            rediscovery * mode.rediscovery_multiplier,
+        )
+        knownness_penalty = 0.40 * max(0.0, knownness - mode.max_knownness)
+        obviousness_penalty = mode.obviousness_penalty_weight * obviousness
         final_score = raw_score - knownness_penalty - obviousness_penalty
         if final_score <= 0:
             continue
@@ -281,10 +308,74 @@ def _score_candidates(
                 obviousness=obviousness,
                 knownness_penalty=knownness_penalty,
                 obviousness_penalty=obviousness_penalty,
+                diversity_penalty=0.0,
+                primary_tag=_primary_tag(artist_id, focused_tag_profile, scoring_data),
                 explanation={},
             )
         )
     return scores
+
+
+def _apply_tag_focus(
+    tag_profile: dict[str, float],
+    mode: RecommendationModeSettings,
+) -> dict[str, float]:
+    if not mode.focus_tags:
+        return tag_profile
+    focused = dict(tag_profile)
+    for tag in mode.focus_tags:
+        focused[tag] = max(focused.get(tag, 0.0), 1.0) * mode.tag_focus_boost
+    max_weight = max(focused.values(), default=0.0)
+    if max_weight <= 0.0:
+        return {}
+    return {tag: weight / max_weight for tag, weight in focused.items()}
+
+
+def _has_non_self_seed_similarity(
+    artist_id: int,
+    seed_ids: set[int],
+    similarity_by_target: dict[int, list[tuple[int, float]]],
+) -> bool:
+    return any(
+        source_artist_id in seed_ids and source_artist_id != artist_id
+        for source_artist_id, _normalized_score in similarity_by_target.get(artist_id, [])
+    )
+
+
+def _hard_hides_obvious_candidate(
+    artist_id: int,
+    mode: RecommendationModeSettings,
+    tag_profile: dict[str, float],
+    scoring_data: _ScoringData,
+    *,
+    rediscovery_score: float,
+) -> bool:
+    if rediscovery_score > 0.0:
+        return False
+    for tag, rank in scoring_data.tag_ranks_by_artist.get(artist_id, []):
+        if (
+            rank <= mode.hard_hide_top_tag_rank
+            and tag_profile.get(tag, 0.0) >= mode.high_affinity_tag_weight
+        ):
+            return True
+    return False
+
+
+def _primary_tag(
+    artist_id: int,
+    tag_profile: dict[str, float],
+    scoring_data: _ScoringData,
+) -> str | None:
+    direct_tags = scoring_data.direct_tags_by_artist.get(artist_id, {})
+    if direct_tags:
+        return sorted(direct_tags.items(), key=lambda row: (-row[1], row[0]))[0][0]
+    ranked_tags = scoring_data.tag_ranks_by_artist.get(artist_id, [])
+    if not ranked_tags:
+        return None
+    return sorted(
+        ranked_tags,
+        key=lambda row: (-tag_profile.get(row[0], 0.0), row[1], row[0]),
+    )[0][0]
 
 
 def _lastfm_similarity_score(
@@ -404,7 +495,7 @@ def _explanation(
         "penalties": {
             "knownness": score.knownness_penalty,
             "obviousness": score.obviousness_penalty,
-            "diversity": 0.0,
+            "diversity": score.diversity_penalty,
         },
         "classification": {
             "is_new": score.knownness == 0.0,
@@ -419,6 +510,7 @@ def _persist_run(
     run_id: str,
     mode: str,
     config: ScrobbleRecsConfig,
+    mode_settings: RecommendationModeSettings,
     seeds: list[SeedArtist],
     ranked: list[_CandidateScore],
 ) -> None:
@@ -443,13 +535,37 @@ def _persist_run(
                 json.dumps(
                     {
                         "seed_count": len(seeds),
+                        "regions": {
+                            region: sum(1 for seed in seeds if region in seed.regions)
+                            for region, _limit, _multiplier in mode_settings.seed_regions
+                        },
                         "top_seeds": [
-                            {"artist": seed.name, "seed_weight": seed.seed_weight}
+                            {
+                                "artist": seed.name,
+                                "seed_weight": seed.seed_weight,
+                                "regions": list(seed.regions),
+                            }
                             for seed in seeds[:10]
                         ],
                     }
                 ),
-                config.recommendation.weights.model_dump_json(),
+                json.dumps(
+                    {
+                        "base": config.recommendation.weights.model_dump(mode="json"),
+                        "mode": {
+                            "name": mode_settings.name,
+                            "diversity_lambda": mode_settings.diversity_lambda,
+                            "max_knownness": mode_settings.max_knownness,
+                            "obviousness_penalty_weight": (
+                                mode_settings.obviousness_penalty_weight
+                            ),
+                            "hard_hide_top_tag_rank": mode_settings.hard_hide_top_tag_rank,
+                            "same_primary_tag_cap": mode_settings.same_primary_tag_cap,
+                            "focus_tags": list(mode_settings.focus_tags),
+                        },
+                    },
+                    sort_keys=True,
+                ),
                 "offline lastfm/tag first recommender",
             ],
         )
@@ -489,7 +605,7 @@ def _persist_run(
                     0.0,
                     score.knownness,
                     score.obviousness,
-                    0.0,
+                    score.diversity_penalty,
                     json.dumps(score.explanation),
                 ],
             )

@@ -103,3 +103,25 @@ scrobble-recs export --config config.example.json --format jsonl --output recs.j
 ```
 
 `recommend` does not call live APIs. Run `enrich --source lastfm` first to populate the local graph.
+
+## Recommender Quality Pass
+
+`recommend` supports mode-specific ranking from local data:
+
+```bash
+scrobble-recs recommend --config config.example.json --mode balanced --limit 500
+scrobble-recs recommend --config config.example.json --mode explore --limit 500
+scrobble-recs recommend --config config.example.json --mode safe --limit 500
+scrobble-recs recommend --config config.example.json --mode rediscovery --limit 500
+scrobble-recs recommend --config config.example.json --mode recent --limit 500
+scrobble-recs recommend --config config.example.json --mode old --limit 500
+scrobble-recs recommend --config config.example.json --mode anti-obvious --limit 500
+scrobble-recs recommend --config config.example.json --mode "tag:post-punk,gothic rock" --limit 500
+```
+
+The recommender now selects seeds from multiple local taste regions, applies
+mode-specific knownness and obviousness behavior, hides the most obvious
+high-affinity top-tag artists unless they are rediscovery candidates, and
+reranks the persisted list for diversity. It still reads only local DuckDB data
+during `recommend`; run `enrich --source lastfm` first when the local graph needs
+new Last.fm similarity or tag data.

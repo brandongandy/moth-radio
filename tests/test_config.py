@@ -93,6 +93,7 @@ def test_initialize_database_applies_initial_migration(tmp_path: Path) -> None:
         "artist_similarity_edge",
         "artist_tag",
         "enrichment_work",
+        "feedback_event",
         "raw_scrobble",
         "recommendation",
         "recommendation_run",

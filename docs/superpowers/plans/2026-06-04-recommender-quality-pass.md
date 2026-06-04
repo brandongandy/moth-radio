@@ -1165,11 +1165,6 @@ at least one recommendation behavior test fails because mode settings and hard-h
 
 - [x] **Step 3: Wire mode settings into recommendation generation**
 
-Deviation note: rediscovery candidates are kept eligible even if multi-region seed
-selection also picked them as seeds, but only with non-self similarity evidence
-from another seed; otherwise dormant low-play artists with candidate evidence are
-excluded before the rediscovery bypass can apply.
-
 Modify imports in `src/scrobble_recs/models/recommend.py`:
 
 ```python

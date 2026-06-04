@@ -233,7 +233,7 @@ def _load_scoring_data(conn: DuckDBPyConnection, seed_ids: set[int]) -> _Scoring
 
     return _ScoringData(
         artist_names=artist_names,
-        candidates=candidates,
+        candidates=candidates - seed_ids,
         similarity_by_target=similarity_by_target,
         direct_tags_by_artist=direct_tags_by_artist,
         tag_ranks_by_artist=tag_ranks_by_artist,
@@ -254,19 +254,12 @@ def _score_candidates(
     scores: list[_CandidateScore] = []
     focused_tag_profile = _apply_tag_focus(tag_profile, mode)
     for artist_id in scoring_data.candidates:
+        if artist_id in seed_ids:
+            continue
         artist_name = scoring_data.artist_names.get(artist_id)
         if artist_name is None:
             continue
         knownness, rediscovery = scoring_data.listening_by_artist.get(artist_id, (0.0, 0.0))
-        if artist_id in seed_ids and (
-            rediscovery <= 0.0
-            or not _has_non_self_seed_similarity(
-                artist_id,
-                seed_ids,
-                scoring_data.similarity_by_target,
-            )
-        ):
-            continue
         lastfm_score = _lastfm_similarity_score(
             artist_id,
             seed_weight_by_id,
@@ -329,17 +322,6 @@ def _apply_tag_focus(
     if max_weight <= 0.0:
         return {}
     return {tag: weight / max_weight for tag, weight in focused.items()}
-
-
-def _has_non_self_seed_similarity(
-    artist_id: int,
-    seed_ids: set[int],
-    similarity_by_target: dict[int, list[tuple[int, float]]],
-) -> bool:
-    return any(
-        source_artist_id in seed_ids and source_artist_id != artist_id
-        for source_artist_id, _normalized_score in similarity_by_target.get(artist_id, [])
-    )
 
 
 def _hard_hides_obvious_candidate(

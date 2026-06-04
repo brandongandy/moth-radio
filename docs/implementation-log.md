@@ -210,3 +210,24 @@ Verified:
 - `python -m ruff check .` -> All checks passed
 - `python -m ruff format --check .` -> 27 files already formatted
 - `python -m mypy src` -> Success, no issues found in 17 source files
+
+## 2026-06-04: Task 2 listening scores and knownness
+
+Changed:
+
+- Added formula-level artist listening score models for lifetime weight, recent weight, knownness, and rediscovery score.
+- Added deterministic knownness tests for recent well-known suppression, old light-listen rediscovery, and negative count validation.
+- Added review-driven validation for mixed naive/timezone-aware datetimes and `first_played_at` after `last_played_at`.
+- Added review-driven tests for negative `track_count`, negative `active_months`, mixed timezone-awareness, and invalid play date ordering.
+- Updated the Task 2 plan checklist and documented the formula-snippet mismatch deviation.
+
+Verified:
+
+- `python -m pytest tests/test_knownness.py -v` before implementation -> failed with `ModuleNotFoundError: No module named 'scrobble_recs.models.knownness'`
+- `python -m pytest tests/test_knownness.py -v` after implementing the formula constants -> 3 passed
+- `python -m pytest tests/test_knownness.py -v` after adding review-driven tests before validation -> 2 failed and 5 passed; mixed timezone-awareness raised `TypeError`, and invalid play date ordering did not raise
+- `python -m pytest tests/test_knownness.py -v` after validation -> 7 passed
+- `python -m pytest` -> 79 passed
+- `python -m ruff check .` -> All checks passed
+- `python -m ruff format --check .` -> 29 files already formatted
+- `python -m mypy src` -> Success, no issues found in 18 source files

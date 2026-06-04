@@ -77,10 +77,13 @@ def generate_recommendations(
     effective_tag_profile = _apply_tag_focus(tag_profile, mode_settings)
     scoring_data = _load_scoring_data(conn, seed_ids)
     scores = _score_candidates(config, mode_settings, seeds, seed_ids, tag_profile, scoring_data)
-    ranked_without_explanations = sorted(
+    ranked_without_explanations = _rerank_for_diversity(
         scores,
-        key=lambda item: (-item.final_score, item.artist_name.casefold()),
-    )[:limit]
+        mode_settings,
+        scoring_data,
+        limit=limit,
+        enabled=config.recommendation.diversity.enabled,
+    )
     ranked = [
         replace(
             score,
@@ -315,6 +318,107 @@ def _score_candidates(
             )
         )
     return scores
+
+
+def _rerank_for_diversity(
+    scores: list[_CandidateScore],
+    mode: RecommendationModeSettings,
+    scoring_data: _ScoringData,
+    *,
+    limit: int,
+    enabled: bool,
+) -> list[_CandidateScore]:
+    remaining = sorted(scores, key=lambda item: (-item.final_score, item.artist_name.casefold()))
+    if not enabled:
+        return remaining[:limit]
+
+    selected: list[_CandidateScore] = []
+    primary_tag_counts: dict[str, int] = {}
+    while remaining and len(selected) < limit:
+        best_index: int | None = None
+        best_score: float | None = None
+        best_penalty = 0.0
+        for index, candidate in enumerate(remaining):
+            if _would_break_primary_tag_cap(candidate, selected, primary_tag_counts, mode):
+                continue
+            similarity = max(
+                (
+                    _candidate_similarity(candidate, already_selected, scoring_data)
+                    for already_selected in selected
+                ),
+                default=0.0,
+            )
+            diversity_penalty = (1.0 - mode.diversity_lambda) * similarity
+            rerank_score = mode.diversity_lambda * candidate.final_score - diversity_penalty
+            wins_tie = (
+                best_index is not None
+                and rerank_score == best_score
+                and candidate.artist_name.casefold() < remaining[best_index].artist_name.casefold()
+            )
+            if best_score is None or rerank_score > best_score or wins_tie:
+                best_index = index
+                best_score = rerank_score
+                best_penalty = diversity_penalty
+        if best_index is None:
+            break
+        chosen = remaining.pop(best_index)
+        chosen = replace(
+            chosen,
+            final_score=chosen.final_score - best_penalty,
+            diversity_penalty=best_penalty,
+        )
+        selected.append(chosen)
+        if chosen.primary_tag is not None and len(selected) <= 20:
+            primary_tag_counts[chosen.primary_tag] = (
+                primary_tag_counts.get(chosen.primary_tag, 0) + 1
+            )
+    return selected
+
+
+def _would_break_primary_tag_cap(
+    candidate: _CandidateScore,
+    selected: list[_CandidateScore],
+    primary_tag_counts: dict[str, int],
+    mode: RecommendationModeSettings,
+) -> bool:
+    if candidate.primary_tag is None or len(selected) >= 20:
+        return False
+    return primary_tag_counts.get(candidate.primary_tag, 0) >= mode.same_primary_tag_cap
+
+
+def _candidate_similarity(
+    left: _CandidateScore,
+    right: _CandidateScore,
+    scoring_data: _ScoringData,
+) -> float:
+    left_tags = _candidate_tag_vector(left.artist_id, scoring_data)
+    right_tags = _candidate_tag_vector(right.artist_id, scoring_data)
+    if not left_tags or not right_tags:
+        return (
+            0.75 if left.primary_tag is not None and left.primary_tag == right.primary_tag else 0.0
+        )
+    shared_tags = set(left_tags).intersection(right_tags)
+    dot = sum(left_tags[tag] * right_tags[tag] for tag in shared_tags)
+    left_norm = sqrt(sum(weight * weight for weight in left_tags.values()))
+    right_norm = sqrt(sum(weight * weight for weight in right_tags.values()))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    cosine = dot / (left_norm * right_norm)
+    if left.primary_tag is not None and left.primary_tag == right.primary_tag:
+        return max(cosine, 0.75)
+    return cosine
+
+
+def _candidate_tag_vector(
+    artist_id: int,
+    scoring_data: _ScoringData,
+) -> dict[str, float]:
+    direct_tags = scoring_data.direct_tags_by_artist.get(artist_id, {})
+    ranked_tags = {
+        tag: _rank_affinity(rank)
+        for tag, rank in scoring_data.tag_ranks_by_artist.get(artist_id, [])
+    }
+    return {**ranked_tags, **direct_tags}
 
 
 def _apply_tag_focus(

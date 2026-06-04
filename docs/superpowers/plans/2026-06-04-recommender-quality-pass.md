@@ -1462,7 +1462,7 @@ git commit -m "feat: apply modes and obviousness hiding"
 - Modify: `src/scrobble_recs/models/recommend.py`
 - Modify: `tests/test_recommend.py`
 
-- [ ] **Step 1: Add failing diversity tests**
+- [x] **Step 1: Add failing diversity tests**
 
 Append these tests to `tests/test_recommend.py`:
 
@@ -1515,8 +1515,8 @@ def test_generate_recommendations_caps_same_primary_tag_in_top_twenty(
     top_names = _recommendation_names(conn, stats.run_id)
     assert top_names[:3] == [
         "Post Punk Candidate 1",
-        "Post Punk Candidate 2",
         "Dream Pop Candidate",
+        "Post Punk Candidate 2",
     ]
     assert sum(1 for name in top_names[:5] if name.startswith("Post Punk")) == 2
     conn.close()
@@ -1584,7 +1584,7 @@ def test_generate_recommendations_persists_diversity_penalty_for_similar_followu
     conn.close()
 ```
 
-- [ ] **Step 2: Run diversity tests to verify they fail**
+- [x] **Step 2: Run diversity tests to verify they fail**
 
 Run:
 
@@ -1598,7 +1598,13 @@ Expected:
 at least one test fails because diversity reranking currently slices by final_score only
 ```
 
-- [ ] **Step 3: Implement diversity reranking**
+- [x] **Step 3: Implement diversity reranking**
+
+  Deviation: the pasted Step 1 cap test expected the second post-punk candidate
+  before the dream-pop candidate, but spec Section 14 requires literal MMR
+  ordering by `lambda * final_score - (1 - lambda) * max_similarity(...)`.
+  The test expectation was changed to put the dream-pop candidate second while
+  keeping the same-primary-tag cap assertion.
 
 Modify `generate_recommendations()` after scoring:
 
@@ -1709,7 +1715,7 @@ def _candidate_tag_vector(
     return {**ranked_tags, **direct_tags}
 ```
 
-- [ ] **Step 4: Run diversity tests to verify they pass**
+- [x] **Step 4: Run diversity tests to verify they pass**
 
 Run:
 
@@ -1723,7 +1729,7 @@ Expected:
 2 passed
 ```
 
-- [ ] **Step 5: Run all recommendation tests**
+- [x] **Step 5: Run all recommendation tests**
 
 Run:
 
@@ -1737,7 +1743,7 @@ Expected:
 all recommendation tests pass
 ```
 
-- [ ] **Step 6: Commit diversity reranking**
+- [x] **Step 6: Commit diversity reranking**
 
 Run:
 

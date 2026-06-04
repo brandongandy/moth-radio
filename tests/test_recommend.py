@@ -827,6 +827,123 @@ def test_tag_focus_mode_persists_effective_mode_scoring_metadata(tmp_path: Path)
     conn.close()
 
 
+def test_generate_recommendations_caps_same_primary_tag_in_top_twenty(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    config.recommendation.diversity.max_same_primary_tag_in_top_20 = 2
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=200,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=200, tag="post-punk", weight=100.0)
+    for offset, similarity in enumerate([0.95, 0.90, 0.85, 0.80], start=1):
+        _insert_candidate_from_seed(
+            conn,
+            seed_id=200,
+            candidate_id=200 + offset,
+            candidate_name=f"Post Punk Candidate {offset}",
+            tag="post-punk",
+            tag_rank=25 + offset,
+            similarity=similarity,
+        )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=200,
+        candidate_id=210,
+        candidate_name="Dream Pop Candidate",
+        tag="dream pop",
+        tag_rank=30,
+        similarity=0.70,
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=5,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    top_names = _recommendation_names(conn, stats.run_id)
+    assert top_names[:3] == [
+        "Post Punk Candidate 1",
+        "Dream Pop Candidate",
+        "Post Punk Candidate 2",
+    ]
+    assert sum(1 for name in top_names[:5] if name.startswith("Post Punk")) == 2
+    conn.close()
+
+
+def test_generate_recommendations_persists_diversity_penalty_for_similar_followups(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=220,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=220, tag="post-punk", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=220,
+        candidate_id=221,
+        candidate_name="First Similar Candidate",
+        tag="post-punk",
+        tag_rank=30,
+        similarity=0.95,
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=220,
+        candidate_id=222,
+        candidate_name="Second Similar Candidate",
+        tag="post-punk",
+        tag_rank=31,
+        similarity=0.90,
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=2,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    rows = conn.execute(
+        """
+        SELECT a.canonical_name, r.diversity_penalty, r.explanation
+        FROM recommendation r
+        JOIN artist a ON a.artist_id = r.artist_id
+        WHERE r.run_id = ?
+        ORDER BY r.rank
+        """,
+        [stats.run_id],
+    ).fetchall()
+    assert rows[0][0] == "First Similar Candidate"
+    assert rows[0][1] == pytest.approx(0.0)
+    assert rows[1][0] == "Second Similar Candidate"
+    assert rows[1][1] > 0.0
+    explanation = json.loads(rows[1][2])
+    assert explanation["penalties"]["diversity"] == pytest.approx(rows[1][1])
+    conn.close()
+
+
 def _insert_scoring_artist(
     conn,
     *,

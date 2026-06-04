@@ -60,3 +60,6 @@ pip-wheel-metadata/
 
 # Data
 data/
+
+# Live config data.
+config.json

@@ -150,3 +150,21 @@ Verified:
 - `python -m ruff check .` -> All checks passed
 - `python -m ruff format --check .` -> 26 files already formatted
 - `python -m mypy src` -> Success, no issues found in 17 source files
+
+## 2026-06-03: Task 8 CLI enrich command
+
+Changed:
+
+- Added `scrobble-recs enrich --config <path> --source lastfm`.
+- Wired the command to initialize the local DuckDB database, dispatch Last.fm enrichment, close the connection, and print enrichment stats.
+- Added a CLI test that monkeypatches enrichment dispatch so no network access is required.
+- Updated the Task 8 plan checkboxes after each completed step.
+
+Verified:
+
+- `python -m pytest tests/test_cli.py::test_enrich_command_dispatches_lastfm_source -v` before implementation -> failed with `AttributeError: 'module' object at scrobble_recs.cli has no attribute 'run_lastfm_enrichment'`
+- `python -m pytest tests/test_cli.py::test_enrich_command_dispatches_lastfm_source -v` after implementation -> 1 passed
+- `python -m pytest` -> 67 passed
+- `python -m ruff check .` -> All checks passed
+- `python -m ruff format --check .` -> 26 files already formatted
+- `python -m mypy src` -> Success, no issues found in 17 source files

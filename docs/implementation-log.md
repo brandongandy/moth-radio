@@ -232,6 +232,37 @@ Verified:
 - `python -m ruff format --check .` -> 29 files already formatted
 - `python -m mypy src` -> Success, no issues found in 18 source files
 
+## 2026-06-04: Task 2 multi-region seed selection
+
+Changed:
+
+- Added review-driven coverage for overlapping lifetime/recent seed regions that previously underfilled the unique seed list.
+- Added re-review coverage for two duplicate-producing backfill regions that share the same backfill artist.
+- Added duplicate-aware backfill for underfilled region selections while preserving proportional allocation against the caller limit.
+- Fixed shared backfill artists to accumulate each missing backfill region's weighted score and region label without double-counting a region already assigned to that artist.
+- Limited each region's backfill pass to the number of region slots lost to duplicate initial picks, preventing later selected artists from receiving unrelated region weights.
+- Prioritized unselected replacement seeds before applying deferred backfill region scores to already-selected artists, so duplicate backfill accounting cannot underfill the unique seed list when eligible replacements exist.
+- Treated an explicitly empty seed region sequence as no seed picks instead of falling back to the default recent region.
+- Preserved final seed ranking by accumulated weighted score descending, then name, capped to the caller limit.
+
+Verified:
+
+- `python -m pytest tests/test_profile.py::test_select_seed_artists_backfills_duplicate_region_picks -v` before implementation -> failed because only the two overlapping artists were returned instead of four unique eligible seeds
+- `python -m pytest tests/test_profile.py::test_select_seed_artists_backfills_duplicate_region_picks -v` after implementation -> 1 passed
+- `python -m pytest tests/test_profile.py::test_select_seed_artists_accumulates_shared_backfill_region -v` before re-review fix -> failed because `Shared Backfill` had seed weight `4.0` instead of `6.0`
+- `python -m pytest tests/test_profile.py::test_select_seed_artists_empty_regions_selects_no_seeds -v` before re-review fix -> failed because explicit empty regions fell back to the default recent pick
+- `python -m pytest tests/test_profile.py::test_select_seed_artists_accumulates_shared_backfill_region -v` after re-review fix -> 1 passed
+- `python -m pytest tests/test_profile.py::test_select_seed_artists_empty_regions_selects_no_seeds -v` after re-review fix -> 1 passed
+- `python -m pytest tests/test_profile.py::test_select_seed_artists_limits_backfill_to_missing_region_slots -v` before final review fix -> failed because `Lifetime Only` had seed weight `16.0` instead of `9.0`
+- `python -m pytest tests/test_profile.py::test_select_seed_artists_limits_backfill_to_missing_region_slots -v` after final review fix -> 1 passed
+- `python -m pytest tests/test_profile.py::test_select_seed_artists_prioritizes_unique_backfill_before_shared_region -v` before final spec fix -> failed because `Recent Backfill` was omitted even though it had a positive region score
+- `python -m pytest tests/test_profile.py::test_select_seed_artists_prioritizes_unique_backfill_before_shared_region -v` after final spec fix -> 1 passed
+- `python -m pytest tests/test_profile.py -v` -> 10 passed
+- `python -m pytest tests/test_recommend.py -v` -> 5 passed
+- `python -m mypy src` -> Success, no issues found in 21 source files
+- `python -m ruff check .` -> All checks passed
+- `python -m ruff format --check .` -> 34 files already formatted
+
 ## 2026-06-04: Task 3 persisted recommendation scoring
 
 Changed:

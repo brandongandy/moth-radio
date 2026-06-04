@@ -349,3 +349,23 @@ Verified:
 - `python -m ruff check .`
 - `python -m ruff format --check .`
 - `python -m mypy src`
+
+## 2026-06-04: Task 1 feedback schema migration
+
+Changed:
+
+- Added the DuckDB `feedback_event` table with lookup indexes for feedback ID, run ID, artist ID, and action.
+- Added schema migration coverage that initializes a temporary DuckDB database, asserts the feedback table exists with ordered column names and types, inserts a deterministic feedback event, and verifies duplicate feedback IDs are rejected.
+- Updated the existing database initialization schema expectation to include the feedback event table.
+- Updated the Task 1 feedback-loop plan checklist and documented the commit-content deviation for the implementation log and schema assertion update.
+
+Verified:
+
+- `python -m pytest tests/test_feedback.py::test_feedback_migration_creates_event_table -v` before migration -> failed with `AssertionError: assert 'feedback_event' in ...`
+- `python -m pytest tests/test_feedback.py::test_feedback_migration_creates_event_table -v` after migration -> 1 passed
+- `python -m pytest` before updating the full-schema assertion -> failed with `Extra items in the left set: 'feedback_event'`
+- `python -m pytest tests/test_config.py::test_initialize_database_applies_initial_migration -v` after updating the full-schema assertion -> 1 passed
+- `python -m pytest` -> 122 passed
+- `python -m ruff check .` -> All checks passed
+- `python -m ruff format --check .` -> 35 files already formatted
+- `python -m mypy src` -> Success, no issues found in 21 source files

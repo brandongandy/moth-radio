@@ -46,7 +46,9 @@ This plan deliberately keeps these pieces out of scope:
 - Create: `src/scrobble_recs/sql/004_feedback.sql`
 - Test: `tests/test_feedback.py`
 
-- [ ] **Step 1: Write failing schema tests**
+- [x] **Step 1: Write failing schema tests**
+
+Deviation note: `_columns()` returns an ordered sequence of `(column_name, data_type)` tuples instead of a dict so the test actually verifies `feedback_event` column order.
 
 Create `tests/test_feedback.py` with:
 
@@ -185,7 +187,7 @@ def _column_types(conn, table_name: str) -> dict[str, str]:
     }
 ```
 
-- [ ] **Step 2: Run schema test to verify it fails**
+- [x] **Step 2: Run schema test to verify it fails**
 
 Run:
 
@@ -199,7 +201,7 @@ Expected:
 AssertionError: assert 'feedback_event' in ...
 ```
 
-- [ ] **Step 3: Add feedback migration**
+- [x] **Step 3: Add feedback migration**
 
 Create `src/scrobble_recs/sql/004_feedback.sql` with:
 
@@ -228,7 +230,7 @@ CREATE INDEX IF NOT EXISTS feedback_event_action_key
 ON feedback_event (action);
 ```
 
-- [ ] **Step 4: Run schema test to verify it passes**
+- [x] **Step 4: Run schema test to verify it passes**
 
 Run:
 
@@ -242,7 +244,9 @@ Expected:
 1 passed
 ```
 
-- [ ] **Step 5: Commit feedback schema**
+- [x] **Step 5: Commit feedback schema**
+
+Deviation note: include `tests/test_config.py` because the full-suite schema assertion must include `feedback_event`, and include `docs/implementation-log.md` because `AGENTS.md` requires the implementation log to be updated for done.
 
 Run:
 

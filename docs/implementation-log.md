@@ -1,5 +1,42 @@
 # Implementation Log
 
+## 2026-06-05: CLI/Admin hardening
+
+Changed:
+
+- Added stricter config validation for CSV contract fields, API rate limits,
+  cache TTLs, retry counts, recommendation thresholds, and sensible defaults.
+- Added `scrobble-recs init` to write a config skeleton and initialize the local
+  DuckDB file.
+- Added typed doctor diagnostics for config, database, CSV schema, cache path,
+  Last.fm API key state, rate limits, API cache state, and import counts.
+- Hardened `scrobble-recs doctor` output and exit codes.
+- Added API cache stale-success reads and summary counts.
+- Added Last.fm retry behavior with stale-cache fallback for transient 429/5xx
+  failures.
+- Added `scrobble-recs build-profile` for local listening-score refresh, local
+  tag profile persistence, and approved local genre cluster persistence.
+- Added the `resolve --source musicbrainz` CLI boundary for the later
+  MusicBrainz identity-resolution milestone.
+
+Verified:
+
+- `python -m pytest` -> 201 passed.
+- `python -m ruff check .` -> All checks passed.
+- `python -m ruff format --check .` -> 49 files already formatted.
+- `python -m mypy src` -> Success, no issues found in 31 source files.
+- `$env:PYTHONPATH='src'; python -m scrobble_recs init --config ./.tmp-admin-hardening/config.json --force`
+  -> printed Config, Database, Cache, and Log paths.
+- `$env:PYTHONPATH='src'; python -m scrobble_recs doctor --config ./.tmp-admin-hardening/config.json`
+  -> printed diagnostic lines and exited 1 for the true missing CSV skeleton
+  error.
+- `$env:PYTHONPATH='src'; python -m scrobble_recs doctor --config config.example.json`
+  -> printed diagnostic lines and exited 0.
+- `$env:PYTHONPATH='src'; python -m scrobble_recs build-profile --config config.example.json`
+  -> printed `Profile refreshed`.
+- `$env:PYTHONPATH='src'; python -m scrobble_recs resolve --config config.example.json --source musicbrainz`
+  -> printed unresolved artist count and MusicBrainz disabled status.
+
 ## 2026-06-05: TUI scrolling and help modal
 
 Changed:

@@ -1334,7 +1334,7 @@ Task 5 checkpoint notes:
 - Create: `src/scrobble_recs/admin/doctor.py`
 - Test: `tests/test_admin_doctor.py`
 
-- [ ] **Step 1: Add failing doctor backend tests**
+- [x] **Step 1: Add failing doctor backend tests**
 
 Create `tests/test_admin_doctor.py`:
 
@@ -1445,7 +1445,7 @@ Add this import at the top:
 from datetime import datetime
 ```
 
-- [ ] **Step 2: Run doctor backend tests to verify they fail**
+- [x] **Step 2: Run doctor backend tests to verify they fail**
 
 Run:
 
@@ -1459,7 +1459,7 @@ Expected:
 ModuleNotFoundError: No module named 'scrobble_recs.admin.doctor'
 ```
 
-- [ ] **Step 3: Implement doctor diagnostics**
+- [x] **Step 3: Implement doctor diagnostics**
 
 Create `src/scrobble_recs/admin/doctor.py`:
 
@@ -1606,7 +1606,7 @@ def _import_stats_check(conn: DuckDBPyConnection) -> DiagnosticCheck:
     )
 ```
 
-- [ ] **Step 4: Run doctor backend tests to verify they pass**
+- [x] **Step 4: Run doctor backend tests to verify they pass**
 
 Run:
 
@@ -1620,7 +1620,7 @@ Expected:
 3 passed
 ```
 
-- [ ] **Step 5: Commit doctor backend**
+- [x] **Step 5: Commit doctor backend**
 
 Run:
 
@@ -1628,6 +1628,31 @@ Run:
 git add src/scrobble_recs/admin/doctor.py tests/test_admin_doctor.py
 git commit -m "feat: add doctor diagnostics backend"
 ```
+
+Task 6 checkpoint notes:
+
+- Implementer status: DONE_WITH_CONCERNS.
+- Verified red:
+  `python -m pytest tests/test_admin_doctor.py -v` failed before implementation
+  with `ModuleNotFoundError: No module named 'scrobble_recs.admin.doctor'`.
+- Verified green:
+  `python -m pytest tests/test_admin_doctor.py -v` passed with 3 tests.
+- Adjacent focused verification:
+  `python -m pytest tests/test_api_cache.py tests/test_import.py -v` passed
+  with 22 tests.
+- Changed-file lint verification:
+  `python -m ruff check src/scrobble_recs/admin/doctor.py tests/test_admin_doctor.py`
+  passed.
+- Spec review: APPROVED.
+- Code quality review: APPROVED; no findings. Residual untested branches are
+  bad CSV header, unwritable cache path, Last.fm disabled/configured states,
+  API cache error warning, and non-empty import stats.
+- Deviation: `run_doctor()` uses
+  `datetime.now(UTC).replace(tzinfo=None)` instead of `datetime.utcnow()` to
+  preserve naive UTC comparison behavior without Python 3.12 deprecation
+  warnings.
+- Architecture gate: severity `mechanical`, continue `yes`.
+- Commit status: gate permits Task 6 commit.
 
 ---
 

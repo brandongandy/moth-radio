@@ -1804,7 +1804,7 @@ Task 7 checkpoint notes:
 - Modify: `src/scrobble_recs/cli.py`
 - Modify: `tests/test_cli.py`
 
-- [ ] **Step 1: Add failing resolve CLI tests**
+- [x] **Step 1: Add failing resolve CLI tests**
 
 Append these tests to `tests/test_cli.py`:
 
@@ -1830,7 +1830,7 @@ def test_resolve_command_rejects_unknown_source(tmp_path: Path) -> None:
     assert "only --source musicbrainz is supported" in result.output
 ```
 
-- [ ] **Step 2: Run resolve CLI tests to verify they fail**
+- [x] **Step 2: Run resolve CLI tests to verify they fail**
 
 Run:
 
@@ -1844,7 +1844,7 @@ Expected:
 No such command 'resolve'
 ```
 
-- [ ] **Step 3: Add local resolve boundary command**
+- [x] **Step 3: Add local resolve boundary command**
 
 Modify `src/scrobble_recs/cli.py`.
 
@@ -1892,7 +1892,7 @@ def _count_query(conn: DuckDBPyConnection, sql: str) -> int:
     return int(row[0] or 0)
 ```
 
-- [ ] **Step 4: Run resolve tests to verify they pass**
+- [x] **Step 4: Run resolve tests to verify they pass**
 
 Run:
 
@@ -1906,7 +1906,7 @@ Expected:
 2 passed
 ```
 
-- [ ] **Step 5: Commit resolve command boundary**
+- [x] **Step 5: Commit resolve command boundary**
 
 Run:
 
@@ -1914,6 +1914,35 @@ Run:
 git add src/scrobble_recs/cli.py tests/test_cli.py
 git commit -m "feat: add resolve command boundary"
 ```
+
+Task 8 checkpoint notes:
+
+- Implementer status: DONE.
+- Verified red:
+  `python -m pytest tests/test_cli.py::test_resolve_command_reports_musicbrainz_disabled_by_default tests/test_cli.py::test_resolve_command_rejects_unknown_source -v`
+  failed before implementation because Typer reported `No such command 'resolve'`.
+- Verified green:
+  `python -m pytest tests/test_cli.py::test_resolve_command_reports_musicbrainz_disabled_by_default tests/test_cli.py::test_resolve_command_rejects_unknown_source -v`
+  passed with 2 tests.
+- Additional verification:
+  `python -m pytest tests/test_cli.py -v` passed with 26 tests.
+- Code quality review initially requested stronger behavior coverage for the
+  local unresolved-artist count and the enabled MusicBrainz not-implemented
+  branch.
+- Review fix verification:
+  `python -m pytest tests/test_cli.py::test_resolve_command_reports_musicbrainz_disabled_by_default tests/test_cli.py::test_resolve_command_rejects_unknown_source tests/test_cli.py::test_resolve_command_reports_musicbrainz_enabled_not_implemented -v`
+  passed with 3 tests.
+- Review fix full CLI verification:
+  `python -m pytest tests/test_cli.py -v` passed with 27 tests.
+- Changed-file lint verification:
+  `python -m ruff check src/scrobble_recs/cli.py tests/test_cli.py` passed.
+- Spec review: APPROVED.
+- Code quality review: APPROVED after review fixes.
+- Deviation: commit step intentionally not run because the controller requested
+  review/gate/commit ownership.
+- Architecture gate: severity `none`, continue `yes`.
+- Commit status: gate permits Task 8 commit.
+- Concerns: none.
 
 ---
 

@@ -131,6 +131,53 @@ def test_import_command_prints_stats(tmp_path: Path) -> None:
     assert "distinct artists: 4" in result.output
 
 
+def test_build_profile_command_refreshes_local_scores(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    runner.invoke(app, ["import", "--config", str(config_path)])
+
+    result = runner.invoke(app, ["build-profile", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "Profile refreshed" in result.output
+    assert "artists updated: 4" in result.output
+
+
+def test_build_profile_command_prints_profile_weight_counts(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    runner.invoke(app, ["import", "--config", str(config_path)])
+    conn = duckdb.connect(str(tmp_path / "scrobbles.duckdb"))
+    try:
+        conn.execute(
+            """
+            INSERT INTO artist_tag (
+                artist_id,
+                tag,
+                source,
+                tag_count,
+                normalized_weight,
+                fetched_at
+            )
+            VALUES
+                (4, 'post-punk', 'lastfm', 100.0, 1.0, current_timestamp),
+                (4, 'gothic rock', 'lastfm', 75.0, 0.75, current_timestamp),
+                (1, 'dream pop', 'lastfm', 50.0, 0.50, current_timestamp)
+            """
+        )
+        conn.execute("UPDATE artist_listening_fact SET play_count = 3 WHERE artist_id = 4")
+    finally:
+        conn.close()
+
+    result = runner.invoke(app, ["build-profile", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "Profile refreshed" in result.output
+    assert "artists updated: 4" in result.output
+    assert "tag weights: 2" in result.output
+    assert "genre clusters: 2" in result.output
+
+
 def test_import_command_shows_working_status_and_writes_log(tmp_path: Path) -> None:
     runner = CliRunner()
     config_path = write_config(tmp_path)

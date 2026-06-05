@@ -1030,12 +1030,15 @@ Checkpoint:
 
 **Files:**
 - Create: `src/scrobble_recs/models/listening.py`
+- Create: `src/scrobble_recs/models/profile_builder.py`
+- Create: `src/scrobble_recs/sql/005_profile.sql`
 - Modify: `src/scrobble_recs/models/recommend.py`
 - Modify: `src/scrobble_recs/cli.py`
 - Test: `tests/test_profile.py`
 - Test: `tests/test_cli.py`
+- Test: `tests/test_config.py`
 
-- [ ] **Step 1: Add failing local profile refresh tests**
+- [x] **Step 1: Add failing local profile refresh tests**
 
 Append this test to `tests/test_profile.py`:
 
@@ -1073,7 +1076,7 @@ from datetime import datetime
 from pathlib import Path
 ```
 
-- [ ] **Step 2: Add failing build-profile CLI test**
+- [x] **Step 2: Add failing build-profile CLI test**
 
 Append this test to `tests/test_cli.py`:
 
@@ -1090,7 +1093,7 @@ def test_build_profile_command_refreshes_local_scores(tmp_path: Path) -> None:
     assert "artists updated: 4" in result.output
 ```
 
-- [ ] **Step 3: Run profile tests to verify they fail**
+- [x] **Step 3: Run profile tests to verify they fail**
 
 Run:
 
@@ -1104,7 +1107,7 @@ Expected:
 ModuleNotFoundError: No module named 'scrobble_recs.models.listening'
 ```
 
-- [ ] **Step 4: Create the public listening refresh module**
+- [x] **Step 4: Create the public listening refresh module**
 
 Create `src/scrobble_recs/models/listening.py`:
 
@@ -1180,7 +1183,7 @@ def refresh_artist_listening_scores(
     return ListeningRefreshStats(artists_updated=updated)
 ```
 
-- [ ] **Step 5: Reuse the public refresh helper in recommendations**
+- [x] **Step 5: Reuse the public refresh helper in recommendations**
 
 Modify `src/scrobble_recs/models/recommend.py`.
 
@@ -1208,7 +1211,7 @@ Delete the private `_refresh_artist_listening_scores` function and remove now-un
 from scrobble_recs.models.knownness import ArtistListeningInput, compute_artist_listening_scores
 ```
 
-- [ ] **Step 6: Add the build-profile CLI command**
+- [x] **Step 6: Add the build-profile CLI command**
 
 Modify `src/scrobble_recs/cli.py`.
 
@@ -1237,7 +1240,7 @@ def build_profile_command(
     console.print(f"artists updated: {stats.artists_updated}")
 ```
 
-- [ ] **Step 7: Run profile and recommendation tests**
+- [x] **Step 7: Run profile and recommendation tests**
 
 Run:
 
@@ -1251,14 +1254,77 @@ Expected:
 passed
 ```
 
-- [ ] **Step 8: Commit build-profile work**
+- [x] **Step 8: Expand build-profile to full local profile behavior**
 
-Run:
+Human decision: Option B, require full build-profile behavior now rather than
+committing the narrow listening-score-only implementation.
 
-```bash
-git add src/scrobble_recs/models/listening.py src/scrobble_recs/models/recommend.py src/scrobble_recs/cli.py tests/test_profile.py tests/test_cli.py
-git commit -m "feat: add local build-profile command"
-```
+Implemented:
+
+- Added `tag_profile` and `profile_cluster` persistence in
+  `src/scrobble_recs/sql/005_profile.sql`.
+- Added `src/scrobble_recs/models/profile_builder.py` as the public local
+  profile builder.
+- `build_profile()` refreshes artist listening scores, selects local seed
+  artists using configured seed limits and min scrobbles, derives normalized
+  tag weights from local `artist_tag` rows for selected seeds, and persists
+  deterministic tag-based genre clusters with inspectable JSON payloads.
+- Review fix: `profile_cluster.cluster_key` now uses
+  `source:readable-slug:stable-tag-hash` so distinct tags that slugify to the
+  same value still persist as separate clusters.
+- `scrobble-recs build-profile --config ...` now prints artist, tag weight,
+  and genre cluster counts.
+
+- [x] **Step 9: Parent gate review / commit decision**
+
+Task 5 checkpoint notes:
+
+- Human decision on resume: Option A approved on 2026-06-05.
+  `profile_cluster` is approved as the durable storage contract for §7 genre
+  clusters, including the columns and indexes in `005_profile.sql`,
+  inspectable JSON evidence payloads, deterministic one-tag-per-cluster
+  baseline behavior, and collision-safe `source:readable-slug:stable-tag-hash`
+  keys.
+- Deviation: `build-profile` uses `datetime.now(tz=UTC).replace(tzinfo=None)`
+  instead of `datetime.utcnow()` to keep naive UTC behavior without Python 3.12
+  deprecation warnings.
+- Deviation: `refresh_artist_listening_scores()` also updates
+  `artist_listening_fact.updated_at = current_timestamp`, preserving the
+  previous recommendation refresh behavior that the plan's extracted helper
+  omitted.
+- Verified red:
+  `python -m pytest tests/test_profile.py::test_refresh_artist_listening_scores_updates_weights_for_build_profile tests/test_cli.py::test_build_profile_command_refreshes_local_scores -v`
+  failed before implementation with missing `scrobble_recs.models.listening`.
+- Verified green:
+  `python -m pytest tests/test_profile.py tests/test_recommend.py tests/test_cli.py::test_build_profile_command_refreshes_local_scores -v`
+  passed with 38 tests.
+- Option B red verification:
+  `python -m pytest tests/test_profile.py::test_build_profile_persists_tag_profile_and_genre_clusters tests/test_cli.py::test_build_profile_command_prints_profile_weight_counts -v`
+  failed before implementation with missing `scrobble_recs.models.profile_builder`
+  and missing CLI tag/cluster counts.
+- Option B green verification:
+  `python -m pytest tests/test_profile.py tests/test_recommend.py tests/test_cli.py::test_build_profile_command_refreshes_local_scores tests/test_cli.py::test_build_profile_command_prints_profile_weight_counts -v`
+  passed with 40 tests.
+- Review fix red verification:
+  `python -m pytest tests/test_profile.py::test_build_profile_persists_clusters_for_slug_colliding_tags -v`
+  failed before the fix with a duplicate `profile_cluster` key
+  `lastfm:post-punk`.
+- Review fix green verification:
+  `python -m pytest tests/test_profile.py tests/test_recommend.py tests/test_cli.py::test_build_profile_command_refreshes_local_scores tests/test_cli.py::test_build_profile_command_prints_profile_weight_counts tests/test_config.py::test_initialize_database_applies_initial_migration -v`
+  passed with 42 tests.
+- Spec review: APPROVED after the collision fix.
+- Code quality review: APPROVED.
+- Architecture gate verdict after resume: `severity: local-design`,
+  `continue: yes`. The prior architectural stop condition was resolved by the
+  recorded Option A approval.
+- Previous architecture gate verdict: `severity: architectural`,
+  `continue: no`. Execution paused before commit because `profile_cluster` was
+  a new durable schema contract not explicitly specified in the approved schema.
+- Required human decision: approve `profile_cluster` as the durable storage
+  contract for §7 genre clusters, including deterministic one-tag-per-cluster
+  baseline behavior and collision-safe keys, or require a different
+  representation before commit. Decision applied: Option A approved.
+- Commit status: gate permits Task 5 commit after Option A approval.
 
 ---
 

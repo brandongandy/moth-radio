@@ -10,6 +10,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Static
 
+from scrobble_recs.models.feedback import record_feedback_event, rerank_recommendation_run
 from scrobble_recs.tui.data import (
     RecommendationDetail,
     RecommendationFilters,
@@ -139,11 +140,28 @@ class ScrobbleRecsTui(App[None]):
 
     def action_feedback(self, action: str) -> None:
         detail = self._selected_detail()
-        if detail is None:
+        if detail is None or self.run_id is None:
             self.query_one("#status", Static).update("No recommendation selected")
             return
+        tags = list(detail.tags)
+        try:
+            record_feedback_event(
+                self.conn,
+                run_id=self.run_id,
+                artist_id=detail.artist_id,
+                action=action,
+                context={"tags": tags},
+            )
+            stats = rerank_recommendation_run(self.conn, self.run_id)
+        except ValueError as exc:
+            self.query_one("#status", Static).update(f"Feedback error: {exc}")
+            return
+        selected_artist_id = detail.artist_id
+        self.rows = self.store.list_recommendations(self.filters, run_id=self.run_id)
+        self.selected_index = _index_for_artist(self.rows, selected_artist_id)
+        self._render_all()
         self.query_one("#status", Static).update(
-            f"Feedback action reserved for TUI V1 follow-up: {action}"
+            f"Feedback recorded: {action}; reranked {stats.recommendations}; hidden {stats.hidden}"
         )
 
     def action_undo_unavailable(self) -> None:
@@ -151,7 +169,7 @@ class ScrobbleRecsTui(App[None]):
 
     def action_help_status(self) -> None:
         self.query_one("#status", Static).update(
-            "Keys: j/k move, s/r/a/o/w/m/l/h feedback placeholders, u undo, q quit"
+            "Keys: j/k move, s/r/a/o/w/m/l/h feedback keys, u undo, q quit"
         )
 
     def _reload_rows(self) -> None:
@@ -267,6 +285,13 @@ class ScrobbleRecsTui(App[None]):
 
 def _join_or_none(values: tuple[str, ...]) -> str:
     return ", ".join(values) if values else "none"
+
+
+def _index_for_artist(rows: list[RecommendationListRow], artist_id: int) -> int:
+    for index, row in enumerate(rows):
+        if row.artist_id == artist_id:
+            return index
+    return 0
 
 
 class _InspectableStatic(Static):

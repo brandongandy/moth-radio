@@ -287,3 +287,184 @@ def _context_tags(context: dict[str, Any]) -> list[str]:
     if not isinstance(raw_tags, list):
         return []
     return sorted({str(tag).strip().casefold() for tag in raw_tags if str(tag).strip()})
+
+
+@dataclass(frozen=True)
+class FeedbackRerankStats:
+    run_id: str
+    recommendations: int
+    hidden: int
+
+
+@dataclass(frozen=True)
+class _RerankRow:
+    artist_id: int
+    final_score: float
+    feedback_score: float
+    adjusted_score: float
+    explanation: dict[str, Any]
+    hidden: bool
+
+
+def rerank_recommendation_run(
+    conn: DuckDBPyConnection,
+    run_id: str,
+) -> FeedbackRerankStats:
+    rows = _load_rerank_rows(conn, run_id)
+    if not rows:
+        raise ValueError(f"recommendation run {run_id!r} has no recommendations")
+    profile = load_feedback_profile(conn)
+    current_run_hidden_artist_ids = _load_current_run_hidden_artist_ids(conn, run_id)
+    adjusted = [
+        _apply_feedback_to_rerank_row(row, profile, current_run_hidden_artist_ids) for row in rows
+    ]
+    visible = sorted(
+        (row for row in adjusted if not row.hidden),
+        key=lambda row: (-row.adjusted_score, row.artist_id),
+    )
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        conn.execute("UPDATE recommendation SET rank = -rank WHERE run_id = ?", [run_id])
+        hidden_count = len(adjusted) - len(visible)
+        for rank, row in enumerate(visible, start=1):
+            conn.execute(
+                """
+                UPDATE recommendation
+                SET rank = ?,
+                    final_score = ?,
+                    feedback_score = ?,
+                    explanation = ?
+                WHERE run_id = ?
+                  AND artist_id = ?
+                """,
+                [
+                    rank,
+                    row.adjusted_score,
+                    row.feedback_score,
+                    json.dumps(row.explanation, sort_keys=True),
+                    run_id,
+                    row.artist_id,
+                ],
+            )
+        conn.execute(
+            """
+            DELETE FROM recommendation
+            WHERE run_id = ?
+              AND rank < 0
+            """,
+            [run_id],
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return FeedbackRerankStats(
+        run_id=run_id,
+        recommendations=len(visible),
+        hidden=hidden_count,
+    )
+
+
+def _load_rerank_rows(conn: DuckDBPyConnection, run_id: str) -> list[_RerankRow]:
+    loaded = []
+    for artist_id, final_score, feedback_score, explanation_json in conn.execute(
+        """
+        SELECT artist_id, final_score, coalesce(feedback_score, 0.0), explanation
+        FROM recommendation
+        WHERE run_id = ?
+        ORDER BY rank
+        """,
+        [run_id],
+    ).fetchall():
+        loaded.append(
+            _RerankRow(
+                artist_id=int(artist_id),
+                final_score=float(final_score or 0.0),
+                feedback_score=float(feedback_score or 0.0),
+                adjusted_score=float(final_score or 0.0),
+                explanation=_parse_context(explanation_json),
+                hidden=False,
+            )
+        )
+    return loaded
+
+
+def _apply_feedback_to_rerank_row(
+    row: _RerankRow,
+    profile: FeedbackProfile,
+    current_run_hidden_artist_ids: set[int],
+) -> _RerankRow:
+    candidate_tags = _explanation_tag_weights(row.explanation)
+    feedback_score = feedback_adjustment_for_candidate(
+        profile,
+        artist_id=row.artist_id,
+        candidate_tags=candidate_tags,
+    )
+    hidden = (
+        row.artist_id in profile.hidden_artist_ids or row.artist_id in current_run_hidden_artist_ids
+    )
+    explanation = dict(row.explanation)
+    explanation["feedback"] = {
+        "score": feedback_score,
+        "effects": _feedback_effect_labels(feedback_score, hidden=hidden),
+    }
+    return _RerankRow(
+        artist_id=row.artist_id,
+        final_score=row.final_score,
+        feedback_score=feedback_score,
+        adjusted_score=row.final_score - row.feedback_score + feedback_score,
+        explanation=explanation,
+        hidden=hidden,
+    )
+
+
+def _load_current_run_hidden_artist_ids(
+    conn: DuckDBPyConnection,
+    run_id: str,
+) -> set[int]:
+    return {
+        int(row[0])
+        for row in conn.execute(
+            """
+            SELECT DISTINCT artist_id
+            FROM feedback_event
+            WHERE run_id = ?
+              AND action IN ('too_obvious', 'already_know', 'hide_artist')
+            """,
+            [run_id],
+        ).fetchall()
+    }
+
+
+def _explanation_tag_weights(explanation: dict[str, Any]) -> dict[str, float]:
+    tags = explanation.get("tags", [])
+    if not isinstance(tags, list):
+        return {}
+    weights: dict[str, float] = {}
+    for item in tags:
+        if not isinstance(item, dict):
+            continue
+        tag = str(item.get("tag", "")).strip().casefold()
+        if not tag:
+            continue
+        raw_weight = item.get("candidate_weight", item.get("user_weight", 1.0))
+        if raw_weight is None:
+            weight = 1.0
+        else:
+            try:
+                weight = float(raw_weight)
+            except (TypeError, ValueError):
+                weight = 1.0
+        weights[tag] = max(weights.get(tag, 0.0), weight)
+    return weights
+
+
+def _feedback_effect_labels(feedback_score: float, *, hidden: bool = False) -> list[str]:
+    effects: list[str] = []
+    if hidden:
+        effects.append("hidden")
+    if feedback_score > 0.0:
+        effects.append("boost")
+    if feedback_score < 0.0:
+        effects.append("suppression")
+    return effects

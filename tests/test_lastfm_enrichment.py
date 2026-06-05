@@ -268,6 +268,30 @@ def test_run_lastfm_enrichment_persists_edges_tags_and_top_artists(
     conn.close()
 
 
+def test_run_lastfm_enrichment_reports_phase_item_progress(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    conn = initialize_database(config)
+    import_lastfm_csv(conn, Path("tests/fixtures/tiny_lastfm_export.csv"))
+    client = FakeLastFmClient()
+    events = []
+
+    run_lastfm_enrichment(conn, config, client=client, progress_callback=events.append)
+
+    assert [
+        (event.phase, event.current, event.total, event.subject, event.status) for event in events
+    ] == [
+        ("seed_similarity", 0, 1, "The Cure", "processing"),
+        ("seed_similarity", 1, 1, "The Cure", "completed"),
+        ("seed_tags", 0, 1, "The Cure", "processing"),
+        ("seed_tags", 1, 1, "The Cure", "completed"),
+        ("tag_top_artists", 0, 2, "post-punk", "processing"),
+        ("tag_top_artists", 1, 2, "post-punk", "completed"),
+        ("tag_top_artists", 1, 2, "gothic rock", "processing"),
+        ("tag_top_artists", 2, 2, "gothic rock", "completed"),
+    ]
+    conn.close()
+
+
 def test_run_lastfm_enrichment_skips_already_normalized_work_on_second_run(
     tmp_path: Path,
 ) -> None:

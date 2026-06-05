@@ -124,6 +124,7 @@ def test_enrich_command_dispatches_lastfm_source(tmp_path: Path, monkeypatch) ->
     config_path = write_config(tmp_path)
     runner.invoke(app, ["import", "--config", str(config_path)])
     calls: list[str] = []
+    progress_events: list[str] = []
 
     class FakeStats:
         seed_artists = 1
@@ -135,8 +136,18 @@ def test_enrich_command_dispatches_lastfm_source(tmp_path: Path, monkeypatch) ->
         artist_tags = 2
         tag_top_artists = 4
 
-    def fake_enrich(conn, config, *, client=None):
+    class FakeProgress:
+        phase = "seed_similarity"
+        current = 0
+        total = 1
+        subject = "The Cure"
+        status = "processing"
+
+    def fake_enrich(conn, config, *, client=None, progress_callback=None):
         calls.append(config.app.name)
+        assert progress_callback is not None
+        progress_callback(FakeProgress())
+        progress_events.append("reported")
         return FakeStats()
 
     monkeypatch.setattr("scrobble_recs.cli.run_lastfm_enrichment", fake_enrich)
@@ -145,6 +156,9 @@ def test_enrich_command_dispatches_lastfm_source(tmp_path: Path, monkeypatch) ->
 
     assert result.exit_code == 0
     assert calls == ["scrobble-recs"]
+    assert progress_events == ["reported"]
+    assert "Large Last.fm enrichment runs can take some time" in result.output
+    assert "please be patient" in result.output
     assert "Last.fm enrichment complete" in result.output
     assert "seed artists: 1" in result.output
     assert "similar artist requests: 1" in result.output

@@ -5,11 +5,18 @@ from pathlib import Path
 from typing import Annotated, cast
 
 import typer
+from duckdb import DuckDBPyConnection
 from rich.console import Console
+from rich.markup import escape
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn
 
-from scrobble_recs.config import load_config
+from scrobble_recs.config import ScrobbleRecsConfig, load_config
 from scrobble_recs.db import initialize_database
-from scrobble_recs.enrichment.lastfm import LastFmEnrichmentStats, run_lastfm_enrichment
+from scrobble_recs.enrichment.lastfm import (
+    LastFmEnrichmentProgress,
+    LastFmEnrichmentStats,
+    run_lastfm_enrichment,
+)
 from scrobble_recs.export import ExportFormat, export_recommendations
 from scrobble_recs.importers.lastfm_csv import ImportStats, get_import_stats, import_lastfm_csv
 from scrobble_recs.models.feedback import record_feedback_event, rerank_recommendation_run
@@ -18,6 +25,11 @@ from scrobble_recs.tui.app import ScrobbleRecsTui
 
 app = typer.Typer(help="Local-first Last.fm recommendation tooling.")
 console = Console()
+_ENRICHMENT_PHASE_LABELS = {
+    "seed_similarity": "Seed similar artists",
+    "seed_tags": "Seed artist tags",
+    "tag_top_artists": "Tag top artists",
+}
 
 
 @app.command("import")
@@ -84,7 +96,11 @@ def enrich_command(
     conn = initialize_database(resolved_config)
     try:
         try:
-            stats = run_lastfm_enrichment(conn, resolved_config)
+            console.print(
+                "Large Last.fm enrichment runs can take some time; "
+                "Last.fm API calls are rate limited, so please be patient."
+            )
+            stats = _run_lastfm_enrichment_with_progress(conn, resolved_config)
         except RuntimeError as exc:
             console.print(f"Error: {exc}")
             raise typer.Exit(code=1) from exc
@@ -252,6 +268,43 @@ def _print_enrichment_stats(stats: LastFmEnrichmentStats) -> None:
     console.print(f"similarity edges: {stats.similarity_edges}")
     console.print(f"artist tags: {stats.artist_tags}")
     console.print(f"tag top artists: {stats.tag_top_artists}")
+
+
+def _run_lastfm_enrichment_with_progress(
+    conn: DuckDBPyConnection,
+    resolved_config: ScrobbleRecsConfig,
+) -> LastFmEnrichmentStats:
+    task_ids: dict[str, TaskID] = {}
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+
+        def on_progress(event: LastFmEnrichmentProgress) -> None:
+            task_id = task_ids.get(event.phase)
+            if task_id is None:
+                task_id = progress.add_task(
+                    _format_enrichment_progress_description(event),
+                    total=event.total,
+                )
+                task_ids[event.phase] = task_id
+            progress.update(
+                task_id,
+                completed=event.current,
+                total=event.total,
+                description=_format_enrichment_progress_description(event),
+            )
+
+        return run_lastfm_enrichment(conn, resolved_config, progress_callback=on_progress)
+
+
+def _format_enrichment_progress_description(event: LastFmEnrichmentProgress) -> str:
+    phase = _ENRICHMENT_PHASE_LABELS.get(event.phase, event.phase)
+    return f"{phase}: {escape(event.subject)} ({event.status})"
 
 
 def _print_recommendation_stats(stats: RecommendationStats) -> None:

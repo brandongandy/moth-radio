@@ -194,7 +194,10 @@ async def _test_tui_help_key_updates_status(tmp_path: Path) -> None:
         async with app.run_test() as pilot:
             await pilot.press("?")
             await pilot.pause()
-            assert "Keys: j/k move" in _rendered_plain(app, "#status")
+            status = _rendered_plain(app, "#status")
+            assert "Keys: j/k move" in status
+            assert "feedback keys" in status
+            assert "feedback placeholders" not in status
     finally:
         conn.close()
 
@@ -218,11 +221,11 @@ async def _test_tui_undo_key_updates_status(tmp_path: Path) -> None:
         conn.close()
 
 
-def test_tui_feedback_placeholder_key_updates_status_for_selected_row(tmp_path: Path) -> None:
-    asyncio.run(_test_tui_feedback_placeholder_key_updates_status_for_selected_row(tmp_path))
+def test_tui_feedback_key_records_local_feedback_for_selected_row(tmp_path: Path) -> None:
+    asyncio.run(_test_tui_feedback_key_records_local_feedback_for_selected_row(tmp_path))
 
 
-async def _test_tui_feedback_placeholder_key_updates_status_for_selected_row(
+async def _test_tui_feedback_key_records_local_feedback_for_selected_row(
     tmp_path: Path,
 ) -> None:
     config = load_config(write_config(tmp_path))
@@ -235,9 +238,9 @@ async def _test_tui_feedback_placeholder_key_updates_status_for_selected_row(
             await pilot.press("m")
             await pilot.pause()
             assert app.selected_artist_id == 60
-            assert "Feedback action reserved for TUI V1 follow-up: more_like_this" in (
-                _rendered_plain(app, "#status")
-            )
+            assert "Feedback recorded: more_like_this" in _rendered_plain(app, "#status")
+            actions = conn.execute("SELECT action FROM feedback_event").fetchall()
+            assert actions == [("more_like_this",)]
     finally:
         conn.close()
 
@@ -355,6 +358,254 @@ async def _test_tui_debug_score_toggle_shows_component_scores(tmp_path: Path) ->
         assert "diversity penalty:" in rendered
 
     conn.close()
+
+
+def test_tui_feedback_key_records_event_reranks_and_reloads(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    asyncio.run(_test_tui_feedback_key_records_event_reranks_and_reloads(tmp_path, monkeypatch))
+
+
+async def _test_tui_feedback_key_records_event_reranks_and_reloads(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    run_id = "00000000-0000-0000-0000-000000000107"
+    _insert_run(conn, run_id=run_id, mode="balanced")
+    _insert_artist(conn, artist_id=60, name="Feedback Artist")
+    _insert_recommendation(
+        conn,
+        run_id=run_id,
+        artist_id=60,
+        rank=1,
+        final_score=0.9,
+        explanation={"summary": "Feedback summary.", "tags": [{"tag": "post-punk"}]},
+    )
+    calls: list[tuple[str, int, str, dict[str, object]]] = []
+    reranks: list[str] = []
+
+    class FakeStats:
+        recommendations = 1
+        hidden = 0
+
+    def fake_record(conn_arg, *, run_id, artist_id, action, value=1.0, context=None, note=None):
+        calls.append((run_id, artist_id, action, context or {}))
+
+    def fake_rerank(conn_arg, run_id_arg):
+        reranks.append(run_id_arg)
+        return FakeStats()
+
+    monkeypatch.setattr("scrobble_recs.tui.app.record_feedback_event", fake_record)
+    monkeypatch.setattr("scrobble_recs.tui.app.rerank_recommendation_run", fake_rerank)
+
+    app = ScrobbleRecsTui(conn)
+    async with app.run_test() as pilot:
+        await pilot.press("m")
+        await pilot.pause()
+        assert calls == [
+            (
+                run_id,
+                60,
+                "more_like_this",
+                {"tags": ["post-punk"]},
+            )
+        ]
+        assert reranks == [run_id]
+        assert (
+            "Feedback recorded: more_like_this; reranked 1; hidden 0"
+            in app.query_one("#status").renderable
+        )
+
+    conn.close()
+
+
+def test_tui_feedback_key_reloads_rows_and_preserves_selected_artist_after_rerank(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(
+        _test_tui_feedback_key_reloads_rows_and_preserves_selected_artist_after_rerank(tmp_path)
+    )
+
+
+async def _test_tui_feedback_key_reloads_rows_and_preserves_selected_artist_after_rerank(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    try:
+        run_id = "00000000-0000-0000-0000-000000000109"
+        _insert_run(conn, run_id=run_id, mode="balanced")
+        _insert_artist(conn, artist_id=80, name="First Rerank")
+        _insert_artist(conn, artist_id=81, name="Second Rerank")
+        _insert_recommendation(
+            conn,
+            run_id=run_id,
+            artist_id=80,
+            rank=1,
+            final_score=0.9,
+            explanation={"summary": "First.", "tags": [{"tag": "post-punk"}]},
+        )
+        _insert_recommendation(
+            conn,
+            run_id=run_id,
+            artist_id=81,
+            rank=2,
+            final_score=0.8,
+            explanation={"summary": "Second.", "tags": [{"tag": "coldwave"}]},
+        )
+
+        app = ScrobbleRecsTui(conn)
+        async with app.run_test() as pilot:
+            await pilot.press("j")
+            await pilot.pause()
+            assert app.selected_artist_id == 81
+            assert app.rows[0].artist_id == 80
+
+            await pilot.press("m")
+            await pilot.pause()
+
+            assert [row.artist_id for row in app.rows] == [81, 80]
+            assert app.selected_index == 0
+            assert app.selected_artist_id == 81
+            assert "Second Rerank" in _rendered_plain(app, "#detail")
+            assert "Feedback recorded: more_like_this; reranked 2; hidden 0" in _rendered_plain(
+                app, "#status"
+            )
+            ranks = conn.execute(
+                """
+                SELECT artist_id, rank
+                FROM recommendation
+                WHERE run_id = ?
+                ORDER BY rank
+                """,
+                [run_id],
+            ).fetchall()
+            assert ranks == [(81, 1), (80, 2)]
+    finally:
+        conn.close()
+
+
+def test_tui_feedback_key_uses_selected_artist_after_navigation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    asyncio.run(_test_tui_feedback_key_uses_selected_artist_after_navigation(tmp_path, monkeypatch))
+
+
+async def _test_tui_feedback_key_uses_selected_artist_after_navigation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    run_id = "00000000-0000-0000-0000-000000000108"
+    _insert_run(conn, run_id=run_id, mode="balanced")
+    _insert_artist(conn, artist_id=70, name="First Feedback")
+    _insert_artist(conn, artist_id=71, name="Second Feedback")
+    _insert_recommendation(
+        conn,
+        run_id=run_id,
+        artist_id=70,
+        rank=1,
+        final_score=0.9,
+        explanation={"summary": "First.", "tags": [{"tag": "post-punk"}]},
+    )
+    _insert_recommendation(
+        conn,
+        run_id=run_id,
+        artist_id=71,
+        rank=2,
+        final_score=0.8,
+        explanation={"summary": "Second.", "tags": [{"tag": "coldwave"}]},
+    )
+    artist_ids: list[int] = []
+
+    def fake_record(conn_arg, *, run_id, artist_id, action, value=1.0, context=None, note=None):
+        artist_ids.append(artist_id)
+
+    def fake_rerank(conn_arg, run_id_arg):
+        class FakeStats:
+            recommendations = 2
+            hidden = 0
+
+        return FakeStats()
+
+    monkeypatch.setattr("scrobble_recs.tui.app.record_feedback_event", fake_record)
+    monkeypatch.setattr("scrobble_recs.tui.app.rerank_recommendation_run", fake_rerank)
+
+    app = ScrobbleRecsTui(conn)
+    async with app.run_test() as pilot:
+        await pilot.press("j")
+        await pilot.press("r")
+        await pilot.pause()
+        assert artist_ids == [71]
+
+    conn.close()
+
+
+def test_tui_feedback_key_shows_no_selection_when_run_has_no_rows(tmp_path: Path) -> None:
+    asyncio.run(_test_tui_feedback_key_shows_no_selection_when_run_has_no_rows(tmp_path))
+
+
+async def _test_tui_feedback_key_shows_no_selection_when_run_has_no_rows(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    try:
+        _insert_run(conn, run_id="00000000-0000-0000-0000-000000000110", mode="balanced")
+
+        app = ScrobbleRecsTui(conn)
+        async with app.run_test() as pilot:
+            await pilot.press("m")
+            await pilot.pause()
+            assert "No recommendation selected" in _rendered_plain(app, "#status")
+    finally:
+        conn.close()
+
+
+def test_tui_feedback_key_shows_no_selection_when_no_run_exists(tmp_path: Path) -> None:
+    asyncio.run(_test_tui_feedback_key_shows_no_selection_when_no_run_exists(tmp_path))
+
+
+async def _test_tui_feedback_key_shows_no_selection_when_no_run_exists(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    try:
+        app = ScrobbleRecsTui(conn)
+        async with app.run_test() as pilot:
+            await pilot.press("m")
+            await pilot.pause()
+            assert "No recommendation selected" in _rendered_plain(app, "#status")
+    finally:
+        conn.close()
+
+
+def test_tui_feedback_key_reports_rerank_error(tmp_path: Path, monkeypatch) -> None:
+    asyncio.run(_test_tui_feedback_key_reports_rerank_error(tmp_path, monkeypatch))
+
+
+async def _test_tui_feedback_key_reports_rerank_error(tmp_path: Path, monkeypatch) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    try:
+        _insert_single_recommendation(conn, artist_id=82, artist="Error Artist")
+
+        def fake_rerank(conn_arg, run_id_arg):
+            raise ValueError("local rerank failed")
+
+        monkeypatch.setattr("scrobble_recs.tui.app.rerank_recommendation_run", fake_rerank)
+
+        app = ScrobbleRecsTui(conn)
+        async with app.run_test() as pilot:
+            await pilot.press("m")
+            await pilot.pause()
+            assert "Feedback error: local rerank failed" in _rendered_plain(app, "#status")
+    finally:
+        conn.close()
 
 
 def _insert_run(conn, *, run_id: str, mode: str) -> None:

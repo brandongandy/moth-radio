@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Literal, Protocol, TypeAlias
 
 from duckdb import DuckDBPyConnection
 
@@ -23,6 +24,14 @@ _SIMILAR_ENDPOINT = "artist.getSimilar"
 _ARTIST_TAGS_ENDPOINT = "artist.getTopTags"
 _TAG_TOP_ARTISTS_ENDPOINT = "tag.getTopArtists"
 _NO_REQUEST_LIMIT = 0
+
+LastFmEnrichmentPhase: TypeAlias = Literal[
+    "seed_similarity",
+    "seed_tags",
+    "tag_top_artists",
+]
+LastFmEnrichmentProgressStatus: TypeAlias = Literal["processing", "completed", "skipped"]
+LastFmEnrichmentProgressCallback: TypeAlias = Callable[["LastFmEnrichmentProgress"], None]
 
 
 class LastFmClientProtocol(Protocol):
@@ -48,11 +57,21 @@ class LastFmEnrichmentStats:
     tag_top_artists: int
 
 
+@dataclass(frozen=True)
+class LastFmEnrichmentProgress:
+    phase: LastFmEnrichmentPhase
+    current: int
+    total: int
+    subject: str
+    status: LastFmEnrichmentProgressStatus
+
+
 def run_lastfm_enrichment(
     conn: DuckDBPyConnection,
     config: ScrobbleRecsConfig,
     *,
     client: LastFmClientProtocol | None = None,
+    progress_callback: LastFmEnrichmentProgressCallback | None = None,
 ) -> LastFmEnrichmentStats:
     owns_client = client is None
     if owns_client and not config.apis.lastfm.enabled:
@@ -72,11 +91,28 @@ def run_lastfm_enrichment(
         )
         stats = _MutableStats(seed_artists=len(seeds))
 
-        for seed in seeds:
-            _enrich_seed_similarity(conn, resolved_client, seed, config, stats)
-            _enrich_seed_tags(conn, resolved_client, seed, stats)
+        for index, seed in enumerate(seeds):
+            _enrich_seed_similarity(
+                conn,
+                resolved_client,
+                seed,
+                config,
+                stats,
+                progress_callback=progress_callback,
+                current=index,
+                total=len(seeds),
+            )
+            _enrich_seed_tags(
+                conn,
+                resolved_client,
+                seed,
+                stats,
+                progress_callback=progress_callback,
+                current=index,
+                total=len(seeds),
+            )
 
-        _enrich_tag_top_artists(conn, resolved_client, config, stats)
+        _enrich_tag_top_artists(conn, resolved_client, config, stats, progress_callback)
 
         return stats.snapshot()
     finally:
@@ -116,9 +152,29 @@ def _enrich_seed_similarity(
     seed: SeedArtist,
     config: ScrobbleRecsConfig,
     stats: _MutableStats,
+    *,
+    progress_callback: LastFmEnrichmentProgressCallback | None,
+    current: int,
+    total: int,
 ) -> None:
     limit = config.recommendation.similar_artists_per_seed
+    _report_progress(
+        progress_callback,
+        phase="seed_similarity",
+        current=current,
+        total=total,
+        subject=seed.lastfm_name,
+        status="processing",
+    )
     if _work_completed(conn, _SIMILAR_ENDPOINT, seed.artist_key, limit):
+        _report_progress(
+            progress_callback,
+            phase="seed_similarity",
+            current=current + 1,
+            total=total,
+            subject=seed.lastfm_name,
+            status="skipped",
+        )
         return
     replacement_needed = _work_completed_for_subject(conn, _SIMILAR_ENDPOINT, seed.artist_key)
 
@@ -133,6 +189,14 @@ def _enrich_seed_similarity(
         )
         stats.artists_created += created
         stats.similarity_edges += inserted
+        _report_progress(
+            progress_callback,
+            phase="seed_similarity",
+            current=current + 1,
+            total=total,
+            subject=seed.lastfm_name,
+            status="completed",
+        )
         return
 
     created, inserted = _persist_similarity_edges(
@@ -143,6 +207,14 @@ def _enrich_seed_similarity(
     )
     stats.artists_created += created
     stats.similarity_edges += inserted
+    _report_progress(
+        progress_callback,
+        phase="seed_similarity",
+        current=current + 1,
+        total=total,
+        subject=seed.lastfm_name,
+        status="completed",
+    )
 
 
 def _enrich_seed_tags(
@@ -150,14 +222,42 @@ def _enrich_seed_tags(
     client: LastFmClientProtocol,
     seed: SeedArtist,
     stats: _MutableStats,
+    *,
+    progress_callback: LastFmEnrichmentProgressCallback | None,
+    current: int,
+    total: int,
 ) -> None:
+    _report_progress(
+        progress_callback,
+        phase="seed_tags",
+        current=current,
+        total=total,
+        subject=seed.lastfm_name,
+        status="processing",
+    )
     if _work_completed(conn, _ARTIST_TAGS_ENDPOINT, seed.artist_key, _NO_REQUEST_LIMIT):
+        _report_progress(
+            progress_callback,
+            phase="seed_tags",
+            current=current + 1,
+            total=total,
+            subject=seed.lastfm_name,
+            status="skipped",
+        )
         return
 
     tags = client.get_artist_tags(seed.lastfm_name)
     stats.artist_tag_requests += 1
     max_count = max((tag.count for tag in tags), default=0.0)
     stats.artist_tags += _persist_artist_tags(conn, seed, tags, max_count)
+    _report_progress(
+        progress_callback,
+        phase="seed_tags",
+        current=current + 1,
+        total=total,
+        subject=seed.lastfm_name,
+        status="completed",
+    )
 
 
 def _enrich_tag_top_artists(
@@ -165,6 +265,7 @@ def _enrich_tag_top_artists(
     client: LastFmClientProtocol,
     config: ScrobbleRecsConfig,
     stats: _MutableStats,
+    progress_callback: LastFmEnrichmentProgressCallback | None,
 ) -> None:
     limit = config.recommendation.obviousness.tag_top_artists_limit
     tags = [
@@ -179,8 +280,24 @@ def _enrich_tag_top_artists(
             """
         ).fetchall()
     ]
-    for tag in tags:
+    for index, tag in enumerate(tags):
+        _report_progress(
+            progress_callback,
+            phase="tag_top_artists",
+            current=index,
+            total=len(tags),
+            subject=tag,
+            status="processing",
+        )
         if _work_completed(conn, _TAG_TOP_ARTISTS_ENDPOINT, tag, limit):
+            _report_progress(
+                progress_callback,
+                phase="tag_top_artists",
+                current=index + 1,
+                total=len(tags),
+                subject=tag,
+                status="skipped",
+            )
             continue
         replacement_needed = _work_completed_for_subject(
             conn,
@@ -199,6 +316,14 @@ def _enrich_tag_top_artists(
             )
             stats.artists_created += created
             stats.tag_top_artists += inserted
+            _report_progress(
+                progress_callback,
+                phase="tag_top_artists",
+                current=index + 1,
+                total=len(tags),
+                subject=tag,
+                status="completed",
+            )
             continue
 
         created, inserted = _persist_tag_top_artists(
@@ -209,6 +334,36 @@ def _enrich_tag_top_artists(
         )
         stats.artists_created += created
         stats.tag_top_artists += inserted
+        _report_progress(
+            progress_callback,
+            phase="tag_top_artists",
+            current=index + 1,
+            total=len(tags),
+            subject=tag,
+            status="completed",
+        )
+
+
+def _report_progress(
+    progress_callback: LastFmEnrichmentProgressCallback | None,
+    *,
+    phase: LastFmEnrichmentPhase,
+    current: int,
+    total: int,
+    subject: str,
+    status: LastFmEnrichmentProgressStatus,
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(
+        LastFmEnrichmentProgress(
+            phase=phase,
+            current=current,
+            total=total,
+            subject=subject,
+            status=status,
+        )
+    )
 
 
 def _ensure_artist(conn: DuckDBPyConnection, name: str, mbid: str | None) -> tuple[int, bool]:

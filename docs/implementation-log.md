@@ -1,5 +1,34 @@
 # Implementation Log
 
+## 2026-06-05: Last.fm enrich progress indicator
+
+Changed:
+
+- Added typed Last.fm enrichment progress events for seed similarity, seed
+  tags, and tag top-artist phases.
+- Wired `scrobble-recs enrich` to render phase/item Rich progress from those
+  events while keeping enrichment service output UI-free.
+- Advanced progress for skipped completed work so resumed runs still show
+  movement.
+- Added a startup warning that large Last.fm enrichment runs can take time
+  because API calls are rate limited.
+- Updated the README with the warning and progress behavior.
+
+Verified:
+
+- `python -m pytest tests/test_lastfm_enrichment.py::test_run_lastfm_enrichment_reports_phase_item_progress -v`
+  before implementation -> failed with `TypeError: run_lastfm_enrichment() got
+  an unexpected keyword argument 'progress_callback'`.
+- `python -m pytest tests/test_cli.py::test_enrich_command_dispatches_lastfm_source -v`
+  before implementation -> failed because the CLI did not pass a progress
+  callback.
+- `python -m pytest tests/test_lastfm_enrichment.py::test_run_lastfm_enrichment_reports_phase_item_progress -v`
+  after implementation -> 1 passed.
+- `python -m pytest tests/test_cli.py::test_enrich_command_dispatches_lastfm_source -v`
+  after implementation -> 1 passed.
+- `python -m pytest tests/test_lastfm_enrichment.py -v` -> 14 passed.
+- `python -m pytest tests/test_cli.py -v` -> 18 passed.
+
 ## 2026-06-05: Set-based Last.fm CSV import
 
 Changed:

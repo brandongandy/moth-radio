@@ -79,7 +79,9 @@ scrobble-recs enrich --config config.example.json --source lastfm
 ```
 
 Import and doctor do not require API keys. Live Last.fm enrichment requires
-`LASTFM_API_KEY`; cached responses are reused when they are still fresh.
+`LASTFM_API_KEY`; cached responses are reused when they are still fresh. The
+enrich command warns before long runs and shows phase/item progress for seed
+similarity, seed tags, and tag top-artist enrichment while it works.
 
 ## How To Contribute
 

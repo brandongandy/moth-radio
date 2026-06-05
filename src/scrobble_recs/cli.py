@@ -11,6 +11,7 @@ from scrobble_recs.db import initialize_database
 from scrobble_recs.enrichment.lastfm import LastFmEnrichmentStats, run_lastfm_enrichment
 from scrobble_recs.export import ExportFormat, export_recommendations
 from scrobble_recs.importers.lastfm_csv import ImportStats, get_import_stats, import_lastfm_csv
+from scrobble_recs.models.feedback import record_feedback_event, rerank_recommendation_run
 from scrobble_recs.models.recommend import RecommendationStats, generate_recommendations
 
 app = typer.Typer(help="Local-first Last.fm recommendation tooling.")
@@ -135,6 +136,50 @@ def export_command(
         conn.close()
 
     console.print(f"Exported {exported} recommendations to {output}")
+
+
+@app.command("feedback")
+def feedback_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    run_id: Annotated[str, typer.Option("--run-id", help="Recommendation run UUID.")],
+    artist_id: Annotated[int, typer.Option("--artist-id", help="Artist ID to annotate.")],
+    action: Annotated[str, typer.Option("--action", help="Feedback action.")],
+    value: Annotated[float, typer.Option("--value", help="Feedback strength multiplier.")] = 1.0,
+    tag: Annotated[
+        list[str] | None,
+        typer.Option("--tag", help="Tag affected by this feedback. Can be repeated."),
+    ] = None,
+    note: Annotated[str | None, typer.Option("--note", help="Optional note.")] = None,
+    rerank: Annotated[
+        bool,
+        typer.Option("--rerank/--no-rerank", help="Rerank the target run after recording."),
+    ] = True,
+) -> None:
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        try:
+            event = record_feedback_event(
+                conn,
+                run_id=run_id,
+                artist_id=artist_id,
+                action=action,
+                value=value,
+                context={"tags": tag or []},
+                note=note,
+            )
+            console.print("Feedback recorded")
+            console.print(f"feedback id: {event.feedback_id}")
+            console.print(f"action: {event.action}")
+            if rerank:
+                stats = rerank_recommendation_run(conn, run_id)
+                console.print(f"reranked recommendations: {stats.recommendations}")
+                console.print(f"hidden recommendations: {stats.hidden}")
+        except ValueError as exc:
+            console.print(f"Error: {exc}")
+            raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
 
 
 def _print_stats(stats: ImportStats) -> None:

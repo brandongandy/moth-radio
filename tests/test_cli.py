@@ -330,3 +330,109 @@ def test_export_command_prints_export_value_error(tmp_path: Path, monkeypatch) -
 
     assert result.exit_code == 1
     assert "Error: no recommendation runs exist" in result.output
+
+
+def test_feedback_command_records_event_and_reranks(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    calls: list[tuple[str, int, str, dict[str, object]]] = []
+    reranks: list[str] = []
+
+    class FakeEvent:
+        feedback_id = "00000000-0000-0000-0000-000000000701"
+        action = "more_like_this"
+
+    class FakeRerankStats:
+        run_id = "00000000-0000-0000-0000-000000000001"
+        recommendations = 4
+        hidden = 1
+
+    def fake_record(conn, *, run_id, artist_id, action, value=1.0, context=None, note=None):
+        calls.append((run_id, artist_id, action, context or {}))
+        return FakeEvent()
+
+    def fake_rerank(conn, run_id):
+        reranks.append(run_id)
+        return FakeRerankStats()
+
+    monkeypatch.setattr("scrobble_recs.cli.record_feedback_event", fake_record)
+    monkeypatch.setattr("scrobble_recs.cli.rerank_recommendation_run", fake_rerank)
+
+    result = runner.invoke(
+        app,
+        [
+            "feedback",
+            "--config",
+            str(config_path),
+            "--run-id",
+            "00000000-0000-0000-0000-000000000001",
+            "--artist-id",
+            "42",
+            "--action",
+            "more_like_this",
+            "--tag",
+            "post-punk",
+            "--tag",
+            "coldwave",
+            "--note",
+            "good lead",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            "00000000-0000-0000-0000-000000000001",
+            42,
+            "more_like_this",
+            {"tags": ["post-punk", "coldwave"]},
+        )
+    ]
+    assert reranks == ["00000000-0000-0000-0000-000000000001"]
+    assert "Feedback recorded" in result.output
+    assert "reranked recommendations: 4" in result.output
+    assert "hidden recommendations: 1" in result.output
+
+
+def test_feedback_command_can_skip_rerank(tmp_path: Path, monkeypatch) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    reranks: list[str] = []
+
+    class FakeEvent:
+        feedback_id = "00000000-0000-0000-0000-000000000702"
+        action = "note"
+
+    def fake_record(conn, *, run_id, artist_id, action, value=1.0, context=None, note=None):
+        return FakeEvent()
+
+    def fake_rerank(conn, run_id):
+        reranks.append(run_id)
+        raise AssertionError("rerank should not be called")
+
+    monkeypatch.setattr("scrobble_recs.cli.record_feedback_event", fake_record)
+    monkeypatch.setattr("scrobble_recs.cli.rerank_recommendation_run", fake_rerank)
+
+    result = runner.invoke(
+        app,
+        [
+            "feedback",
+            "--config",
+            str(config_path),
+            "--run-id",
+            "00000000-0000-0000-0000-000000000001",
+            "--artist-id",
+            "42",
+            "--action",
+            "note",
+            "--no-rerank",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert reranks == []
+    assert "Feedback recorded" in result.output
+    assert "reranked recommendations" not in result.output

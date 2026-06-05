@@ -517,3 +517,23 @@ def test_feedback_command_prints_record_value_error(
     assert result.exit_code == 1
     assert reranks == []
     assert "Error: unsupported feedback action 'favorite'" in result.output
+
+
+def test_tui_command_launches_textual_app(tmp_path: Path, monkeypatch) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    calls: list[str] = []
+
+    class FakeTui:
+        def __init__(self, conn):
+            calls.append("constructed")
+
+        def run(self) -> None:
+            calls.append("ran")
+
+    monkeypatch.setattr("scrobble_recs.cli.ScrobbleRecsTui", FakeTui)
+
+    result = runner.invoke(app, ["tui", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert calls == ["constructed", "ran"]

@@ -580,3 +580,17 @@ Review follow-up verified:
 - `python -m ruff check .` -> All checks passed.
 - `python -m ruff format --check .` -> 41 files already formatted.
 - `python -m mypy src` -> Success, no issues found in 25 source files.
+
+## 2026-06-05: TUI Task 5 CLI command
+
+Changed:
+
+- Added `scrobble-recs tui --config ...` to launch the local Textual TUI against the configured DuckDB database.
+- Added a CLI dispatch test that monkeypatches `ScrobbleRecsTui` so the command verifies construction and `run()` dispatch without opening an interactive TUI.
+- Updated the TUI V1 plan checklist and documented the review-gate deviation for including this implementation log in the Task 5 commit.
+
+Verified:
+
+- `python -m pytest tests/test_cli.py::test_tui_command_launches_textual_app -v` before implementation -> failed with `AttributeError: module 'scrobble_recs.cli' has no attribute 'ScrobbleRecsTui'`.
+- `python -m pytest tests/test_cli.py::test_tui_command_launches_textual_app -v` after implementation -> 1 passed.
+- `python -m pytest tests/test_cli.py -v` -> 17 passed.

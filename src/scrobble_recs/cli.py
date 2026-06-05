@@ -13,6 +13,7 @@ from scrobble_recs.export import ExportFormat, export_recommendations
 from scrobble_recs.importers.lastfm_csv import ImportStats, get_import_stats, import_lastfm_csv
 from scrobble_recs.models.feedback import record_feedback_event, rerank_recommendation_run
 from scrobble_recs.models.recommend import RecommendationStats, generate_recommendations
+from scrobble_recs.tui.app import ScrobbleRecsTui
 
 app = typer.Typer(help="Local-first Last.fm recommendation tooling.")
 console = Console()
@@ -136,6 +137,18 @@ def export_command(
         conn.close()
 
     console.print(f"Exported {exported} recommendations to {output}")
+
+
+@app.command("tui")
+def tui_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+) -> None:
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        ScrobbleRecsTui(conn).run()
+    finally:
+        conn.close()
 
 
 @app.command("feedback")

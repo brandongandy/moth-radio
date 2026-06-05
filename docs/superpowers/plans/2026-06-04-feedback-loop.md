@@ -1740,6 +1740,10 @@ git commit -m "feat: rerank recommendations after feedback"
 
 - [x] **Step 1: Add failing CLI tests**
 
+Review follow-up note: expanded the happy-path feedback CLI test to assert
+`--value` and `--note` are forwarded to `record_feedback_event`, and added a
+deterministic `ValueError` CLI test for the error-printing/exit-code path.
+
 Append these tests to `tests/test_cli.py`:
 
 ```python
@@ -1920,6 +1924,9 @@ def feedback_command(
 ```
 
 - [x] **Step 4: Run CLI tests to verify they pass**
+
+Review follow-up note: the added/changed assertions passed against the existing
+production command, so no production edit was required.
 
 Run:
 

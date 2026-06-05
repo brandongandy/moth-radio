@@ -338,7 +338,7 @@ def test_feedback_command_records_event_and_reranks(
 ) -> None:
     runner = CliRunner()
     config_path = write_config(tmp_path)
-    calls: list[tuple[str, int, str, dict[str, object]]] = []
+    calls: list[tuple[str, int, str, float, str | None, dict[str, object]]] = []
     reranks: list[str] = []
 
     class FakeEvent:
@@ -351,7 +351,7 @@ def test_feedback_command_records_event_and_reranks(
         hidden = 1
 
     def fake_record(conn, *, run_id, artist_id, action, value=1.0, context=None, note=None):
-        calls.append((run_id, artist_id, action, context or {}))
+        calls.append((run_id, artist_id, action, value, note, context or {}))
         return FakeEvent()
 
     def fake_rerank(conn, run_id):
@@ -373,6 +373,8 @@ def test_feedback_command_records_event_and_reranks(
             "42",
             "--action",
             "more_like_this",
+            "--value",
+            "2.5",
             "--tag",
             "post-punk",
             "--tag",
@@ -388,6 +390,8 @@ def test_feedback_command_records_event_and_reranks(
             "00000000-0000-0000-0000-000000000001",
             42,
             "more_like_this",
+            2.5,
+            "good lead",
             {"tags": ["post-punk", "coldwave"]},
         )
     ]
@@ -436,3 +440,41 @@ def test_feedback_command_can_skip_rerank(tmp_path: Path, monkeypatch) -> None:
     assert reranks == []
     assert "Feedback recorded" in result.output
     assert "reranked recommendations" not in result.output
+
+
+def test_feedback_command_prints_record_value_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    reranks: list[str] = []
+
+    def fake_record(conn, *, run_id, artist_id, action, value=1.0, context=None, note=None):
+        raise ValueError("unsupported feedback action 'favorite'")
+
+    def fake_rerank(conn, run_id):
+        reranks.append(run_id)
+        raise AssertionError("rerank should not be called")
+
+    monkeypatch.setattr("scrobble_recs.cli.record_feedback_event", fake_record)
+    monkeypatch.setattr("scrobble_recs.cli.rerank_recommendation_run", fake_rerank)
+
+    result = runner.invoke(
+        app,
+        [
+            "feedback",
+            "--config",
+            str(config_path),
+            "--run-id",
+            "00000000-0000-0000-0000-000000000001",
+            "--artist-id",
+            "42",
+            "--action",
+            "favorite",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert reranks == []
+    assert "Error: unsupported feedback action 'favorite'" in result.output

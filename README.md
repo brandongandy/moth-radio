@@ -123,6 +123,10 @@ data:
 - Persists inspectable JSON explanations for each recommendation.
 - Exports persisted runs to CSV or JSONL.
 
+The command shows phase progress while refreshing local scores, selecting seeds,
+building profiles, loading candidates, scoring, reranking, building
+explanations, and persisting the run.
+
 ```bash
 scrobble-recs recommend --config config.example.json --limit 500
 scrobble-recs export --config config.example.json --format csv --output recs.csv

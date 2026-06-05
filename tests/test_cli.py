@@ -189,14 +189,25 @@ def test_recommend_command_generates_persisted_run(tmp_path: Path, monkeypatch) 
     runner = CliRunner()
     config_path = write_config(tmp_path)
     calls: list[tuple[str, int, str | None]] = []
+    progress_events: list[str] = []
 
     class FakeRecommendationStats:
         run_id = "00000000-0000-0000-0000-000000000001"
         mode = "balanced"
         recommendations = 5
 
-    def fake_generate(conn, config, *, limit, mode=None):
+    class FakeProgress:
+        phase = "score_candidates"
+        current = 0
+        total = 5
+        subject = "candidate artists"
+        status = "processing"
+
+    def fake_generate(conn, config, *, limit, mode=None, progress_callback=None):
         calls.append((config.app.name, limit, mode))
+        assert progress_callback is not None
+        progress_callback(FakeProgress())
+        progress_events.append("reported")
         return FakeRecommendationStats()
 
     monkeypatch.setattr("scrobble_recs.cli.generate_recommendations", fake_generate)
@@ -205,6 +216,8 @@ def test_recommend_command_generates_persisted_run(tmp_path: Path, monkeypatch) 
 
     assert result.exit_code == 0
     assert calls == [("scrobble-recs", 5, None)]
+    assert progress_events == ["reported"]
+    assert "Generating recommendations from local DuckDB data" in result.output
     assert "Recommendation run complete" in result.output
     assert "run id: 00000000-0000-0000-0000-000000000001" in result.output
     assert "recommendations: 5" in result.output
@@ -220,7 +233,7 @@ def test_recommend_command_passes_mode(tmp_path: Path, monkeypatch) -> None:
         mode = "fresh"
         recommendations = 5
 
-    def fake_generate(conn, config, *, limit, mode=None):
+    def fake_generate(conn, config, *, limit, mode=None, progress_callback=None):
         calls.append((config.app.name, limit, mode))
         return FakeRecommendationStats()
 
@@ -254,7 +267,7 @@ def test_recommend_command_rejects_nonpositive_limit(tmp_path: Path, monkeypatch
         mode = "balanced"
         recommendations = 0
 
-    def fake_generate(conn, config, *, limit, mode=None):
+    def fake_generate(conn, config, *, limit, mode=None, progress_callback=None):
         calls.append(limit)
         return FakeRecommendationStats()
 
@@ -274,7 +287,7 @@ def test_recommend_command_prints_generation_value_error(
     runner = CliRunner()
     config_path = write_config(tmp_path)
 
-    def fake_generate(conn, config, *, limit, mode=None):
+    def fake_generate(conn, config, *, limit, mode=None, progress_callback=None):
         raise ValueError("no recommendation candidates found")
 
     monkeypatch.setattr("scrobble_recs.cli.generate_recommendations", fake_generate)
@@ -289,7 +302,7 @@ def test_recommend_command_prints_invalid_mode_error(tmp_path: Path, monkeypatch
     runner = CliRunner()
     config_path = write_config(tmp_path)
 
-    def fake_generate(conn, config, *, limit, mode=None):
+    def fake_generate(conn, config, *, limit, mode=None, progress_callback=None):
         raise ValueError("unsupported recommendation mode 'fresh'")
 
     monkeypatch.setattr("scrobble_recs.cli.generate_recommendations", fake_generate)

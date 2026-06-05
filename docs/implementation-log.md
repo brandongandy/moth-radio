@@ -1,5 +1,33 @@
 # Implementation Log
 
+## 2026-06-05: Recommendation progress indicator
+
+Changed:
+
+- Added typed recommendation progress events for listening-score refresh, seed
+  selection, profile building, candidate loading, scoring, diversity reranking,
+  explanation building, and run persistence.
+- Wired `scrobble-recs recommend` to render those phase events with Rich
+  progress while keeping the recommendation model UI-free.
+- Added a command startup status line that recommendation generation is using
+  local DuckDB data.
+- Updated the README with the recommendation progress behavior.
+
+Verified:
+
+- `python -m pytest tests/test_recommend.py::test_generate_recommendations_reports_phase_progress -v`
+  before implementation -> failed with `TypeError: generate_recommendations()
+  got an unexpected keyword argument 'progress_callback'`.
+- `python -m pytest tests/test_cli.py::test_recommend_command_generates_persisted_run -v`
+  before implementation -> failed because the CLI did not pass a progress
+  callback.
+- `python -m pytest tests/test_recommend.py::test_generate_recommendations_reports_phase_progress -v`
+  after implementation -> 1 passed.
+- `python -m pytest tests/test_cli.py::test_recommend_command_generates_persisted_run -v`
+  after implementation -> 1 passed.
+- `python -m pytest tests/test_recommend.py -v` -> 26 passed.
+- `python -m pytest tests/test_cli.py -v` -> 18 passed.
+
 ## 2026-06-05: Last.fm enrich progress indicator
 
 Changed:

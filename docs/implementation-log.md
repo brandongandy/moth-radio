@@ -493,6 +493,7 @@ Changed:
 - Added feedback-aware recommendation scoring, including persisted `feedback_score` values and explanation feedback metadata.
 - Added lightweight current-run reranking after feedback without live API calls or full model retraining.
 - Added `scrobble-recs feedback` to record an event and rerank the target run by default.
+- Made the default feedback record-and-rerank CLI path atomic so failed reranks do not leave durable feedback events.
 
 Verified:
 

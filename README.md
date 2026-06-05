@@ -125,3 +125,27 @@ high-affinity top-tag artists unless they are rediscovery candidates, and
 reranks the persisted list for diversity. It still reads only local DuckDB data
 during `recommend`; run `enrich --source lastfm` first when the local graph needs
 new Last.fm similarity or tag data.
+
+## Feedback Loop
+
+Feedback is stored locally in DuckDB and can rerank an existing recommendation
+run without calling live APIs:
+
+```bash
+scrobble-recs feedback \
+  --config config.example.json \
+  --run-id 00000000-0000-0000-0000-000000000001 \
+  --artist-id 42 \
+  --action more_like_this \
+  --tag post-punk
+```
+
+Supported actions are `save`, `reject`, `already_know`, `too_obvious`,
+`wrong_genre`, `more_like_this`, `less_like_this`, `hide_artist`, `hide_tag`,
+`boost_tag`, `rediscovery_good`, `rediscovery_bad`, `opened_link`,
+`played_externally`, and `note`.
+
+By default the command records the event and reranks that persisted run. Use
+`--no-rerank` to record feedback only. Future `recommend` runs also consume
+feedback as artist boosts/suppression, tag boosts/suppression, and lightweight
+similarity-neighborhood adjustments.

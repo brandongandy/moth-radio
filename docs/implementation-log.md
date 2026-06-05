@@ -482,3 +482,22 @@ Verified:
 - Final verification: `python -m ruff check .` -> All checks passed
 - Final verification: `python -m ruff format --check .` -> 36 files already formatted
 - Final verification: `python -m mypy src` -> Success, no issues found in 22 source files
+
+## 2026-06-04: Feedback loop
+
+Changed:
+
+- Added the local `feedback_event` table and indexes.
+- Added feedback event validation and persistence for the spec-defined action set.
+- Added derived feedback profiles for artist suppression/boosts, tag suppression/boosts, known-artist suppression, and feedback seed boosts.
+- Added feedback-aware recommendation scoring, including persisted `feedback_score` values and explanation feedback metadata.
+- Added lightweight current-run reranking after feedback without live API calls or full model retraining.
+- Added `scrobble-recs feedback` to record an event and rerank the target run by default.
+
+Verified:
+
+- `python -m pytest tests/test_feedback.py tests/test_recommend.py tests/test_cli.py -v`
+- `python -m pytest`
+- `python -m ruff check .`
+- `python -m ruff format --check .`
+- `python -m mypy src`

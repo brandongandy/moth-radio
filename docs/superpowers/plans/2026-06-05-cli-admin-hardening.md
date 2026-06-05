@@ -1662,7 +1662,7 @@ Task 6 checkpoint notes:
 - Modify: `src/scrobble_recs/cli.py`
 - Modify: `tests/test_cli.py`
 
-- [ ] **Step 1: Update doctor CLI tests for diagnostics**
+- [x] **Step 1: Update doctor CLI tests for diagnostics**
 
 Replace `test_doctor_command_runs_without_api_keys` in `tests/test_cli.py` with:
 
@@ -1701,7 +1701,7 @@ def test_doctor_command_exits_nonzero_when_csv_is_missing(tmp_path: Path) -> Non
     assert "missing" in result.output
 ```
 
-- [ ] **Step 2: Run doctor CLI tests to verify they fail**
+- [x] **Step 2: Run doctor CLI tests to verify they fail**
 
 Run:
 
@@ -1715,7 +1715,7 @@ Expected:
 AssertionError because the current doctor output is shallow and missing diagnostic lines
 ```
 
-- [ ] **Step 3: Wire doctor CLI to diagnostic backend**
+- [x] **Step 3: Wire doctor CLI to diagnostic backend**
 
 Modify `src/scrobble_recs/cli.py`.
 
@@ -1754,7 +1754,7 @@ def _print_diagnostic_check(check: DiagnosticCheck) -> None:
     console.print(f"{check.name}: {check.status.value} - {check.message}", soft_wrap=True)
 ```
 
-- [ ] **Step 4: Run CLI tests to verify they pass**
+- [x] **Step 4: Run CLI tests to verify they pass**
 
 Run:
 
@@ -1768,7 +1768,7 @@ Expected:
 passed
 ```
 
-- [ ] **Step 5: Commit doctor CLI hardening**
+- [x] **Step 5: Commit doctor CLI hardening**
 
 Run:
 
@@ -1776,6 +1776,25 @@ Run:
 git add src/scrobble_recs/cli.py tests/test_cli.py
 git commit -m "feat: harden doctor command"
 ```
+
+Task 7 checkpoint notes:
+
+- Implementer status: DONE.
+- Verified red:
+  `python -m pytest tests/test_cli.py::test_doctor_command_runs_without_api_keys tests/test_cli.py::test_doctor_command_exits_nonzero_when_csv_is_missing -v`
+  failed before implementation with the expected shallow doctor output and
+  missing CSV exit code behavior.
+- Verified green:
+  `python -m pytest tests/test_cli.py -v` passed with 24 tests.
+- Spec review: APPROVED.
+- Code quality review: APPROVED; no findings. Residual low risk: the tests do
+  not explicitly assert every diagnostic line from `run_doctor()`, but the CLI
+  loops over all checks.
+- Deviation: commit step intentionally not run because the controller requested
+  review/gate/commit ownership.
+- Architecture gate: severity `none`, continue `yes`.
+- Commit status: gate permits Task 7 commit.
+- Concerns: none.
 
 ---
 

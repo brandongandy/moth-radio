@@ -2078,6 +2078,10 @@ similarity-neighborhood adjustments.
 
 - [x] **Step 7: Update implementation log**
 
+Final review follow-up note: after making default feedback record+rerank atomic
+in the CLI, the implementation log entry was extended to include that behavior
+change.
+
 Append this entry to `docs/implementation-log.md`:
 
 ```markdown

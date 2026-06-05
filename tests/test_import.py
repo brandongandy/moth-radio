@@ -3,6 +3,7 @@ from pathlib import Path
 
 import duckdb
 import pytest
+from duckdb import DuckDBPyConnection
 
 from scrobble_recs.config import load_config
 from scrobble_recs.db import initialize_database
@@ -133,6 +134,37 @@ def test_import_replaces_previous_import_tables_on_rerun(tmp_path: Path) -> None
     conn.close()
 
 
+def test_import_database_statement_count_is_bounded_for_many_rows(tmp_path: Path) -> None:
+    rows = [
+        ",".join(
+            [
+                str(1704067200 + index),
+                "2024-01-01 00:00:00",
+                f"Artist {index % 10}",
+                "",
+                f"Album {index % 5}",
+                "",
+                f"Track {index}",
+                "",
+            ]
+        )
+        for index in range(100)
+    ]
+    csv_path = write_csv(tmp_path / "many.csv", rows)
+    config = load_config(write_config(tmp_path, csv_path))
+    conn = initialize_database(config)
+    counting_conn = CountingConnection(conn)
+
+    try:
+        stats = import_lastfm_csv(counting_conn, csv_path)  # type: ignore[arg-type]
+    finally:
+        conn.close()
+
+    assert stats.scrobbles == 100
+    assert stats.distinct_artists == 10
+    assert counting_conn.execute_calls <= 30
+
+
 @pytest.mark.parametrize("column", ["uts", "artist", "track"])
 def test_import_rejects_missing_required_fields(tmp_path: Path, column: str) -> None:
     values = {
@@ -153,6 +185,20 @@ def test_import_rejects_missing_required_fields(tmp_path: Path, column: str) -> 
         import_lastfm_csv(conn, csv_path)
 
     conn.close()
+
+
+class CountingConnection:
+    def __init__(self, conn: DuckDBPyConnection) -> None:
+        self._conn = conn
+        self.execute_calls = 0
+
+    def execute(self, *args: object, **kwargs: object) -> DuckDBPyConnection:
+        self.execute_calls += 1
+        return self._conn.execute(*args, **kwargs)
+
+    def executemany(self, *args: object, **kwargs: object) -> DuckDBPyConnection:
+        self.execute_calls += 1
+        return self._conn.executemany(*args, **kwargs)
 
 
 @pytest.mark.parametrize("uts", ["not-an-int", "999999999999999999999999999999999999999999"])

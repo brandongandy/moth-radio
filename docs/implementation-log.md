@@ -1,5 +1,38 @@
 # Implementation Log
 
+## 2026-06-05: Set-based Last.fm CSV import
+
+Changed:
+
+- Reproduced the import performance issue with `config.json`'s Last.fm CSV path
+  against a temporary DuckDB database: the original importer did not finish
+  within 60 seconds.
+- Isolated CSV validation from database writes: validation of the 363,565-row
+  CSV completed in about 7.6 seconds, while row-by-row database writes were the
+  slow path.
+- Added a regression test that imports 100 deterministic rows through a counting
+  connection and asserts database statement count stays bounded instead of
+  scaling per row.
+- Replaced per-row DuckDB inserts with a streamed validated staging CSV and
+  set-based `INSERT ... SELECT` loads for raw scrobbles, clean scrobbles,
+  provisional artists, and listening facts.
+
+Verified:
+
+- `python -m pytest tests/test_import.py::test_import_database_statement_count_is_bounded_for_many_rows -v`
+  before implementation -> failed with 233 SQL execute calls for 100 rows.
+- First `executemany` implementation still exceeded a 180-second timeout on the
+  real 363,565-row CSV benchmark, so it was replaced with a set-based staging
+  import.
+- Real CSV benchmark against a temporary DuckDB database after the set-based
+  import -> 21.55 seconds for 363,565 raw scrobbles, 363,565 clean scrobbles,
+  21 duplicates, 18,347 distinct artists, and 55,525 distinct tracks.
+- `python -m pytest tests/test_import.py -v` -> 13 passed.
+- `python -m pytest` -> 172 passed.
+- `python -m ruff check .` -> All checks passed.
+- `python -m ruff format --check .` -> 43 files already formatted.
+- `python -m mypy src` -> Success, no issues found in 26 source files.
+
 ## 2026-06-05: Import command progress and logging
 
 Changed:

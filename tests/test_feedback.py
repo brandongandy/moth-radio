@@ -14,6 +14,7 @@ from scrobble_recs.models.feedback import (
     feedback_obviousness_for_candidate,
     load_feedback_profile,
     record_feedback_event,
+    rerank_recommendation_run,
 )
 
 
@@ -348,6 +349,189 @@ def test_apply_feedback_to_tag_profile_suppresses_and_normalizes_tags() -> None:
     )
 
 
+def test_rerank_recommendation_run_demotes_rejected_artist_and_updates_explanation(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    run_id = "00000000-0000-0000-0000-000000000501"
+    _insert_artist(conn, artist_id=40, name="First Artist")
+    _insert_artist(conn, artist_id=41, name="Second Artist")
+    _insert_run(conn, run_id=run_id)
+    _insert_recommendation(
+        conn,
+        run_id=run_id,
+        artist_id=40,
+        rank=1,
+        final_score=0.80,
+        explanation={
+            "summary": "First",
+            "tags": [{"tag": "post-punk", "candidate_weight": 1.0}],
+        },
+    )
+    _insert_recommendation(
+        conn,
+        run_id=run_id,
+        artist_id=41,
+        rank=2,
+        final_score=0.70,
+        explanation={
+            "summary": "Second",
+            "tags": [{"tag": "coldwave", "candidate_weight": 1.0}],
+        },
+    )
+    record_feedback_event(
+        conn,
+        run_id=run_id,
+        artist_id=40,
+        action="reject",
+        context={"tags": ["post-punk"]},
+        feedback_id="00000000-0000-0000-0000-000000000601",
+    )
+
+    stats = rerank_recommendation_run(conn, run_id)
+
+    assert stats.run_id == run_id
+    assert stats.recommendations == 2
+    rows = conn.execute(
+        """
+        SELECT rank, artist_id, feedback_score, explanation
+        FROM recommendation
+        WHERE run_id = ?
+        ORDER BY rank
+        """,
+        [run_id],
+    ).fetchall()
+    assert [(row[0], row[1]) for row in rows] == [(1, 41), (2, 40)]
+    assert rows[1][2] < 0.0
+    explanation = json.loads(rows[1][3])
+    assert explanation["feedback"]["score"] == pytest.approx(rows[1][2])
+    assert "suppression" in explanation["feedback"]["effects"]
+    conn.close()
+
+
+def test_rerank_recommendation_run_hides_current_too_obvious_artist(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    run_id = "00000000-0000-0000-0000-000000000502"
+    _insert_artist(conn, artist_id=50, name="Too Obvious Artist")
+    _insert_artist(conn, artist_id=51, name="Remaining Artist")
+    _insert_run(conn, run_id=run_id)
+    _insert_recommendation(
+        conn,
+        run_id=run_id,
+        artist_id=50,
+        rank=1,
+        final_score=0.80,
+        explanation={
+            "summary": "Too obvious",
+            "tags": [{"tag": "post-punk", "candidate_weight": 1.0}],
+        },
+    )
+    _insert_recommendation(
+        conn,
+        run_id=run_id,
+        artist_id=51,
+        rank=2,
+        final_score=0.70,
+        explanation={
+            "summary": "Remaining",
+            "tags": [{"tag": "coldwave", "candidate_weight": 1.0}],
+        },
+    )
+    record_feedback_event(
+        conn,
+        run_id=run_id,
+        artist_id=50,
+        action="too_obvious",
+        context={"tags": ["post-punk"]},
+        feedback_id="00000000-0000-0000-0000-000000000602",
+    )
+
+    stats = rerank_recommendation_run(conn, run_id)
+
+    assert stats.recommendations == 1
+    assert _feedback_recommendation_names(conn, run_id) == ["Remaining Artist"]
+    conn.close()
+
+
+def test_rerank_recommendation_run_does_not_hide_current_feedback_from_other_runs(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    source_run_id = "00000000-0000-0000-0000-000000000504"
+    target_run_id = "00000000-0000-0000-0000-000000000505"
+    _insert_artist(conn, artist_id=70, name="Shared Artist")
+    _insert_run(conn, run_id=source_run_id)
+    _insert_run(conn, run_id=target_run_id)
+    _insert_recommendation(
+        conn,
+        run_id=target_run_id,
+        artist_id=70,
+        rank=1,
+        final_score=0.80,
+        explanation={
+            "summary": "Shared",
+            "tags": [{"tag": "post-punk", "candidate_weight": 1.0}],
+        },
+    )
+    record_feedback_event(
+        conn,
+        run_id=source_run_id,
+        artist_id=70,
+        action="too_obvious",
+        context={"tags": ["post-punk"]},
+        feedback_id="00000000-0000-0000-0000-000000000604",
+    )
+
+    stats = rerank_recommendation_run(conn, target_run_id)
+
+    assert stats.recommendations == 1
+    assert stats.hidden == 0
+    assert _feedback_recommendation_names(conn, target_run_id) == ["Shared Artist"]
+    conn.close()
+
+
+def test_rerank_recommendation_run_does_not_compound_existing_feedback_score(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    run_id = "00000000-0000-0000-0000-000000000503"
+    _insert_artist(conn, artist_id=60, name="Stable Artist")
+    _insert_run(conn, run_id=run_id)
+    _insert_recommendation(
+        conn,
+        run_id=run_id,
+        artist_id=60,
+        rank=1,
+        final_score=0.80,
+        explanation={
+            "summary": "Stable",
+            "tags": [{"tag": "post-punk", "candidate_weight": 1.0}],
+        },
+    )
+    record_feedback_event(
+        conn,
+        run_id=run_id,
+        artist_id=60,
+        action="more_like_this",
+        context={"tags": ["post-punk"]},
+        feedback_id="00000000-0000-0000-0000-000000000603",
+    )
+
+    rerank_recommendation_run(conn, run_id)
+    first_score = _recommendation_score(conn, run_id=run_id, artist_id=60)
+    rerank_recommendation_run(conn, run_id)
+    second_score = _recommendation_score(conn, run_id=run_id, artist_id=60)
+
+    assert second_score == pytest.approx(first_score)
+    conn.close()
+
+
 def _insert_artist(conn, *, artist_id: int, name: str) -> None:
     conn.execute(
         """
@@ -372,3 +556,66 @@ def _insert_run(conn, *, run_id: str) -> None:
         """,
         [run_id],
     )
+
+
+def _insert_recommendation(
+    conn,
+    *,
+    run_id: str,
+    artist_id: int,
+    rank: int,
+    final_score: float,
+    explanation: dict[str, object],
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO recommendation (
+            run_id,
+            rank,
+            artist_id,
+            final_score,
+            raw_score,
+            lastfm_similarity_score,
+            tag_similarity_score,
+            cluster_fit_score,
+            rediscovery_score,
+            metadata_graph_score,
+            feedback_score,
+            knownness,
+            obviousness,
+            diversity_penalty,
+            explanation
+        )
+        VALUES (?, ?, ?, ?, ?, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ?)
+        """,
+        [run_id, rank, artist_id, final_score, final_score, json.dumps(explanation)],
+    )
+
+
+def _feedback_recommendation_names(conn, run_id: str) -> list[str]:
+    return [
+        str(row[0])
+        for row in conn.execute(
+            """
+            SELECT a.canonical_name
+            FROM recommendation r
+            JOIN artist a ON a.artist_id = r.artist_id
+            WHERE r.run_id = ?
+            ORDER BY r.rank
+            """,
+            [run_id],
+        ).fetchall()
+    ]
+
+
+def _recommendation_score(conn, *, run_id: str, artist_id: int) -> tuple[float, float]:
+    final_score, feedback_score = conn.execute(
+        """
+        SELECT final_score, feedback_score
+        FROM recommendation
+        WHERE run_id = ?
+          AND artist_id = ?
+        """,
+        [run_id, artist_id],
+    ).fetchone()
+    return (float(final_score), float(feedback_score))

@@ -1347,7 +1347,7 @@ git commit -m "feat: score recommendations with feedback"
 - Modify: `src/scrobble_recs/models/feedback.py`
 - Modify: `tests/test_feedback.py`
 
-- [ ] **Step 1: Add failing rerank tests**
+- [x] **Step 1: Add failing rerank tests**
 
 Append these tests to `tests/test_feedback.py`:
 
@@ -1501,7 +1501,7 @@ def _feedback_recommendation_names(conn, run_id: str) -> list[str]:
     ]
 ```
 
-- [ ] **Step 2: Run rerank tests to verify they fail**
+- [x] **Step 2: Run rerank tests to verify they fail**
 
 Run:
 
@@ -1515,7 +1515,16 @@ Expected:
 ImportError: cannot import name 'rerank_recommendation_run'
 ```
 
-- [ ] **Step 3: Implement lightweight rerank**
+- [x] **Step 3: Implement lightweight rerank**
+
+Deviation note: accepted Task 4 behavior is that rerank recomputes visible scores from
+`persisted final_score - previous persisted feedback_score + newly derived feedback_score`,
+making repeated lightweight reranks idempotent for Section 17's repeated feedback/current-run
+workflow.
+
+Deviation note: current-run-only hide actions are scoped to the reranked `run_id` during
+lightweight rerank so `too_obvious` and `already_know` feedback from one run cannot delete
+the same artist from another run; global `hide_artist` behavior remains profile-derived.
 
 Append to `src/scrobble_recs/models/feedback.py`:
 
@@ -1681,7 +1690,7 @@ def _feedback_effect_labels(feedback_score: float, *, hidden: bool = False) -> l
     return effects
 ```
 
-- [ ] **Step 4: Run rerank tests to verify they pass**
+- [x] **Step 4: Run rerank tests to verify they pass**
 
 Run:
 
@@ -1695,7 +1704,7 @@ Expected:
 2 passed
 ```
 
-- [ ] **Step 5: Run all feedback tests**
+- [x] **Step 5: Run all feedback tests**
 
 Run:
 
@@ -1709,12 +1718,15 @@ Expected:
 all feedback tests pass
 ```
 
-- [ ] **Step 6: Commit lightweight rerank**
+- [x] **Step 6: Commit lightweight rerank**
+
+Deviation note: included `docs/implementation-log.md` in the Task 4 commit because
+`AGENTS.md` defines done as updating the implementation log.
 
 Run:
 
 ```bash
-git add src/scrobble_recs/models/feedback.py tests/test_feedback.py docs/superpowers/plans/2026-06-04-feedback-loop.md
+git add src/scrobble_recs/models/feedback.py tests/test_feedback.py docs/superpowers/plans/2026-06-04-feedback-loop.md docs/implementation-log.md
 git commit -m "feat: rerank recommendations after feedback"
 ```
 

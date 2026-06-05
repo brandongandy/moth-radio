@@ -447,3 +447,38 @@ Verified:
 - `python -m ruff check .` -> All checks passed.
 - `python -m ruff format --check .` -> 36 files already formatted.
 - `python -m mypy src` -> Success, no issues found in 22 source files.
+
+## 2026-06-04: Task 4 lightweight current-run rerank
+
+Changed:
+
+- Added `rerank_recommendation_run` to update persisted recommendation rows for a run without live API calls or full retraining.
+- Added rerank stats for visible and hidden recommendation counts.
+- Applied derived feedback scores to persisted recommendation rows, updated ranks, and wrote inspectable feedback metadata into explanations.
+- Hid current-run recommendations marked by feedback actions such as `too_obvious`.
+- Fixed review-reported repeat reranking so existing persisted `feedback_score` is removed from `final_score` before applying the newly derived feedback score, preventing compounding on repeated feedback reranks.
+- Fixed review-reported current-run hide leakage by deriving current-run hide IDs for the specific reranked run while preserving global `hide_artist` suppression.
+- Fixed the `_explanation_tag_weights` local `None` case so `python -m mypy src` passes without weakening module typing.
+- Updated the Task 4 feedback-loop plan checklist and documented deviations for the non-compounding rerank adjustment plus including this implementation log in the commit.
+
+Verified:
+
+- `python -m pytest tests/test_feedback.py::test_rerank_recommendation_run_demotes_rejected_artist_and_updates_explanation tests/test_feedback.py::test_rerank_recommendation_run_hides_current_too_obvious_artist -v` before implementation -> failed with `ImportError: cannot import name 'rerank_recommendation_run'`
+- `python -m pytest tests/test_feedback.py::test_rerank_recommendation_run_demotes_rejected_artist_and_updates_explanation tests/test_feedback.py::test_rerank_recommendation_run_hides_current_too_obvious_artist -v` after implementation -> 2 passed
+- Review follow-up: `python -m pytest tests/test_feedback.py::test_rerank_recommendation_run_does_not_compound_existing_feedback_score -v` before fix -> failed because second rerank changed the recommendation score from `(1.05, 0.25)` to `(1.3, 0.25)`
+- Review follow-up: `python -m pytest tests/test_feedback.py::test_rerank_recommendation_run_does_not_compound_existing_feedback_score -v` after fix -> 1 passed
+- Review follow-up: `python -m pytest tests/test_feedback.py::test_rerank_recommendation_run_demotes_rejected_artist_and_updates_explanation tests/test_feedback.py::test_rerank_recommendation_run_hides_current_too_obvious_artist tests/test_feedback.py::test_rerank_recommendation_run_does_not_compound_existing_feedback_score -v` -> 3 passed
+- Review follow-up: `python -m pytest tests/test_feedback.py -v` -> 11 passed
+- Review follow-up: `python -m ruff check src/scrobble_recs/models/feedback.py tests/test_feedback.py` -> All checks passed
+- Second review follow-up: `python -m pytest tests/test_feedback.py::test_rerank_recommendation_run_does_not_hide_current_feedback_from_other_runs -v` before fix -> failed because reranking run B hid an artist from run A's `too_obvious` feedback.
+- Second review follow-up: `python -m pytest tests/test_feedback.py::test_rerank_recommendation_run_does_not_hide_current_feedback_from_other_runs -v` after fix -> 1 passed
+- Second review follow-up: `python -m pytest tests/test_feedback.py::test_rerank_recommendation_run_demotes_rejected_artist_and_updates_explanation tests/test_feedback.py::test_rerank_recommendation_run_hides_current_too_obvious_artist tests/test_feedback.py::test_rerank_recommendation_run_does_not_compound_existing_feedback_score tests/test_feedback.py::test_rerank_recommendation_run_does_not_hide_current_feedback_from_other_runs -v` -> 4 passed
+- Second review follow-up: `python -m pytest tests/test_feedback.py -v` -> 12 passed
+- Second review follow-up: `python -m mypy src` -> Success, no issues found in 22 source files
+- Second review follow-up: `python -m ruff check src/scrobble_recs/models/feedback.py tests/test_feedback.py` -> All checks passed
+- Final verification: `python -m ruff format --check .` before formatting -> Would reformat `src\scrobble_recs\models\feedback.py`
+- Final verification: `python -m ruff format src/scrobble_recs/models/feedback.py` -> 1 file reformatted
+- Final verification: `python -m pytest` -> 144 passed
+- Final verification: `python -m ruff check .` -> All checks passed
+- Final verification: `python -m ruff format --check .` -> 36 files already formatted
+- Final verification: `python -m mypy src` -> Success, no issues found in 22 source files

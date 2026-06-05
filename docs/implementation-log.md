@@ -1,5 +1,29 @@
 # Implementation Log
 
+## 2026-06-05: CLI install troubleshooting and module entry point
+
+Changed:
+
+- Confirmed the installed `scrobble-recs.exe` launcher existed under the active
+  `pyenv-win` Python `Scripts` directory while the pyenv shim was missing.
+- Regenerated local pyenv shims with `pyenv rehash`, which made
+  `scrobble-recs --help` resolve in PowerShell.
+- Added `python -m scrobble_recs` support as a PATH-independent CLI fallback.
+- Updated the README install instructions with the pyenv rehash recovery step
+  and module-entry fallback.
+
+Verified:
+
+- `pyenv rehash`
+- `scrobble-recs --help` -> printed the Typer command list.
+- `python -m pytest tests/test_module_entrypoint.py -v` -> red before the
+  `__main__` entry point was added.
+- `python -m pytest tests/test_module_entrypoint.py -v` -> 1 passed
+- `python -m pytest` -> 170 passed
+- `python -m ruff check .` -> All checks passed
+- `python -m ruff format --check .` -> 43 files already formatted
+- `python -m mypy src` -> Success, no issues found in 26 source files
+
 ## 2026-06-02: Milestone 1 import and inspect
 
 Changed:

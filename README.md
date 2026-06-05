@@ -25,6 +25,22 @@ Install the project with development dependencies:
 python -m pip install -e ".[dev]"
 ```
 
+If PowerShell says `scrobble-recs` is not recognized after installation, the
+console script was installed but its directory is not visible to the current
+shell. With `pyenv-win`, regenerate shims:
+
+```powershell
+pyenv rehash
+scrobble-recs --help
+```
+
+You can also run the CLI through the active Python interpreter without relying
+on the console-script PATH:
+
+```bash
+python -m scrobble_recs --help
+```
+
 Edit `config.example.json` or create your own config file with paths for:
 
 - `app.db_path`: the DuckDB database file.

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
 from math import sqrt
-from typing import cast
+from typing import Literal, TypeAlias, cast
 from uuid import uuid4
 
 from duckdb import DuckDBPyConnection
@@ -21,12 +22,34 @@ from scrobble_recs.models.knownness import ArtistListeningInput, compute_artist_
 from scrobble_recs.models.modes import RecommendationModeSettings, resolve_recommendation_mode
 from scrobble_recs.models.profile import SeedArtist, select_seed_artists
 
+RecommendationProgressPhase: TypeAlias = Literal[
+    "refresh_listening",
+    "select_seeds",
+    "build_profiles",
+    "load_candidates",
+    "score_candidates",
+    "rerank_diversity",
+    "build_explanations",
+    "persist_run",
+]
+RecommendationProgressStatus: TypeAlias = Literal["processing", "completed"]
+RecommendationProgressCallback: TypeAlias = Callable[["RecommendationProgress"], None]
+
 
 @dataclass(frozen=True)
 class RecommendationStats:
     run_id: str
     mode: str
     recommendations: int
+
+
+@dataclass(frozen=True)
+class RecommendationProgress:
+    phase: RecommendationProgressPhase
+    current: int
+    total: int
+    subject: str
+    status: RecommendationProgressStatus
 
 
 @dataclass(frozen=True)
@@ -75,6 +98,7 @@ def generate_recommendations(
     limit: int,
     mode: str | None = None,
     as_of: datetime | None = None,
+    progress_callback: RecommendationProgressCallback | None = None,
 ) -> RecommendationStats:
     if limit < 1:
         raise ValueError("limit must be at least 1")
@@ -82,7 +106,31 @@ def generate_recommendations(
     mode_settings = resolve_recommendation_mode(mode, config)
     resolved_mode = mode_settings.name
     resolved_as_of = as_of or datetime.now(tz=UTC).replace(tzinfo=None)
+    _report_progress(
+        progress_callback,
+        phase="refresh_listening",
+        current=0,
+        total=1,
+        subject="artist listening scores",
+        status="processing",
+    )
     _refresh_artist_listening_scores(conn, resolved_as_of)
+    _report_progress(
+        progress_callback,
+        phase="refresh_listening",
+        current=1,
+        total=1,
+        subject="artist listening scores",
+        status="completed",
+    )
+    _report_progress(
+        progress_callback,
+        phase="select_seeds",
+        current=0,
+        total=1,
+        subject=resolved_mode,
+        status="processing",
+    )
     feedback_profile = load_feedback_profile(conn)
     seeds = select_seed_artists(
         conn,
@@ -92,12 +140,60 @@ def generate_recommendations(
     )
     seeds = _add_feedback_seed_artists(conn, seeds, feedback_profile)
     seed_ids = {seed.artist_id for seed in seeds}
+    _report_progress(
+        progress_callback,
+        phase="select_seeds",
+        current=1,
+        total=1,
+        subject=f"{len(seeds)} seed artists",
+        status="completed",
+    )
+    _report_progress(
+        progress_callback,
+        phase="build_profiles",
+        current=0,
+        total=1,
+        subject="tags and feedback",
+        status="processing",
+    )
     tag_profile = _load_user_tag_profile(conn, seeds)
     effective_tag_profile = apply_feedback_to_tag_profile(
         _apply_tag_focus(tag_profile, mode_settings),
         feedback_profile,
     )
+    _report_progress(
+        progress_callback,
+        phase="build_profiles",
+        current=1,
+        total=1,
+        subject=f"{len(effective_tag_profile)} tag weights",
+        status="completed",
+    )
+    _report_progress(
+        progress_callback,
+        phase="load_candidates",
+        current=0,
+        total=1,
+        subject="local graph",
+        status="processing",
+    )
     scoring_data = _load_scoring_data(conn, seed_ids, feedback_profile)
+    _report_progress(
+        progress_callback,
+        phase="load_candidates",
+        current=1,
+        total=1,
+        subject=f"{len(scoring_data.candidates)} candidates",
+        status="completed",
+    )
+    _report_progress(
+        progress_callback,
+        phase="score_candidates",
+        current=0,
+        total=len(scoring_data.candidates),
+        subject="candidate artists",
+        status="processing",
+    )
     scores = _score_candidates(
         config,
         mode_settings,
@@ -107,12 +203,44 @@ def generate_recommendations(
         scoring_data,
         feedback_profile,
     )
+    _report_progress(
+        progress_callback,
+        phase="score_candidates",
+        current=len(scoring_data.candidates),
+        total=len(scoring_data.candidates),
+        subject=f"{len(scores)} positive scores",
+        status="completed",
+    )
+    _report_progress(
+        progress_callback,
+        phase="rerank_diversity",
+        current=0,
+        total=len(scores),
+        subject="ranked candidates",
+        status="processing",
+    )
     ranked_without_explanations = _rerank_for_diversity(
         scores,
         mode_settings,
         scoring_data,
         limit=limit,
         enabled=config.recommendation.diversity.enabled,
+    )
+    _report_progress(
+        progress_callback,
+        phase="rerank_diversity",
+        current=len(ranked_without_explanations),
+        total=len(scores),
+        subject=f"{len(ranked_without_explanations)} selected",
+        status="completed",
+    )
+    _report_progress(
+        progress_callback,
+        phase="build_explanations",
+        current=0,
+        total=len(ranked_without_explanations),
+        subject="recommendations",
+        status="processing",
     )
     ranked = [
         replace(
@@ -126,10 +254,56 @@ def generate_recommendations(
         )
         for score in ranked_without_explanations
     ]
+    _report_progress(
+        progress_callback,
+        phase="build_explanations",
+        current=len(ranked),
+        total=len(ranked_without_explanations),
+        subject="recommendations",
+        status="completed",
+    )
 
     run_id = str(uuid4())
+    _report_progress(
+        progress_callback,
+        phase="persist_run",
+        current=0,
+        total=len(ranked),
+        subject="recommendation rows",
+        status="processing",
+    )
     _persist_run(conn, run_id, resolved_mode, config, mode_settings, seeds, ranked)
+    _report_progress(
+        progress_callback,
+        phase="persist_run",
+        current=len(ranked),
+        total=len(ranked),
+        subject="recommendation rows",
+        status="completed",
+    )
     return RecommendationStats(run_id=run_id, mode=resolved_mode, recommendations=len(ranked))
+
+
+def _report_progress(
+    progress_callback: RecommendationProgressCallback | None,
+    *,
+    phase: RecommendationProgressPhase,
+    current: int,
+    total: int,
+    subject: str,
+    status: RecommendationProgressStatus,
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(
+        RecommendationProgress(
+            phase=phase,
+            current=current,
+            total=total,
+            subject=subject,
+            status=status,
+        )
+    )
 
 
 def _add_feedback_seed_artists(

@@ -20,7 +20,11 @@ from scrobble_recs.enrichment.lastfm import (
 from scrobble_recs.export import ExportFormat, export_recommendations
 from scrobble_recs.importers.lastfm_csv import ImportStats, get_import_stats, import_lastfm_csv
 from scrobble_recs.models.feedback import record_feedback_event, rerank_recommendation_run
-from scrobble_recs.models.recommend import RecommendationStats, generate_recommendations
+from scrobble_recs.models.recommend import (
+    RecommendationProgress,
+    RecommendationStats,
+    generate_recommendations,
+)
 from scrobble_recs.tui.app import ScrobbleRecsTui
 
 app = typer.Typer(help="Local-first Last.fm recommendation tooling.")
@@ -29,6 +33,16 @@ _ENRICHMENT_PHASE_LABELS = {
     "seed_similarity": "Seed similar artists",
     "seed_tags": "Seed artist tags",
     "tag_top_artists": "Tag top artists",
+}
+_RECOMMENDATION_PHASE_LABELS = {
+    "refresh_listening": "Refresh listening scores",
+    "select_seeds": "Select seed artists",
+    "build_profiles": "Build profiles",
+    "load_candidates": "Load candidates",
+    "score_candidates": "Score candidates",
+    "rerank_diversity": "Rerank diversity",
+    "build_explanations": "Build explanations",
+    "persist_run": "Persist run",
 }
 
 
@@ -128,7 +142,13 @@ def recommend_command(
     conn = initialize_database(resolved_config)
     try:
         try:
-            stats = generate_recommendations(conn, resolved_config, limit=limit, mode=mode)
+            console.print("Generating recommendations from local DuckDB data...")
+            stats = _generate_recommendations_with_progress(
+                conn,
+                resolved_config,
+                limit=limit,
+                mode=mode,
+            )
         except ValueError as exc:
             console.print(f"Error: {exc}")
             raise typer.Exit(code=1) from exc
@@ -304,6 +324,52 @@ def _run_lastfm_enrichment_with_progress(
 
 def _format_enrichment_progress_description(event: LastFmEnrichmentProgress) -> str:
     phase = _ENRICHMENT_PHASE_LABELS.get(event.phase, event.phase)
+    return f"{phase}: {escape(event.subject)} ({event.status})"
+
+
+def _generate_recommendations_with_progress(
+    conn: DuckDBPyConnection,
+    resolved_config: ScrobbleRecsConfig,
+    *,
+    limit: int,
+    mode: str | None,
+) -> RecommendationStats:
+    task_ids: dict[str, TaskID] = {}
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+
+        def on_progress(event: RecommendationProgress) -> None:
+            task_id = task_ids.get(event.phase)
+            if task_id is None:
+                task_id = progress.add_task(
+                    _format_recommendation_progress_description(event),
+                    total=event.total,
+                )
+                task_ids[event.phase] = task_id
+            progress.update(
+                task_id,
+                completed=event.current,
+                total=event.total,
+                description=_format_recommendation_progress_description(event),
+            )
+
+        return generate_recommendations(
+            conn,
+            resolved_config,
+            limit=limit,
+            mode=mode,
+            progress_callback=on_progress,
+        )
+
+
+def _format_recommendation_progress_description(event: RecommendationProgress) -> str:
+    phase = _RECOMMENDATION_PHASE_LABELS.get(event.phase, event.phase)
     return f"{phase}: {escape(event.subject)} ({event.status})"
 
 

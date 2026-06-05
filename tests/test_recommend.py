@@ -301,6 +301,45 @@ def test_generate_recommendations_persists_ranked_run_with_explanations(
     conn.close()
 
 
+def test_generate_recommendations_reports_phase_progress(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    import_lastfm_csv(conn, Path("tests/fixtures/tiny_lastfm_export.csv"))
+    run_lastfm_enrichment(conn, config, client=RecommendationFakeLastFmClient())
+    events = []
+
+    generate_recommendations(
+        conn,
+        config,
+        limit=3,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+        progress_callback=events.append,
+    )
+
+    assert [
+        (event.phase, event.current, event.total, event.subject, event.status) for event in events
+    ] == [
+        ("refresh_listening", 0, 1, "artist listening scores", "processing"),
+        ("refresh_listening", 1, 1, "artist listening scores", "completed"),
+        ("select_seeds", 0, 1, "balanced", "processing"),
+        ("select_seeds", 1, 1, "1 seed artists", "completed"),
+        ("build_profiles", 0, 1, "tags and feedback", "processing"),
+        ("build_profiles", 1, 1, "2 tag weights", "completed"),
+        ("load_candidates", 0, 1, "local graph", "processing"),
+        ("load_candidates", 1, 1, "3 candidates", "completed"),
+        ("score_candidates", 0, 3, "candidate artists", "processing"),
+        ("score_candidates", 3, 3, "2 positive scores", "completed"),
+        ("rerank_diversity", 0, 2, "ranked candidates", "processing"),
+        ("rerank_diversity", 2, 2, "2 selected", "completed"),
+        ("build_explanations", 0, 2, "recommendations", "processing"),
+        ("build_explanations", 2, 2, "recommendations", "completed"),
+        ("persist_run", 0, 2, "recommendation rows", "processing"),
+        ("persist_run", 2, 2, "recommendation rows", "completed"),
+    ]
+    conn.close()
+
+
 def test_generate_recommendations_replaces_existing_rows_for_new_run_only(
     tmp_path: Path,
 ) -> None:

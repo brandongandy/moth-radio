@@ -1738,7 +1738,7 @@ git commit -m "feat: rerank recommendations after feedback"
 - Modify: `src/scrobble_recs/cli.py`
 - Modify: `tests/test_cli.py`
 
-- [ ] **Step 1: Add failing CLI tests**
+- [x] **Step 1: Add failing CLI tests**
 
 Append these tests to `tests/test_cli.py`:
 
@@ -1846,7 +1846,11 @@ def test_feedback_command_can_skip_rerank(tmp_path: Path, monkeypatch) -> None:
     assert "reranked recommendations" not in result.output
 ```
 
-- [ ] **Step 2: Run CLI tests to verify they fail**
+- [x] **Step 2: Run CLI tests to verify they fail**
+
+Deviation note: the red run failed before Typer invocation because the specified tests
+monkeypatch `scrobble_recs.cli.record_feedback_event` before the feedback command import
+exists; this still verifies the CLI feedback surface is missing.
 
 Run:
 
@@ -1860,7 +1864,7 @@ Expected:
 No such command 'feedback'
 ```
 
-- [ ] **Step 3: Add feedback command**
+- [x] **Step 3: Add feedback command**
 
 Modify imports in `src/scrobble_recs/cli.py`:
 
@@ -1915,7 +1919,7 @@ def feedback_command(
         conn.close()
 ```
 
-- [ ] **Step 4: Run CLI tests to verify they pass**
+- [x] **Step 4: Run CLI tests to verify they pass**
 
 Run:
 
@@ -1929,7 +1933,7 @@ Expected:
 2 passed
 ```
 
-- [ ] **Step 5: Run CLI test file**
+- [x] **Step 5: Run CLI test file**
 
 Run:
 
@@ -1943,7 +1947,7 @@ Expected:
 all CLI tests pass
 ```
 
-- [ ] **Step 6: Commit feedback CLI**
+- [x] **Step 6: Commit feedback CLI**
 
 Run:
 

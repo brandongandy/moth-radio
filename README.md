@@ -48,6 +48,16 @@ Edit `config.example.json` or create your own config file with paths for:
 - `app.log_path`: the command log file.
 - `input.lastfm_csv`: your Last.fm CSV export.
 
+Create a local config and DuckDB database:
+
+```bash
+scrobble-recs init --config ./config.json
+```
+
+`init` writes a JSON config skeleton with `${LASTFM_API_KEY}` interpolation,
+creates parent directories, and applies DuckDB migrations. It refuses to
+overwrite an existing config unless `--force` is passed.
+
 Import scrobbles:
 
 ```bash
@@ -62,6 +72,25 @@ Check local configuration and imported data:
 
 ```bash
 scrobble-recs doctor --config config.example.json
+```
+
+`doctor` validates the config, database path, CSV header, cache path, API key
+state, rate-limit settings, import counts, and API cache state. Missing Last.fm
+keys are warnings because import, local browsing, and persisted recommendation
+runs do not require live APIs.
+
+Refresh local listening scores and profile tables without generating
+recommendations:
+
+```bash
+scrobble-recs build-profile --config config.example.json
+```
+
+MusicBrainz resolution is intentionally separate from local profile and
+recommendation work:
+
+```bash
+scrobble-recs resolve --config config.example.json --source musicbrainz
 ```
 
 Run Last.fm enrichment:
@@ -82,6 +111,11 @@ Import and doctor do not require API keys. Live Last.fm enrichment requires
 `LASTFM_API_KEY`; cached responses are reused when they are still fresh. The
 enrich command warns before long runs and shows phase/item progress for seed
 similarity, seed tags, and tag top-artist enrichment while it works.
+
+When Last.fm returns a transient `429` or `5xx` response, the client retries up
+to the configured maximum and falls back to a stale successful cache entry when
+one exists. Tests cover this behavior with mocked HTTP; they do not call
+Last.fm.
 
 ## How To Contribute
 

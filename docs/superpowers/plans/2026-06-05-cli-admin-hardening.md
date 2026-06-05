@@ -1952,7 +1952,7 @@ Task 8 checkpoint notes:
 - Modify: `README.md`
 - Modify: `docs/implementation-log.md`
 
-- [ ] **Step 1: Run the full test suite**
+- [x] **Step 1: Run the full test suite**
 
 Run:
 
@@ -1966,7 +1966,7 @@ Expected:
 passed
 ```
 
-- [ ] **Step 2: Run ruff check**
+- [x] **Step 2: Run ruff check**
 
 Run:
 
@@ -1980,7 +1980,7 @@ Expected:
 All checks passed
 ```
 
-- [ ] **Step 3: Run ruff format check**
+- [x] **Step 3: Run ruff format check**
 
 Run:
 
@@ -1994,7 +1994,7 @@ Expected:
 already formatted
 ```
 
-- [ ] **Step 4: Run mypy**
+- [x] **Step 4: Run mypy**
 
 Run:
 
@@ -2008,7 +2008,7 @@ Expected:
 Success: no issues found
 ```
 
-- [ ] **Step 5: Verify admin commands through the CLI**
+- [x] **Step 5: Verify admin commands through the CLI**
 
 Run:
 
@@ -2028,7 +2028,7 @@ build-profile prints Profile refreshed
 resolve prints unresolved artists and disabled/not-implemented status
 ```
 
-- [ ] **Step 6: Update README**
+- [x] **Step 6: Update README**
 
 Update `README.md` so the "How To Use It" section includes:
 
@@ -2076,7 +2076,7 @@ the configured maximum and falls back to a stale successful cache entry when one
 exists. Tests cover this behavior with mocked HTTP; they do not call Last.fm.
 ```
 
-- [ ] **Step 7: Update implementation log**
+- [x] **Step 7: Update implementation log**
 
 Append this entry to `docs/implementation-log.md`:
 
@@ -2111,7 +2111,7 @@ Verified:
 - `python -m scrobble_recs resolve --config config.example.json --source musicbrainz`
 ```
 
-- [ ] **Step 8: Commit docs and verification**
+- [x] **Step 8: Commit docs and verification**
 
 Run:
 
@@ -2119,6 +2119,47 @@ Run:
 git add README.md docs/implementation-log.md
 git commit -m "docs: record cli admin hardening"
 ```
+
+Task 9 checkpoint notes:
+
+- Full test suite: `python -m pytest` passed with 201 tests.
+- Ruff check: `python -m ruff check .` passed.
+- Ruff format check initially failed on seven files, so
+  `python -m ruff format .` was run. The only content diff left by formatting
+  is in `tests/test_lastfm_client.py`; other modified markers are line-ending
+  refresh noise.
+- Full verification after formatting:
+  `python -m pytest` passed with 201 tests,
+  `python -m ruff check .` passed,
+  `python -m ruff format --check .` reported 49 files already formatted, and
+  `python -m mypy src` succeeded with no issues in 31 source files.
+- CLI smoke verification used `$env:PYTHONPATH='src'` so `python -m
+  scrobble_recs` resolved to this worktree source instead of an older installed
+  package.
+- CLI smoke verification:
+  `python -m scrobble_recs init --config ./.tmp-admin-hardening/config.json --force`
+  printed Config, Database, Cache, and Log paths.
+- CLI smoke verification:
+  `python -m scrobble_recs doctor --config ./.tmp-admin-hardening/config.json`
+  printed diagnostic lines and exited 1 for the true missing CSV skeleton error.
+- CLI smoke verification:
+  `python -m scrobble_recs doctor --config config.example.json` printed
+  diagnostic lines and exited 0.
+- CLI smoke verification:
+  `python -m scrobble_recs build-profile --config config.example.json` printed
+  `Profile refreshed`.
+- CLI smoke verification:
+  `python -m scrobble_recs resolve --config config.example.json --source musicbrainz`
+  printed unresolved artist count and MusicBrainz disabled status.
+- Docs updated: `README.md` and `docs/implementation-log.md`.
+- Deviation: Task 9 includes the `tests/test_lastfm_client.py` formatting
+  cleanup required to satisfy `ruff format --check`.
+- Spec review: APPROVED.
+- Code quality review: APPROVED; no findings. Commit should remain
+  path-limited to the four intended Task 9 files because the worktree also
+  reports line-ending noise and an unrelated untracked pause file.
+- Architecture gate: severity `mechanical`, continue `yes`.
+- Commit status: gate permits Task 9 commit.
 
 ---
 

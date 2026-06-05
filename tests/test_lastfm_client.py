@@ -370,11 +370,7 @@ def test_lastfm_client_backs_off_between_429_retries(tmp_path: Path) -> None:
         httpx.Response(429, json={"message": "rate limited again"}),
         httpx.Response(
             200,
-            json={
-                "similarartists": {
-                    "artist": [{"name": "Bauhaus", "mbid": "", "match": "0.72"}]
-                }
-            },
+            json={"similarartists": {"artist": [{"name": "Bauhaus", "mbid": "", "match": "0.72"}]}},
         ),
     ]
 

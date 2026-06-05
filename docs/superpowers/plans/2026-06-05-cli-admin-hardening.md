@@ -598,7 +598,7 @@ Checkpoint:
 - Modify: `src/scrobble_recs/apis/cache.py`
 - Modify: `tests/test_api_cache.py`
 
-- [ ] **Step 1: Add failing cache stale/stat tests**
+- [x] **Step 1: Add failing cache stale/stat tests**
 
 Append these tests to `tests/test_api_cache.py`:
 
@@ -679,7 +679,7 @@ def test_api_cache_summary_counts_fresh_stale_and_error_rows(tmp_path: Path) -> 
     conn.close()
 ```
 
-- [ ] **Step 2: Run cache tests to verify they fail**
+- [x] **Step 2: Run cache tests to verify they fail**
 
 Run:
 
@@ -693,7 +693,7 @@ Expected:
 AttributeError: 'ApiCache' object has no attribute 'get_stale_success'
 ```
 
-- [ ] **Step 3: Implement stale reads and summary stats**
+- [x] **Step 3: Implement stale reads and summary stats**
 
 Modify `src/scrobble_recs/apis/cache.py`.
 
@@ -795,7 +795,7 @@ def _query_int(conn: DuckDBPyConnection, sql: str, params: list[object]) -> int:
     return int(row[0] or 0)
 ```
 
-- [ ] **Step 4: Run cache tests to verify they pass**
+- [x] **Step 4: Run cache tests to verify they pass**
 
 Run:
 
@@ -809,7 +809,7 @@ Expected:
 passed
 ```
 
-- [ ] **Step 5: Commit cache diagnostics primitives**
+- [x] **Step 5: Commit cache diagnostics primitives**
 
 Run:
 
@@ -817,6 +817,15 @@ Run:
 git add src/scrobble_recs/apis/cache.py tests/test_api_cache.py
 git commit -m "feat: expose api cache diagnostics"
 ```
+
+Checkpoint:
+
+- Implementer status: DONE.
+- Verification: focused red tests failed before implementation with missing `ApiCache` methods; `python -m pytest tests/test_api_cache.py -v` passed with 9 tests; changed-file ruff check passed.
+- Spec review: APPROVED.
+- Code quality review: APPROVED.
+- Architecture gate: severity `none`, continue `yes`.
+- Deviations: none.
 
 ---
 

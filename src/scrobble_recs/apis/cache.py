@@ -34,6 +34,15 @@ class ApiCacheEntry:
     error_message: str | None
 
 
+@dataclass(frozen=True)
+class ApiCacheSummary:
+    total_entries: int
+    fresh_successes: int
+    stale_successes: int
+    error_entries: int
+    sources: dict[str, int]
+
+
 class ApiCache:
     def __init__(self, conn: DuckDBPyConnection) -> None:
         self._conn = conn
@@ -59,6 +68,78 @@ class ApiCache:
         if row is None:
             return None
         return cast(JsonObject, json.loads(str(row[0])))
+
+    def get_stale_success(
+        self,
+        source: str,
+        endpoint: str,
+        request_params: JsonObject,
+    ) -> JsonObject | None:
+        cache_key = build_cache_key(source, endpoint, request_params)
+        row = self._conn.execute(
+            """
+            SELECT response_json
+            FROM api_cache
+            WHERE cache_key = ?
+              AND response_status BETWEEN 200 AND 299
+            ORDER BY fetched_at DESC
+            LIMIT 1
+            """,
+            [cache_key],
+        ).fetchone()
+        if row is None:
+            return None
+        return cast(JsonObject, json.loads(str(row[0])))
+
+    def summary(self, now: datetime) -> ApiCacheSummary:
+        source_rows = self._conn.execute(
+            """
+            SELECT source, count(*)
+            FROM api_cache
+            GROUP BY source
+            ORDER BY source
+            """
+        ).fetchall()
+        sources = {str(source): int(count) for source, count in source_rows}
+
+        return ApiCacheSummary(
+            total_entries=_query_int(
+                self._conn,
+                "SELECT count(*) FROM api_cache",
+                [],
+            ),
+            fresh_successes=_query_int(
+                self._conn,
+                """
+                SELECT count(*)
+                FROM api_cache
+                WHERE response_status BETWEEN 200 AND 299
+                  AND expires_at > ?
+                """,
+                [now],
+            ),
+            stale_successes=_query_int(
+                self._conn,
+                """
+                SELECT count(*)
+                FROM api_cache
+                WHERE response_status BETWEEN 200 AND 299
+                  AND expires_at <= ?
+                """,
+                [now],
+            ),
+            error_entries=_query_int(
+                self._conn,
+                """
+                SELECT count(*)
+                FROM api_cache
+                WHERE response_status < 200
+                   OR response_status > 299
+                """,
+                [],
+            ),
+            sources=sources,
+        )
 
     def write_response(
         self,
@@ -123,3 +204,10 @@ class ApiCache:
                 except Exception:
                     pass
             raise
+
+
+def _query_int(conn: DuckDBPyConnection, sql: str, params: list[object]) -> int:
+    row = conn.execute(sql, params).fetchone()
+    if row is None:
+        return 0
+    return int(row[0])

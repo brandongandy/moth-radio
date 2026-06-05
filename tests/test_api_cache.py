@@ -314,3 +314,79 @@ def test_api_cache_does_not_return_future_expiring_error_payload(
 
     assert cache.get_fresh("lastfm", "artist.getSimilar", params, now) is None
     conn.close()
+
+
+def test_api_cache_returns_latest_stale_success_payload(tmp_path: Path) -> None:
+    config = load_config(_write_minimal_config(tmp_path))
+    conn = initialize_database(config)
+    cache = ApiCache(conn)
+    now = datetime(2026, 6, 3, 12, 0, 0)
+    params = {"method": "artist.getSimilar", "artist": "The Cure", "limit": 2}
+
+    cache.write_response(
+        source="lastfm",
+        endpoint="artist.getSimilar",
+        request_url="https://ws.audioscrobbler.com/2.0/",
+        request_params=params,
+        response_status=200,
+        response_json={"similarartists": {"artist": [{"name": "Old"}]}},
+        fetched_at=now - timedelta(days=200),
+        expires_at=now - timedelta(days=20),
+        error_message=None,
+    )
+
+    assert cache.get_fresh("lastfm", "artist.getSimilar", params, now) is None
+    stale = cache.get_stale_success("lastfm", "artist.getSimilar", params)
+
+    assert stale == {"similarartists": {"artist": [{"name": "Old"}]}}
+    conn.close()
+
+
+def test_api_cache_summary_counts_fresh_stale_and_error_rows(tmp_path: Path) -> None:
+    config = load_config(_write_minimal_config(tmp_path))
+    conn = initialize_database(config)
+    cache = ApiCache(conn)
+    now = datetime(2026, 6, 3, 12, 0, 0)
+
+    cache.write_response(
+        source="lastfm",
+        endpoint="artist.getSimilar",
+        request_url="https://ws.audioscrobbler.com/2.0/",
+        request_params={"method": "artist.getSimilar", "artist": "A"},
+        response_status=200,
+        response_json={"ok": True},
+        fetched_at=now,
+        expires_at=now + timedelta(days=1),
+        error_message=None,
+    )
+    cache.write_response(
+        source="lastfm",
+        endpoint="artist.getTopTags",
+        request_url="https://ws.audioscrobbler.com/2.0/",
+        request_params={"method": "artist.getTopTags", "artist": "B"},
+        response_status=200,
+        response_json={"ok": True},
+        fetched_at=now - timedelta(days=3),
+        expires_at=now - timedelta(days=1),
+        error_message=None,
+    )
+    cache.write_response(
+        source="lastfm",
+        endpoint="tag.getTopArtists",
+        request_url="https://ws.audioscrobbler.com/2.0/",
+        request_params={"method": "tag.getTopArtists", "tag": "goth"},
+        response_status=500,
+        response_json={"message": "failed"},
+        fetched_at=now,
+        expires_at=now + timedelta(days=1),
+        error_message="failed",
+    )
+
+    summary = cache.summary(now)
+
+    assert summary.total_entries == 3
+    assert summary.fresh_successes == 1
+    assert summary.stale_successes == 1
+    assert summary.error_entries == 1
+    assert summary.sources == {"lastfm": 3}
+    conn.close()

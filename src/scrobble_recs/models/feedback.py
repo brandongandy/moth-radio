@@ -309,6 +309,8 @@ class _RerankRow:
 def rerank_recommendation_run(
     conn: DuckDBPyConnection,
     run_id: str,
+    *,
+    _manage_transaction: bool = True,
 ) -> FeedbackRerankStats:
     rows = _load_rerank_rows(conn, run_id)
     if not rows:
@@ -322,7 +324,8 @@ def rerank_recommendation_run(
         (row for row in adjusted if not row.hidden),
         key=lambda row: (-row.adjusted_score, row.artist_id),
     )
-    conn.execute("BEGIN TRANSACTION")
+    if _manage_transaction:
+        conn.execute("BEGIN TRANSACTION")
     try:
         conn.execute("UPDATE recommendation SET rank = -rank WHERE run_id = ?", [run_id])
         hidden_count = len(adjusted) - len(visible)
@@ -354,9 +357,11 @@ def rerank_recommendation_run(
             """,
             [run_id],
         )
-        conn.execute("COMMIT")
+        if _manage_transaction:
+            conn.execute("COMMIT")
     except Exception:
-        conn.execute("ROLLBACK")
+        if _manage_transaction:
+            conn.execute("ROLLBACK")
         raise
     return FeedbackRerankStats(
         run_id=run_id,

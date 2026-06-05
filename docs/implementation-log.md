@@ -1,5 +1,30 @@
 # Implementation Log
 
+## 2026-06-05: TUI scrolling and help modal
+
+Changed:
+
+- Made the recommendation list pane a scrollable Textual viewport that follows
+  keyboard selection through long recommendation runs.
+- Added a `?` help modal with navigation, filter, and feedback-key meanings.
+- Changed `wrong_genre` feedback in the TUI to rerank and move selection to the
+  top visible recommendation instead of staying on the demoted row.
+- Updated the README TUI key documentation with explicit feedback semantics.
+
+Verified:
+
+- `python -m pytest tests/test_tui_app.py::test_tui_recommendation_list_scrolls_to_follow_selection tests/test_tui_app.py::test_tui_help_key_opens_modal_with_feedback_meanings tests/test_tui_app.py::test_tui_wrong_feedback_resets_selection_to_top_after_rerank -v`
+  before implementation -> 3 failed because the list did not scroll, `?` did
+  not open a modal, and `wrong_genre` preserved the selected row.
+- `python -m pytest tests/test_tui_app.py::test_tui_recommendation_list_scrolls_to_follow_selection tests/test_tui_app.py::test_tui_help_key_opens_modal_with_feedback_meanings tests/test_tui_app.py::test_tui_wrong_feedback_resets_selection_to_top_after_rerank -v`
+  after implementation -> 3 passed.
+- `python -m pytest tests/test_tui_app.py -v` -> 19 passed.
+- `python -m ruff format src/scrobble_recs/tui/app.py` -> 1 file reformatted.
+- `python -m pytest` -> 176 passed.
+- `python -m ruff check .` -> All checks passed.
+- `python -m ruff format --check .` -> 43 files already formatted.
+- `python -m mypy src` -> Success, no issues found in 26 source files.
+
 ## 2026-06-05: Recommendation progress indicator
 
 Changed:

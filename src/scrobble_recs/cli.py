@@ -166,6 +166,40 @@ def enrich_command(
     _print_enrichment_stats(stats)
 
 
+@app.command("resolve")
+def resolve_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    source: Annotated[
+        str,
+        typer.Option("--source", help="Resolution source to run."),
+    ] = "musicbrainz",
+) -> None:
+    if source != "musicbrainz":
+        raise typer.BadParameter("only --source musicbrainz is supported")
+
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        unresolved_artists = _count_query(
+            conn,
+            """
+            SELECT count(*)
+            FROM artist
+            WHERE resolution_status IS NULL
+               OR resolution_status IN ('provisional', 'unresolved')
+            """,
+        )
+    finally:
+        conn.close()
+
+    console.print(f"unresolved artists: {unresolved_artists}")
+    if not resolved_config.apis.musicbrainz.enabled:
+        console.print("MusicBrainz resolution is disabled")
+        return
+    console.print("MusicBrainz resolution is not implemented in this version")
+    raise typer.Exit(code=1)
+
+
 @app.command("recommend")
 def recommend_command(
     config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
@@ -309,6 +343,13 @@ def feedback_command(
             raise typer.Exit(code=1) from exc
     finally:
         conn.close()
+
+
+def _count_query(conn: DuckDBPyConnection, sql: str) -> int:
+    row = conn.execute(sql).fetchone()
+    if row is None:
+        return 0
+    return int(row[0] or 0)
 
 
 def _print_stats(stats: ImportStats) -> None:

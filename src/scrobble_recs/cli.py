@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Annotated, cast
 
@@ -24,9 +25,25 @@ def import_command(
     config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
 ) -> None:
     resolved_config = load_config(config)
+    logger = _configure_logging(resolved_config.app.log_path)
+    csv_path = resolved_config.input.lastfm_csv
+    console.print(f"Log: {resolved_config.app.log_path}", soft_wrap=True)
+    console.print(f"Importing Last.fm CSV from {csv_path}", soft_wrap=True)
+    logger.info("Starting import from %s", csv_path)
+
     conn = initialize_database(resolved_config)
     try:
-        stats = import_lastfm_csv(conn, resolved_config.input.lastfm_csv)
+        with console.status(f"Importing Last.fm CSV from {csv_path}...", spinner="dots"):
+            stats = import_lastfm_csv(conn, csv_path)
+        logger.info(
+            "Import complete: raw_scrobbles=%s clean_scrobbles=%s duplicate_scrobbles=%s",
+            stats.raw_scrobbles,
+            stats.scrobbles,
+            stats.duplicate_scrobbles,
+        )
+    except Exception:
+        logger.exception("Import failed")
+        raise
     finally:
         conn.close()
 
@@ -241,3 +258,19 @@ def _print_recommendation_stats(stats: RecommendationStats) -> None:
     console.print(f"run id: {stats.run_id}")
     console.print(f"mode: {stats.mode}")
     console.print(f"recommendations: {stats.recommendations}")
+
+
+def _configure_logging(log_path: Path) -> logging.Logger:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger("scrobble_recs")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logger.addHandler(handler)
+    return logger

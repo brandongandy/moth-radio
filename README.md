@@ -45,6 +45,7 @@ Edit `config.example.json` or create your own config file with paths for:
 
 - `app.db_path`: the DuckDB database file.
 - `app.cache_dir`: local cache storage.
+- `app.log_path`: the command log file.
 - `input.lastfm_csv`: your Last.fm CSV export.
 
 Import scrobbles:
@@ -52,6 +53,10 @@ Import scrobbles:
 ```bash
 scrobble-recs import --config config.example.json
 ```
+
+The import command prints the configured log path before it starts, shows a
+terminal spinner while the CSV import is running, and writes import lifecycle
+messages to `app.log_path`.
 
 Check local configuration and imported data:
 

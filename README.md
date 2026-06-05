@@ -15,7 +15,7 @@ The project is designed around a few constraints:
 - Recommendation evidence is stored in tables and JSON so results can be
   inspected instead of treated as a black box.
 
-The Python package and CLI are currently named `scrobble-recs`.
+The Python package and CLI are named `scrobble-recs`.
 
 ## How To Use It
 
@@ -86,14 +86,18 @@ Testing guidelines:
 When behavior changes, update the relevant docs and `docs/implementation-log.md`
 with what changed and how it was verified.
 
-## Milestone 3
+## Recommendations
 
-This slice adds the first persisted recommender:
+`recommend` generates a persisted artist recommendation run from local DuckDB
+data:
 
 - Recomputes local listening weights, knownness, and rediscovery scores.
-- Generates recommendations from persisted Last.fm similarity and tag enrichment.
-- Penalizes known and obvious top-tag artists.
-- Persists recommendation runs with inspectable JSON explanations.
+- Uses persisted Last.fm similarity edges and tag enrichment as candidate
+  evidence.
+- Penalizes artists that are already well known or obvious top artists for
+  high-affinity tags.
+- Applies local feedback from prior recommendation runs.
+- Persists inspectable JSON explanations for each recommendation.
 - Exports persisted runs to CSV or JSONL.
 
 ```bash
@@ -104,7 +108,21 @@ scrobble-recs export --config config.example.json --format jsonl --output recs.j
 
 `recommend` does not call live APIs. Run `enrich --source lastfm` first to populate the local graph.
 
-## Recommender Quality Pass
+## Recommendation Algorithm
+
+The recommender starts from multiple local taste regions rather than only the
+highest-played artists. Seed artists come from lifetime listening, recent
+listening, older favorites, underexplored artists, and feedback boosts. Those
+seeds pull candidates from the persisted Last.fm similarity graph and tag
+tables.
+
+Each candidate receives component scores for Last.fm similarity, tag fit,
+rediscovery value, and feedback. Knownness suppresses artists that already have
+substantial local listening history, while rediscovery gives lightly played or
+dormant artists room to surface. Obviousness uses tag top-artist ranks to
+penalize broad "you probably already know this" recommendations without
+hard-excluding every popular artist. A diversity reranker keeps the top of the
+list from collapsing into one tag or similarity neighborhood.
 
 `recommend` supports mode-specific ranking from local data:
 
@@ -119,12 +137,10 @@ scrobble-recs recommend --config config.example.json --mode anti-obvious --limit
 scrobble-recs recommend --config config.example.json --mode "tag:post-punk,gothic rock" --limit 500
 ```
 
-The recommender now selects seeds from multiple local taste regions, applies
-mode-specific knownness and obviousness behavior, hides the most obvious
-high-affinity top-tag artists unless they are rediscovery candidates, and
-reranks the persisted list for diversity. It still reads only local DuckDB data
-during `recommend`; run `enrich --source lastfm` first when the local graph needs
-new Last.fm similarity or tag data.
+Mode-specific settings adjust seed weighting, knownness tolerance, obviousness
+behavior, and diversity pressure. `recommend` reads only local DuckDB data; run
+`enrich --source lastfm` when the local graph needs refreshed Last.fm similarity
+or tag data.
 
 ## Feedback Loop
 
@@ -146,6 +162,6 @@ Supported actions are `save`, `reject`, `already_know`, `too_obvious`,
 `played_externally`, and `note`.
 
 By default the command records the event and reranks that persisted run. Use
-`--no-rerank` to record feedback only. Future `recommend` runs also consume
-feedback as artist boosts/suppression, tag boosts/suppression, and lightweight
+`--no-rerank` to record feedback only. `recommend` consumes feedback as artist
+boosts/suppression, tag boosts/suppression, and lightweight
 similarity-neighborhood adjustments.

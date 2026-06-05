@@ -523,3 +523,19 @@ Verified:
 - `python -m ruff check .`
 - `python -m ruff format --check .`
 - `python -m mypy src`
+
+## 2026-06-05: README algorithm summary and language scrub
+
+Changed:
+
+- Replaced milestone-style README wording with present-tense recommendation usage.
+- Added a concise recommendation algorithm overview covering seed regions, candidate evidence, scoring, knownness, obviousness, feedback, and diversity reranking.
+- Removed README wording that described behavior as a temporal change such as "now", "still", or "future".
+
+Verified:
+
+- `git diff --check -- README.md docs/implementation-log.md` -> no whitespace errors; Git reported line-ending warnings for both files.
+- `python -m pytest` -> 151 passed
+- `python -m ruff check .` -> All checks passed
+- `python -m ruff format --check .` -> 39 files already formatted
+- `python -m mypy src` -> Success, no issues found in 24 source files

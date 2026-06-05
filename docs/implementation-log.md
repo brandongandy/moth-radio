@@ -539,3 +539,44 @@ Verified:
 - `python -m ruff check .` -> All checks passed
 - `python -m ruff format --check .` -> 39 files already formatted
 - `python -m mypy src` -> Success, no issues found in 24 source files
+
+## 2026-06-05: TUI Task 2 app shell
+
+Changed:
+
+- Added behavioral Textual tests for rendering the latest persisted recommendation run and moving selection with `j`.
+- Added `ScrobbleRecsTui`, a local-only Textual app shell that reads persisted DuckDB recommendations through `TuiRecommendationStore`.
+- Added recommendation list, detail, score breakdown, status, movement keys, feedback placeholder keybindings, undo-unavailable status, and help status.
+- Added an `InspectableStatic` compatibility wrapper for the installed Textual version so headless tests can inspect rendered `Text`.
+- Updated the TUI V1 plan checklist and documented deviations.
+
+Verified:
+
+- `python -m pytest tests/test_tui_app.py::test_tui_renders_recommendation_list_and_selected_detail tests/test_tui_app.py::test_tui_moves_selection_and_updates_detail -v` before implementation -> failed during collection with `ModuleNotFoundError: No module named 'scrobble_recs.tui.app'`.
+- `python -m pytest tests/test_tui_app.py::test_tui_renders_recommendation_list_and_selected_detail tests/test_tui_app.py::test_tui_moves_selection_and_updates_detail -v` after implementation -> 2 passed.
+- `python -m pytest tests/test_tui_data.py tests/test_tui_app.py -v` -> 5 passed.
+- `python -m ruff check src/scrobble_recs/tui/app.py tests/test_tui_app.py` -> All checks passed.
+- `python -m mypy src` -> Success, no issues found in 25 source files.
+- `python -m ruff format --check .` before formatting -> Would reformat `src\scrobble_recs\tui\app.py`.
+- `python -m ruff format src/scrobble_recs/tui/app.py` -> 1 file reformatted.
+- `python -m pytest` -> 153 passed.
+- `python -m ruff check .` -> All checks passed.
+- `python -m ruff format --check .` -> 41 files already formatted.
+- `python -m mypy src` -> Success, no issues found in 25 source files.
+
+Review follow-up changed:
+
+- Added deterministic Textual tests for no persisted runs, upward movement and list boundaries, help status, undo status, and selected-row feedback placeholder status.
+- Wrapped TUI test DuckDB connections in `try/finally` so temporary connections close when assertions fail.
+- Renamed the Textual compatibility wrapper to `_InspectableStatic` and narrowed its documentation.
+- Added the review-driven test coverage deviation to the TUI V1 plan.
+
+Review follow-up verified:
+
+- `python -m pytest tests/test_tui_app.py -v` before production cleanup -> 7 passed.
+- `python -m pytest tests/test_tui_app.py -v` -> 7 passed.
+- `python -m pytest tests/test_tui_data.py tests/test_tui_app.py -v` -> 10 passed.
+- `python -m ruff check src/scrobble_recs/tui/app.py tests/test_tui_app.py` -> All checks passed.
+- `python -m ruff check .` -> All checks passed.
+- `python -m ruff format --check .` -> 41 files already formatted.
+- `python -m mypy src` -> Success, no issues found in 25 source files.

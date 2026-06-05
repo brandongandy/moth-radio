@@ -2,8 +2,14 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from scrobble_recs.config import DiversityConfig, load_config
+from scrobble_recs.config import (
+    EXPECTED_CSV_COLUMNS,
+    DiversityConfig,
+    default_config_document,
+    load_config,
+)
 from scrobble_recs.db import initialize_database
 
 
@@ -239,3 +245,81 @@ def test_diversity_lambda_accepts_json_alias_and_python_field_name(tmp_path: Pat
 
     assert config.recommendation.diversity.lambda_ == 0.42
     assert round_tripped.lambda_ == 0.61
+
+
+def test_load_config_rejects_invalid_rate_limit_and_ttl(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "scrobble-recs",
+                    "db_path": str(tmp_path / "db.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": str(tmp_path / "scrobbles.csv"),
+                    "timezone": "UTC",
+                    "timestamp_column": "uts",
+                    "csv_columns": list(EXPECTED_CSV_COLUMNS),
+                },
+                "apis": {
+                    "lastfm": {
+                        "rate_limit_per_second": 0,
+                        "cache_ttl_days": -1,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError) as exc_info:
+        load_config(config_path)
+
+    message = str(exc_info.value)
+    assert "rate_limit_per_second" in message
+    assert "cache_ttl_days" in message
+
+
+def test_load_config_rejects_wrong_csv_contract(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "scrobble-recs",
+                    "db_path": str(tmp_path / "db.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": str(tmp_path / "scrobbles.csv"),
+                    "timezone": "UTC",
+                    "timestamp_column": "played_at",
+                    "csv_columns": ["artist", "track"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError) as exc_info:
+        load_config(config_path)
+
+    message = str(exc_info.value)
+    assert "timestamp_column" in message
+    assert "csv_columns" in message
+
+
+def test_default_config_document_contains_spec_defaults() -> None:
+    document = default_config_document()
+
+    assert document["app"]["name"] == "scrobble-recs"
+    assert document["apis"]["lastfm"]["api_key"] == "${LASTFM_API_KEY}"
+    assert document["apis"]["lastfm"]["rate_limit_per_second"] == 2.0
+    assert document["apis"]["musicbrainz"]["rate_limit_per_second"] == 1.0
+    assert document["recommendation"]["seed_artist_limit"] == 250
+    assert document["recommendation"]["similar_artists_per_seed"] == 100
+    assert document["recommendation"]["obviousness"]["top_n_per_tag_hide"] == 3

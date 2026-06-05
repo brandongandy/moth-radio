@@ -202,9 +202,27 @@ def test_doctor_command_runs_without_api_keys(tmp_path: Path) -> None:
     result = runner.invoke(app, ["doctor", "--config", str(config_path)])
 
     assert result.exit_code == 0
-    assert "Config: ok" in result.output
-    assert "Database: ok" in result.output
-    assert "API keys: not required for import/doctor" in result.output
+    assert "config: ok" in result.output
+    assert "database: ok" in result.output
+    assert "csv: ok" in result.output
+    assert "cache: ok" in result.output
+    assert "lastfm_api_key: warn" in result.output
+    assert "api_cache: ok" in result.output
+    assert "clean scrobbles: 6" in result.output
+
+
+def test_doctor_command_exits_nonzero_when_csv_is_missing(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["input"]["lastfm_csv"] = str(tmp_path / "missing.csv")
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = runner.invoke(app, ["doctor", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "csv: error" in result.output
+    assert "missing" in result.output
 
 
 def test_enrich_command_dispatches_lastfm_source(tmp_path: Path, monkeypatch) -> None:

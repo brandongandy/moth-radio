@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn
 
+from scrobble_recs.admin.doctor import DiagnosticCheck, run_doctor
 from scrobble_recs.admin.init import initialize_project
 from scrobble_recs.config import ScrobbleRecsConfig, load_config
 from scrobble_recs.db import initialize_database
@@ -126,18 +127,16 @@ def doctor_command(
     resolved_config = load_config(config)
     conn = initialize_database(resolved_config)
     try:
+        result = run_doctor(resolved_config, conn)
         stats = get_import_stats(conn)
     finally:
         conn.close()
 
-    console.print("Config: ok")
-    console.print("Database: ok")
-    if resolved_config.input.lastfm_csv.exists():
-        console.print("CSV: ok")
-    else:
-        console.print(f"CSV: missing at {resolved_config.input.lastfm_csv}")
-    console.print("API keys: not required for import/doctor")
+    for check in result.checks:
+        _print_diagnostic_check(check)
     _print_stats(stats)
+    if result.has_errors:
+        raise typer.Exit(code=1)
 
 
 @app.command("enrich")
@@ -319,6 +318,10 @@ def _print_stats(stats: ImportStats) -> None:
     console.print(f"distinct artists: {stats.distinct_artists}")
     console.print(f"distinct tracks: {stats.distinct_tracks}")
     console.print(f"null artist MBID scrobbles: {stats.null_artist_mbid_scrobbles}")
+
+
+def _print_diagnostic_check(check: DiagnosticCheck) -> None:
+    console.print(f"{check.name}: {check.status.value} - {check.message}", soft_wrap=True)
 
 
 def _print_enrichment_stats(stats: LastFmEnrichmentStats) -> None:

@@ -90,6 +90,22 @@ def test_import_command_prints_stats(tmp_path: Path) -> None:
     assert "distinct artists: 4" in result.output
 
 
+def test_import_command_shows_working_status_and_writes_log(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    log_path = tmp_path / "app.log"
+
+    result = runner.invoke(app, ["import", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert f"Log: {log_path}" in result.output
+    assert (
+        f"Importing Last.fm CSV from {Path('tests/fixtures/tiny_lastfm_export.csv')}"
+        in result.output
+    )
+    assert "Import complete" in log_path.read_text(encoding="utf-8")
+
+
 def test_doctor_command_runs_without_api_keys(tmp_path: Path) -> None:
     runner = CliRunner()
     config_path = write_config(tmp_path)

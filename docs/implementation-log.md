@@ -1,5 +1,31 @@
 # Implementation Log
 
+## 2026-06-05: Import command progress and logging
+
+Changed:
+
+- Added visible import start output with the configured log file path before the
+  blocking Last.fm CSV import begins.
+- Wrapped the CSV import call in a Rich terminal status spinner so long first
+  imports show activity while the importer runs.
+- Initialized the configured app log file for imports and recorded import start,
+  completion, and failure lifecycle messages.
+- Updated the README import instructions with the log and spinner behavior.
+
+Verified:
+
+- `python -m pytest tests/test_cli.py::test_import_command_shows_working_status_and_writes_log -v`
+  before implementation -> failed because the command printed only final import
+  stats and did not produce the configured log output.
+- `python -m pytest tests/test_cli.py::test_import_command_shows_working_status_and_writes_log -v`
+  after implementation -> 1 passed
+- `python -m pytest tests/test_cli.py -v` -> 18 passed
+- `python -m ruff format src/scrobble_recs/cli.py` -> 1 file reformatted
+- `python -m pytest` -> 171 passed
+- `python -m ruff check .` -> All checks passed
+- `python -m ruff format --check .` -> 43 files already formatted
+- `python -m mypy src` -> Success, no issues found in 26 source files
+
 ## 2026-06-05: CLI install troubleshooting and module entry point
 
 Changed:

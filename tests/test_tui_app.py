@@ -196,6 +196,10 @@ async def _test_tui_help_key_updates_status(tmp_path: Path) -> None:
             await pilot.pause()
             status = _rendered_plain(app, "#status")
             assert "Keys: j/k move" in status
+            assert "/ search" in status
+            assert "f tag" in status
+            assert "e scores" in status
+            assert "R run" in status
             assert "feedback keys" in status
             assert "feedback placeholders" not in status
     finally:
@@ -280,6 +284,51 @@ async def _test_tui_filter_key_reduces_visible_recommendations(tmp_path: Path) -
         rendered = app.query_one("#recommendations").renderable.plain
         assert "Cold Cave" in rendered
         assert "Warm Artist" not in rendered
+
+    conn.close()
+
+
+def test_tui_tag_filter_key_reduces_visible_recommendations(tmp_path: Path) -> None:
+    asyncio.run(_test_tui_tag_filter_key_reduces_visible_recommendations(tmp_path))
+
+
+async def _test_tui_tag_filter_key_reduces_visible_recommendations(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    run_id = "00000000-0000-0000-0000-000000000107"
+    _insert_run(conn, run_id=run_id, mode="balanced")
+    _insert_artist(conn, artist_id=70, name="Tag Filter First")
+    _insert_artist(conn, artist_id=71, name="Tag Filter Second")
+    _insert_recommendation(
+        conn,
+        run_id=run_id,
+        artist_id=70,
+        rank=1,
+        final_score=0.9,
+        explanation={"summary": "First tag match.", "tags": [{"tag": "coldwave"}]},
+    )
+    _insert_recommendation(
+        conn,
+        run_id=run_id,
+        artist_id=71,
+        rank=2,
+        final_score=0.8,
+        explanation={"summary": "Second tag miss.", "tags": [{"tag": "soul"}]},
+    )
+
+    app = ScrobbleRecsTui(conn)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        rendered = app.query_one("#recommendations").renderable.plain
+        assert "Tag Filter First" in rendered
+        assert "Tag Filter Second" in rendered
+
+        await pilot.press("f")
+        await pilot.pause()
+        rendered = app.query_one("#recommendations").renderable.plain
+        assert app.filters.tag == "coldwave"
+        assert "Tag Filter First" in rendered
+        assert "Tag Filter Second" not in rendered
 
     conn.close()
 

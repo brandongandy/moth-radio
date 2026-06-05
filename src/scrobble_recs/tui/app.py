@@ -169,7 +169,8 @@ class ScrobbleRecsTui(App[None]):
 
     def action_help_status(self) -> None:
         self.query_one("#status", Static).update(
-            "Keys: j/k move, s/r/a/o/w/m/l/h feedback keys, u undo, q quit"
+            "Keys: j/k move, / search, f tag, e scores, R run, "
+            "s/r/a/o/w/m/l/h feedback keys, u undo, q quit"
         )
 
     def _reload_rows(self) -> None:

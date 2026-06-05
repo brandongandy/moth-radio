@@ -1,5 +1,6 @@
 import json
 import math
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,178 @@ def _config_path(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+def test_refresh_artist_listening_scores_updates_weights_for_build_profile(
+    tmp_path: Path,
+) -> None:
+    from scrobble_recs.importers.lastfm_csv import import_lastfm_csv
+    from scrobble_recs.models.listening import refresh_artist_listening_scores
+
+    config = load_config(_config_path(tmp_path))
+    conn = initialize_database(config)
+    try:
+        import_lastfm_csv(conn, Path("tests/fixtures/tiny_lastfm_export.csv"))
+        stats = refresh_artist_listening_scores(conn, as_of=datetime(2026, 6, 5, 12, 0, 0))
+
+        assert stats.artists_updated == 4
+        missing_scores = conn.execute(
+            """
+            SELECT count(*)
+            FROM artist_listening_fact
+            WHERE lifetime_weight IS NULL
+               OR recent_weight IS NULL
+               OR knownness IS NULL
+               OR rediscovery_score IS NULL
+            """
+        ).fetchone()
+        assert missing_scores == (0,)
+    finally:
+        conn.close()
+
+
+def test_build_profile_persists_tag_profile_and_genre_clusters(tmp_path: Path) -> None:
+    from scrobble_recs.models.profile_builder import build_profile
+
+    config = load_config(_config_path(tmp_path))
+    conn = initialize_database(config)
+    try:
+        _insert_profile_artist(
+            conn,
+            artist_id=10,
+            name="Post Punk Anchor",
+            play_count=100,
+            lifetime_weight=0.0,
+            recent_weight=0.0,
+            knownness=0.0,
+            rediscovery_score=0.0,
+            last_played_at="2026-05-01",
+        )
+        _insert_profile_artist(
+            conn,
+            artist_id=11,
+            name="Shoegaze Anchor",
+            play_count=40,
+            lifetime_weight=0.0,
+            recent_weight=0.0,
+            knownness=0.0,
+            rediscovery_score=0.0,
+            last_played_at="2026-04-01",
+        )
+        _insert_profile_artist(
+            conn,
+            artist_id=12,
+            name="Below Threshold Artist",
+            play_count=2,
+            lifetime_weight=0.0,
+            recent_weight=0.0,
+            knownness=0.0,
+            rediscovery_score=0.0,
+            last_played_at="2026-03-01",
+        )
+        _insert_artist_tag(conn, artist_id=10, tag="Post-Punk", weight=0.90)
+        _insert_artist_tag(conn, artist_id=10, tag="Gothic Rock", weight=0.60)
+        _insert_artist_tag(conn, artist_id=11, tag="Shoegaze", weight=0.80)
+        _insert_artist_tag(conn, artist_id=11, tag="Dream Pop", weight=0.50)
+        _insert_artist_tag(conn, artist_id=12, tag="Ignored", weight=1.00)
+
+        stats = build_profile(conn, config, as_of=datetime(2026, 6, 5, 12, 0, 0))
+
+        assert stats.artists_updated == 3
+        assert stats.tag_weights == 4
+        assert stats.genre_clusters == 4
+        score_rows = conn.execute(
+            """
+            SELECT lifetime_weight, recent_weight, knownness, rediscovery_score
+            FROM artist_listening_fact
+            ORDER BY artist_id
+            """
+        ).fetchall()
+        assert len(score_rows) == 3
+        assert all(value is not None for row in score_rows for value in row)
+        tag_rows = conn.execute(
+            """
+            SELECT tag, source, user_weight, artist_count, top_seed_artists
+            FROM tag_profile
+            ORDER BY user_weight DESC, tag
+            """
+        ).fetchall()
+        assert [row[0] for row in tag_rows] == [
+            "post-punk",
+            "shoegaze",
+            "gothic rock",
+            "dream pop",
+        ]
+        assert [row[1] for row in tag_rows] == ["lastfm"] * 4
+        assert tag_rows[0][2] == pytest.approx(1.0)
+        assert all(0.0 < float(row[2]) <= 1.0 for row in tag_rows)
+        assert all(row[3] == 1 for row in tag_rows)
+        assert json.loads(tag_rows[0][4])[0]["artist"] == "Post Punk Anchor"
+        assert "Ignored" not in {row[0] for row in tag_rows}
+
+        cluster_rows = conn.execute(
+            """
+            SELECT cluster_key, cluster_name, tag_weights, seed_artists, artist_count
+            FROM profile_cluster
+            ORDER BY cluster_key
+            """
+        ).fetchall()
+        assert [row[1] for row in cluster_rows] == [
+            "dream pop",
+            "gothic rock",
+            "post-punk",
+            "shoegaze",
+        ]
+        assert all(
+            str(row[0]).startswith(f"lastfm:{row[1].replace(' ', '-')}:") for row in cluster_rows
+        )
+        post_punk = next(row for row in cluster_rows if row[1] == "post-punk")
+        assert post_punk[1] == "post-punk"
+        assert json.loads(post_punk[2]) == {"post-punk": 1.0}
+        assert json.loads(post_punk[3])[0]["artist"] == "Post Punk Anchor"
+        assert post_punk[4] == 1
+    finally:
+        conn.close()
+
+
+def test_build_profile_persists_clusters_for_slug_colliding_tags(tmp_path: Path) -> None:
+    from scrobble_recs.models.profile_builder import build_profile
+
+    config = load_config(_config_path(tmp_path))
+    conn = initialize_database(config)
+    try:
+        _insert_profile_artist(
+            conn,
+            artist_id=20,
+            name="Collision Anchor",
+            play_count=100,
+            lifetime_weight=0.0,
+            recent_weight=0.0,
+            knownness=0.0,
+            rediscovery_score=0.0,
+            last_played_at="2026-05-01",
+        )
+        _insert_artist_tag(conn, artist_id=20, tag="post punk", weight=1.00)
+        _insert_artist_tag(conn, artist_id=20, tag="post-punk", weight=0.90)
+        _insert_artist_tag(conn, artist_id=20, tag="post_punk", weight=0.80)
+
+        stats = build_profile(conn, config, as_of=datetime(2026, 6, 5, 12, 0, 0))
+
+        assert stats.tag_weights == 3
+        assert stats.genre_clusters == 3
+        assert conn.execute("SELECT count(*) FROM tag_profile").fetchone() == (3,)
+        cluster_rows = conn.execute(
+            """
+            SELECT cluster_key, cluster_name
+            FROM profile_cluster
+            ORDER BY cluster_name
+            """
+        ).fetchall()
+        assert [row[1] for row in cluster_rows] == ["post punk", "post-punk", "post_punk"]
+        assert len({row[0] for row in cluster_rows}) == 3
+        assert all(str(row[0]).startswith("lastfm:post-punk") for row in cluster_rows)
+    finally:
+        conn.close()
 
 
 def test_select_seed_artists_orders_by_weight_then_name(tmp_path: Path) -> None:
@@ -565,4 +738,21 @@ def _insert_profile_artist(
             knownness,
             rediscovery_score,
         ],
+    )
+
+
+def _insert_artist_tag(conn, *, artist_id: int, tag: str, weight: float) -> None:
+    conn.execute(
+        """
+        INSERT INTO artist_tag (
+            artist_id,
+            tag,
+            source,
+            tag_count,
+            normalized_weight,
+            fetched_at
+        )
+        VALUES (?, ?, 'lastfm', ?, ?, current_timestamp)
+        """,
+        [artist_id, tag, weight * 100.0, weight],
     )

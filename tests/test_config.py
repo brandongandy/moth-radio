@@ -100,10 +100,12 @@ def test_initialize_database_applies_initial_migration(tmp_path: Path) -> None:
         "artist_tag",
         "enrichment_work",
         "feedback_event",
+        "profile_cluster",
         "raw_scrobble",
         "recommendation",
         "recommendation_run",
         "scrobble",
+        "tag_profile",
         "tag_top_artist",
     }
     assert {"artist_key", "album_key", "track_key", "is_duplicate"} <= scrobble_columns

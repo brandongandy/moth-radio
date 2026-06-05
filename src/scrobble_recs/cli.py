@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, cast
 
@@ -21,6 +22,7 @@ from scrobble_recs.enrichment.lastfm import (
 from scrobble_recs.export import ExportFormat, export_recommendations
 from scrobble_recs.importers.lastfm_csv import ImportStats, get_import_stats, import_lastfm_csv
 from scrobble_recs.models.feedback import record_feedback_event, rerank_recommendation_run
+from scrobble_recs.models.profile_builder import build_profile
 from scrobble_recs.models.recommend import (
     RecommendationProgress,
     RecommendationStats,
@@ -96,6 +98,25 @@ def import_command(
 
     console.print(f"Imported {stats.scrobbles} scrobbles")
     _print_stats(stats)
+
+
+@app.command("build-profile")
+def build_profile_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+) -> None:
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        stats = build_profile(
+            conn, resolved_config, as_of=datetime.now(tz=UTC).replace(tzinfo=None)
+        )
+    finally:
+        conn.close()
+
+    console.print("Profile refreshed")
+    console.print(f"artists updated: {stats.artists_updated}")
+    console.print(f"tag weights: {stats.tag_weights}")
+    console.print(f"genre clusters: {stats.genre_clusters}")
 
 
 @app.command("doctor")

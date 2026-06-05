@@ -402,7 +402,7 @@ Checkpoint:
 - Modify: `src/scrobble_recs/cli.py`
 - Modify: `tests/test_cli.py`
 
-- [ ] **Step 1: Add failing init CLI tests**
+- [x] **Step 1: Add failing init CLI tests**
 
 Append these tests to `tests/test_cli.py`:
 
@@ -448,7 +448,7 @@ def test_init_command_force_overwrites_existing_config(tmp_path: Path) -> None:
     assert payload["app"]["name"] == "scrobble-recs"
 ```
 
-- [ ] **Step 2: Run the init tests to verify they fail**
+- [x] **Step 2: Run the init tests to verify they fail**
 
 Run:
 
@@ -462,7 +462,7 @@ Expected:
 No such command 'init'
 ```
 
-- [ ] **Step 3: Add the init service**
+- [x] **Step 3: Add the init service**
 
 Create `src/scrobble_recs/admin/__init__.py`:
 
@@ -525,7 +525,7 @@ def _config_document_for_location(config_path: Path) -> dict[str, Any]:
     return document
 ```
 
-- [ ] **Step 4: Add the init Typer command**
+- [x] **Step 4: Add the init Typer command**
 
 Modify `src/scrobble_recs/cli.py`.
 
@@ -558,7 +558,7 @@ def init_command(
     console.print(f"Log: {result.log_path}")
 ```
 
-- [ ] **Step 5: Run the init tests to verify they pass**
+- [x] **Step 5: Run the init tests to verify they pass**
 
 Run:
 
@@ -572,7 +572,7 @@ Expected:
 3 passed
 ```
 
-- [ ] **Step 6: Commit init work**
+- [x] **Step 6: Commit init work**
 
 Run:
 
@@ -580,6 +580,15 @@ Run:
 git add src/scrobble_recs/admin src/scrobble_recs/cli.py tests/test_cli.py
 git commit -m "feat: add init command"
 ```
+
+Checkpoint:
+
+- Implementer status: DONE.
+- Verification: focused red tests failed before implementation with missing-command exit code 2; focused init tests passed with 3 tests; `python -m pytest tests/test_cli.py -v` passed with 21 tests.
+- Spec review: APPROVED.
+- Code quality review: APPROVED.
+- Architecture gate: severity `mechanical`, continue `yes`.
+- Deviations: `init` success output uses `soft_wrap=True`; gate classified this as harmless CLI presentation detail.
 
 ---
 

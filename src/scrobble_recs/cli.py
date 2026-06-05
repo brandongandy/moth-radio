@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn
 
+from scrobble_recs.admin.init import initialize_project
 from scrobble_recs.config import ScrobbleRecsConfig, load_config
 from scrobble_recs.db import initialize_database
 from scrobble_recs.enrichment.lastfm import (
@@ -44,6 +45,26 @@ _RECOMMENDATION_PHASE_LABELS = {
     "build_explanations": "Build explanations",
     "persist_run": "Persist run",
 }
+
+
+@app.command("init")
+def init_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Overwrite an existing config file."),
+    ] = False,
+) -> None:
+    try:
+        result = initialize_project(config, force=force)
+    except FileExistsError as exc:
+        console.print(f"Error: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"Config: {result.config_path}", soft_wrap=True)
+    console.print(f"Database: {result.db_path}", soft_wrap=True)
+    console.print(f"Cache: {result.cache_dir}", soft_wrap=True)
+    console.print(f"Log: {result.log_path}", soft_wrap=True)
 
 
 @app.command("import")

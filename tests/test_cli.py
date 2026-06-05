@@ -79,6 +79,47 @@ def write_config_with_disabled_lastfm(tmp_path: Path) -> Path:
     return config_path
 
 
+def test_init_command_writes_config_and_initializes_database(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = tmp_path / "nested" / "config.json"
+
+    result = runner.invoke(app, ["init", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert config_path.exists()
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    assert payload["apis"]["lastfm"]["api_key"] == "${LASTFM_API_KEY}"
+    assert payload["recommendation"]["seed_artist_limit"] == 250
+    db_path = tmp_path / "nested" / "data" / "scrobbles.duckdb"
+    assert db_path.exists()
+    assert f"Config: {config_path}" in result.output
+    assert f"Database: {db_path}" in result.output
+
+
+def test_init_command_refuses_to_overwrite_existing_config(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+
+    result = runner.invoke(app, ["init", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "already exists" in result.output
+    assert config_path.read_text(encoding="utf-8") == "{}"
+
+
+def test_init_command_force_overwrites_existing_config(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+
+    result = runner.invoke(app, ["init", "--config", str(config_path), "--force"])
+
+    assert result.exit_code == 0
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    assert payload["app"]["name"] == "scrobble-recs"
+
+
 def test_import_command_prints_stats(tmp_path: Path) -> None:
     runner = CliRunner()
 

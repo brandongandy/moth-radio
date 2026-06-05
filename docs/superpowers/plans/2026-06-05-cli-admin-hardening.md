@@ -835,7 +835,7 @@ Checkpoint:
 - Modify: `src/scrobble_recs/apis/lastfm.py`
 - Modify: `tests/test_lastfm_client.py`
 
-- [ ] **Step 1: Add failing Last.fm retry/stale tests**
+- [x] **Step 1: Add failing Last.fm retry/stale tests**
 
 Append these tests to `tests/test_lastfm_client.py`:
 
@@ -903,7 +903,7 @@ def test_lastfm_client_does_not_retry_4xx_errors(tmp_path: Path) -> None:
     conn.close()
 ```
 
-- [ ] **Step 2: Run Last.fm tests to verify they fail**
+- [x] **Step 2: Run Last.fm tests to verify they fail**
 
 Run:
 
@@ -917,11 +917,25 @@ Expected:
 TypeError: LastFmApiConfig.__init__() got an unexpected keyword argument 'max_retries'
 ```
 
-- [ ] **Step 3: Implement retry/stale behavior**
+- [x] **Step 3: Implement retry/stale behavior**
 
 Modify `src/scrobble_recs/apis/lastfm.py`.
 
-Replace the HTTP part of `_request` after the fresh-cache check with:
+Replace the HTTP part of `_request` after the fresh-cache check with retry
+handling that:
+
+- Attempts each uncached Last.fm request `max_retries + 1` times.
+- Caches successful 2xx responses.
+- Writes non-transient 4xx error responses and raises without retry.
+- Retries transient 429 and 5xx responses.
+- Checks for a stale successful cache entry after exhausted transient responses
+  before writing any final transient failure row, because `api_cache.cache_key`
+  replacement would otherwise erase the stale success needed for fallback.
+- Treats `httpx.TransportError` as a transient failure with retry and stale
+  fallback. Transport errors have no HTTP response to cache, so they raise after
+  retries only when no stale success exists.
+
+The implementation shape is:
 
 ```python
         request_params = {
@@ -931,45 +945,46 @@ Replace the HTTP part of `_request` after the fresh-cache check with:
             **params,
         }
         request_url = self._config.base_url
-        last_error_message: str | None = None
-        response_json: JsonObject = {}
-        response_status = 0
         attempts = self._config.max_retries + 1
+        last_status: int | None = None
+        last_payload: JsonObject | None = None
+        last_transport_error: str | None = None
+
         for attempt in range(attempts):
             self._rate_limiter.wait()
-            response = self._http_client.get(request_url, params=request_params)
-            response_status = response.status_code
-            response_json = _response_json(response)
-            expires_at = now + timedelta(days=self._config.cache_ttl_days)
-            last_error_message = (
-                _extract_error_message(response_json) if response_status >= 400 else None
-            )
-            self._cache.write_response(
-                source=_SOURCE,
-                endpoint=method,
-                request_url=request_url,
-                request_params=cache_params,
-                response_status=response_status,
-                response_json=response_json,
-                fetched_at=now,
-                expires_at=expires_at,
-                error_message=last_error_message,
-            )
-            if 200 <= response_status <= 299:
+            try:
+                response = self._http_client.get(request_url, params=request_params)
+            except httpx.TransportError as exc:
+                last_transport_error = str(exc).strip()
+                if attempt < attempts - 1:
+                    retry_sleep(2.0**attempt)
+                    continue
+                break
+
+            if 200 <= response.status_code <= 299:
+                response_json = _response_json(response)
+                write_success_response(response_json)
                 return response_json
-            if response_status < 500 and response_status != 429:
-                break
-            if attempt == attempts - 1:
-                break
+
+            response_json = _error_response_json(response)
+            last_status = response.status_code
+            last_payload = response_json
+            if response.status_code < 500 and response.status_code != 429:
+                write_error_response(response.status_code, response_json)
+                raise RuntimeError(error_message(response.status_code, response_json))
+            if attempt < attempts - 1 and response.status_code == 429:
+                retry_sleep(2.0**attempt)
 
         stale = self._cache.get_stale_success(_SOURCE, method, cache_params)
-        if stale is not None and (response_status == 429 or response_status >= 500):
+        if stale is not None:
             return stale
-        message = last_error_message or f"Last.fm request failed with status {response_status}"
-        raise RuntimeError(message)
+        if last_status is None or last_payload is None:
+            raise RuntimeError(last_transport_error or "Last.fm request failed before receiving a response")
+        write_error_response(last_status, last_payload)
+        raise RuntimeError(error_message(last_status, last_payload))
 ```
 
-- [ ] **Step 4: Run Last.fm tests to verify they pass**
+- [x] **Step 4: Run Last.fm tests to verify they pass**
 
 Run:
 
@@ -983,7 +998,7 @@ Expected:
 passed
 ```
 
-- [ ] **Step 5: Commit API retry work**
+- [x] **Step 5: Commit API retry work**
 
 Run:
 
@@ -991,6 +1006,23 @@ Run:
 git add src/scrobble_recs/apis/lastfm.py tests/test_lastfm_client.py
 git commit -m "feat: use stale cache for transient lastfm failures"
 ```
+
+Checkpoint:
+
+- Implementer status: DONE_WITH_APPROVED_DEVIATIONS.
+- Verification: focused stale fallback and 4xx tests were exercised red/green;
+  additional regression tests covered non-JSON 503 responses, transport-error
+  fallback, and 429 retry backoff. `python -m pytest tests/test_lastfm_client.py
+  -v` passed with 14 tests. `python -m ruff check
+  src\scrobble_recs\apis\lastfm.py tests\test_lastfm_client.py` passed.
+- Spec review: APPROVED after Option A; no gaps or unapproved extra behavior.
+- Code quality review: APPROVED after Option A; no blocking/material findings.
+- Architecture gate: severity `none`, continue `yes`.
+- Deviations: approved by human decision Option A on 2026-06-05. Task 4
+  preserves stale successful cache rows before writing final transient HTTP
+  failures, because replacing the cache row first would erase fallback data.
+  Task 4 also treats `httpx.TransportError` as transient with retry and stale
+  fallback, with no cache write when no HTTP response exists.
 
 ---
 

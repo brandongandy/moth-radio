@@ -240,6 +240,189 @@ def test_lastfm_client_normalizes_singleton_payloads_and_missing_values(tmp_path
     conn.close()
 
 
+def test_lastfm_client_returns_stale_cache_after_transient_5xx(tmp_path: Path) -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(500, json={"message": "temporary failure"})
+
+    conn = initialize_database(load_config(_config_path(tmp_path)))
+    cache = ApiCache(conn)
+    now = datetime(2026, 6, 3, 12, 0, 0)
+    cache.write_response(
+        source="lastfm",
+        endpoint="artist.getSimilar",
+        request_url="https://ws.audioscrobbler.com/2.0/",
+        request_params={"method": "artist.getSimilar", "artist": "The Cure", "limit": 1},
+        response_status=200,
+        response_json={
+            "similarartists": {"artist": [{"name": "Bauhaus", "mbid": "", "match": "0.72"}]}
+        },
+        fetched_at=now.replace(year=2025),
+        expires_at=now.replace(year=2025, month=12),
+        error_message=None,
+    )
+    client = LastFmClient(
+        config=LastFmApiConfig(api_key="secret-key", max_retries=1),
+        cache=cache,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        rate_limiter=RateLimiter(1000.0, sleep=lambda seconds: None),
+        now=lambda: now,
+    )
+
+    artists = client.get_similar_artists("The Cure", limit=1)
+
+    assert [artist.name for artist in artists] == ["Bauhaus"]
+    assert len(calls) == 2
+    conn.close()
+
+
+def test_lastfm_client_returns_stale_cache_after_transient_non_json_503(
+    tmp_path: Path,
+) -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(
+            503,
+            content=b"<html><body>temporarily unavailable</body></html>",
+            headers={"content-type": "text/html"},
+        )
+
+    conn = initialize_database(load_config(_config_path(tmp_path)))
+    cache = ApiCache(conn)
+    now = datetime(2026, 6, 3, 12, 0, 0)
+    cache.write_response(
+        source="lastfm",
+        endpoint="artist.getSimilar",
+        request_url="https://ws.audioscrobbler.com/2.0/",
+        request_params={"method": "artist.getSimilar", "artist": "The Cure", "limit": 1},
+        response_status=200,
+        response_json={
+            "similarartists": {"artist": [{"name": "Bauhaus", "mbid": "", "match": "0.72"}]}
+        },
+        fetched_at=now.replace(year=2025),
+        expires_at=now.replace(year=2025, month=12),
+        error_message=None,
+    )
+    client = LastFmClient(
+        config=LastFmApiConfig(api_key="secret-key", max_retries=1),
+        cache=cache,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        rate_limiter=RateLimiter(1000.0, sleep=lambda seconds: None),
+        retry_sleep=lambda seconds: None,
+        now=lambda: now,
+    )
+
+    artists = client.get_similar_artists("The Cure", limit=1)
+
+    assert [artist.name for artist in artists] == ["Bauhaus"]
+    assert len(calls) == 2
+    conn.close()
+
+
+def test_lastfm_client_returns_stale_cache_after_transport_error(tmp_path: Path) -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        raise httpx.TransportError("connection reset", request=request)
+
+    conn = initialize_database(load_config(_config_path(tmp_path)))
+    cache = ApiCache(conn)
+    now = datetime(2026, 6, 3, 12, 0, 0)
+    cache.write_response(
+        source="lastfm",
+        endpoint="artist.getSimilar",
+        request_url="https://ws.audioscrobbler.com/2.0/",
+        request_params={"method": "artist.getSimilar", "artist": "The Cure", "limit": 1},
+        response_status=200,
+        response_json={
+            "similarartists": {"artist": [{"name": "Bauhaus", "mbid": "", "match": "0.72"}]}
+        },
+        fetched_at=now.replace(year=2025),
+        expires_at=now.replace(year=2025, month=12),
+        error_message=None,
+    )
+    client = LastFmClient(
+        config=LastFmApiConfig(api_key="secret-key", max_retries=1),
+        cache=cache,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        rate_limiter=RateLimiter(1000.0, sleep=lambda seconds: None),
+        retry_sleep=lambda seconds: None,
+        now=lambda: now,
+    )
+
+    artists = client.get_similar_artists("The Cure", limit=1)
+
+    assert [artist.name for artist in artists] == ["Bauhaus"]
+    assert len(calls) == 2
+    conn.close()
+
+
+def test_lastfm_client_backs_off_between_429_retries(tmp_path: Path) -> None:
+    calls: list[httpx.Request] = []
+    sleeps: list[float] = []
+    responses = [
+        httpx.Response(429, json={"message": "rate limited"}),
+        httpx.Response(429, json={"message": "rate limited again"}),
+        httpx.Response(
+            200,
+            json={
+                "similarartists": {
+                    "artist": [{"name": "Bauhaus", "mbid": "", "match": "0.72"}]
+                }
+            },
+        ),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return responses.pop(0)
+
+    conn = initialize_database(load_config(_config_path(tmp_path)))
+    client = LastFmClient(
+        config=LastFmApiConfig(api_key="secret-key", max_retries=2),
+        cache=ApiCache(conn),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        rate_limiter=RateLimiter(1000.0, sleep=lambda seconds: None),
+        retry_sleep=sleeps.append,
+        now=lambda: datetime(2026, 6, 3, 12, 0, 0),
+    )
+
+    artists = client.get_similar_artists("The Cure", limit=1)
+
+    assert [artist.name for artist in artists] == ["Bauhaus"]
+    assert sleeps == [1.0, 2.0]
+    assert len(calls) == 3
+    conn.close()
+
+
+def test_lastfm_client_does_not_retry_4xx_errors(tmp_path: Path) -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(403, json={"message": "bad key"})
+
+    conn = initialize_database(load_config(_config_path(tmp_path)))
+    client = LastFmClient(
+        config=LastFmApiConfig(api_key="secret-key", max_retries=2),
+        cache=ApiCache(conn),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        rate_limiter=RateLimiter(1000.0, sleep=lambda seconds: None),
+        now=lambda: datetime(2026, 6, 3, 12, 0, 0),
+    )
+
+    with pytest.raises(RuntimeError, match="bad key"):
+        client.get_similar_artists("The Cure", limit=1)
+
+    assert len(calls) == 1
+    conn.close()
+
+
 def test_lastfm_client_uses_a_30_second_default_http_timeout(tmp_path: Path) -> None:
     conn = initialize_database(load_config(_config_path(tmp_path)))
     client = LastFmClient(

@@ -1971,7 +1971,7 @@ git commit -m "feat: add feedback command"
 - Modify: `README.md`
 - Modify: `docs/implementation-log.md`
 
-- [ ] **Step 1: Run focused feedback-loop tests**
+- [x] **Step 1: Run focused feedback-loop tests**
 
 Run:
 
@@ -1985,7 +1985,7 @@ Expected:
 all selected tests pass
 ```
 
-- [ ] **Step 2: Run full pytest suite**
+- [x] **Step 2: Run full pytest suite**
 
 Run:
 
@@ -1999,7 +1999,7 @@ Expected:
 all tests pass
 ```
 
-- [ ] **Step 3: Run ruff check**
+- [x] **Step 3: Run ruff check**
 
 Run:
 
@@ -2013,7 +2013,7 @@ Expected:
 All checks passed!
 ```
 
-- [ ] **Step 4: Run ruff format check**
+- [x] **Step 4: Run ruff format check**
 
 Run:
 
@@ -2027,7 +2027,7 @@ Expected:
 all files already formatted
 ```
 
-- [ ] **Step 5: Run mypy**
+- [x] **Step 5: Run mypy**
 
 Run:
 
@@ -2041,7 +2041,7 @@ Expected:
 Success: no issues found
 ```
 
-- [ ] **Step 6: Update README**
+- [x] **Step 6: Update README**
 
 Append this section after the recommender usage section in `README.md`:
 
@@ -2071,7 +2071,7 @@ feedback as artist boosts/suppression, tag boosts/suppression, and lightweight
 similarity-neighborhood adjustments.
 ```
 
-- [ ] **Step 7: Update implementation log**
+- [x] **Step 7: Update implementation log**
 
 Append this entry to `docs/implementation-log.md`:
 
@@ -2096,7 +2096,7 @@ Verified:
 - `python -m mypy src`
 ```
 
-- [ ] **Step 8: Commit docs and verification**
+- [x] **Step 8: Commit docs and verification**
 
 Run:
 

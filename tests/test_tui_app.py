@@ -242,6 +242,121 @@ async def _test_tui_feedback_placeholder_key_updates_status_for_selected_row(
         conn.close()
 
 
+def test_tui_filter_key_reduces_visible_recommendations(tmp_path: Path) -> None:
+    asyncio.run(_test_tui_filter_key_reduces_visible_recommendations(tmp_path))
+
+
+async def _test_tui_filter_key_reduces_visible_recommendations(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    run_id = "00000000-0000-0000-0000-000000000103"
+    _insert_run(conn, run_id=run_id, mode="balanced")
+    _insert_artist(conn, artist_id=30, name="Cold Cave")
+    _insert_artist(conn, artist_id=31, name="Warm Artist")
+    _insert_recommendation(
+        conn,
+        run_id=run_id,
+        artist_id=30,
+        rank=1,
+        final_score=0.9,
+        explanation={"summary": "Cold summary.", "tags": [{"tag": "coldwave"}]},
+    )
+    _insert_recommendation(
+        conn,
+        run_id=run_id,
+        artist_id=31,
+        rank=2,
+        final_score=0.8,
+        explanation={"summary": "Warm summary.", "tags": [{"tag": "soul"}]},
+    )
+
+    app = ScrobbleRecsTui(conn)
+    async with app.run_test() as pilot:
+        await pilot.press("/")
+        await pilot.pause()
+        rendered = app.query_one("#recommendations").renderable.plain
+        assert "Cold Cave" in rendered
+        assert "Warm Artist" not in rendered
+
+    conn.close()
+
+
+def test_tui_run_key_switches_to_next_persisted_run(tmp_path: Path) -> None:
+    asyncio.run(_test_tui_run_key_switches_to_next_persisted_run(tmp_path))
+
+
+async def _test_tui_run_key_switches_to_next_persisted_run(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    first_run = "00000000-0000-0000-0000-000000000104"
+    second_run = "00000000-0000-0000-0000-000000000105"
+    _insert_run(conn, run_id=first_run, mode="balanced")
+    _insert_run(conn, run_id=second_run, mode="explore")
+    _insert_artist(conn, artist_id=40, name="First Run Artist")
+    _insert_artist(conn, artist_id=41, name="Second Run Artist")
+    _insert_recommendation(
+        conn,
+        run_id=first_run,
+        artist_id=40,
+        rank=1,
+        final_score=0.9,
+        explanation={"summary": "First run.", "tags": [{"tag": "post-punk"}]},
+    )
+    _insert_recommendation(
+        conn,
+        run_id=second_run,
+        artist_id=41,
+        rank=1,
+        final_score=0.8,
+        explanation={"summary": "Second run.", "tags": [{"tag": "coldwave"}]},
+    )
+
+    app = ScrobbleRecsTui(conn)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.run_id == second_run
+        assert "Second Run Artist" in app.query_one("#recommendations").renderable.plain
+
+        await pilot.press("R")
+        await pilot.pause()
+        rendered = app.query_one("#recommendations").renderable.plain
+        assert app.run_id == first_run
+        assert "First Run Artist" in rendered
+        assert "Second Run Artist" not in rendered
+
+    conn.close()
+
+
+def test_tui_debug_score_toggle_shows_component_scores(tmp_path: Path) -> None:
+    asyncio.run(_test_tui_debug_score_toggle_shows_component_scores(tmp_path))
+
+
+async def _test_tui_debug_score_toggle_shows_component_scores(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    run_id = "00000000-0000-0000-0000-000000000106"
+    _insert_run(conn, run_id=run_id, mode="balanced")
+    _insert_artist(conn, artist_id=50, name="Debug Artist")
+    _insert_recommendation(
+        conn,
+        run_id=run_id,
+        artist_id=50,
+        rank=1,
+        final_score=0.9,
+        explanation={"summary": "Debug summary.", "tags": [{"tag": "post-punk"}]},
+    )
+
+    app = ScrobbleRecsTui(conn)
+    async with app.run_test() as pilot:
+        await pilot.press("e")
+        await pilot.pause()
+        rendered = app.query_one("#score-breakdown").renderable.plain
+        assert "lastfm:" in rendered
+        assert "diversity penalty:" in rendered
+
+    conn.close()
+
+
 def _insert_run(conn, *, run_id: str, mode: str) -> None:
     conn.execute(
         """

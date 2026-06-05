@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, ClassVar
 
 from duckdb import DuckDBPyConnection
@@ -65,6 +66,10 @@ class ScrobbleRecsTui(App[None]):
         Binding("m", "feedback('more_like_this')", "More"),
         Binding("l", "feedback('less_like_this')", "Less"),
         Binding("h", "feedback('hide_artist')", "Hide"),
+        Binding("/", "cycle_search_filter", "Search"),
+        Binding("f", "cycle_tag_filter", "Tag"),
+        Binding("e", "toggle_debug_scores", "Scores"),
+        Binding("R", "next_run", "Run"),
         Binding("u", "undo_unavailable", "Undo"),
         Binding("?", "help_status", "Help"),
     ]
@@ -104,6 +109,33 @@ class ScrobbleRecsTui(App[None]):
             return
         self.selected_index = max(self.selected_index - 1, 0)
         self._render_all()
+
+    def action_toggle_debug_scores(self) -> None:
+        self.show_debug_scores = not self.show_debug_scores
+        self._render_all()
+
+    def action_cycle_search_filter(self) -> None:
+        next_search = "" if self.filters.search else "cold"
+        self.filters = replace(self.filters, search=next_search)
+        self.selected_index = 0
+        self._reload_rows()
+
+    def action_cycle_tag_filter(self) -> None:
+        next_tag = "" if self.filters.tag else self._first_visible_tag()
+        self.filters = replace(self.filters, tag=next_tag)
+        self.selected_index = 0
+        self._reload_rows()
+
+    def action_next_run(self) -> None:
+        runs = self.store.list_runs()
+        if len(runs) < 2:
+            self.query_one("#status", Static).update("No other recommendation runs")
+            return
+        run_ids = [run.run_id for run in runs]
+        current_index = run_ids.index(self.run_id) if self.run_id in run_ids else 0
+        self.run_id = run_ids[(current_index + 1) % len(run_ids)]
+        self.selected_index = 0
+        self._reload_rows()
 
     def action_feedback(self, action: str) -> None:
         detail = self._selected_detail()
@@ -225,6 +257,12 @@ class ScrobbleRecsTui(App[None]):
     def _status_text(self) -> str:
         run_label = self.run_id or "none"
         return f"run: {run_label}; recommendations: {len(self.rows)}"
+
+    def _first_visible_tag(self) -> str:
+        for row in self.rows:
+            if row.primary_tags:
+                return row.primary_tags[0]
+        return ""
 
 
 def _join_or_none(values: tuple[str, ...]) -> str:

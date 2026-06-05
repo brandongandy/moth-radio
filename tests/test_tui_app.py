@@ -180,11 +180,52 @@ async def _test_tui_move_keys_respect_list_boundaries(tmp_path: Path) -> None:
         conn.close()
 
 
-def test_tui_help_key_updates_status(tmp_path: Path) -> None:
-    asyncio.run(_test_tui_help_key_updates_status(tmp_path))
+def test_tui_recommendation_list_scrolls_to_follow_selection(tmp_path: Path) -> None:
+    asyncio.run(_test_tui_recommendation_list_scrolls_to_follow_selection(tmp_path))
 
 
-async def _test_tui_help_key_updates_status(tmp_path: Path) -> None:
+async def _test_tui_recommendation_list_scrolls_to_follow_selection(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    try:
+        run_id = "00000000-0000-0000-0000-000000000111"
+        _insert_run(conn, run_id=run_id, mode="balanced")
+        for index in range(35):
+            artist_id = 400 + index
+            _insert_artist(conn, artist_id=artist_id, name=f"Scroll Artist {index:02d}")
+            _insert_recommendation(
+                conn,
+                run_id=run_id,
+                artist_id=artist_id,
+                rank=index + 1,
+                final_score=1.0 - (index / 100),
+                explanation={
+                    "summary": f"Scroll summary {index:02d}.",
+                    "tags": [{"tag": "post-punk"}],
+                },
+            )
+
+        app = ScrobbleRecsTui(conn)
+        async with app.run_test(size=(100, 12)) as pilot:
+            await pilot.pause()
+            recommendations = app.query_one("#recommendations")
+            assert recommendations.scroll_y == 0
+
+            for _ in range(25):
+                await pilot.press("j")
+            await pilot.pause()
+
+            assert app.selected_artist_id == 425
+            assert recommendations.scroll_y > 0
+    finally:
+        conn.close()
+
+
+def test_tui_help_key_opens_modal_with_feedback_meanings(tmp_path: Path) -> None:
+    asyncio.run(_test_tui_help_key_opens_modal_with_feedback_meanings(tmp_path))
+
+
+async def _test_tui_help_key_opens_modal_with_feedback_meanings(tmp_path: Path) -> None:
     config = load_config(write_config(tmp_path))
     conn = initialize_database(config)
     try:
@@ -194,14 +235,16 @@ async def _test_tui_help_key_updates_status(tmp_path: Path) -> None:
         async with app.run_test() as pilot:
             await pilot.press("?")
             await pilot.pause()
-            status = _rendered_plain(app, "#status")
-            assert "Keys: j/k move" in status
-            assert "/ search" in status
-            assert "f tag" in status
-            assert "e scores" in status
-            assert "R run" in status
-            assert "feedback keys" in status
-            assert "feedback placeholders" not in status
+            help_text = _modal_plain(app)
+            assert "TUI Help" in help_text
+            assert "w wrong genre: this recommendation does not fit its shown tags" in help_text
+            assert "r reject: do not recommend this artist in this run" in help_text
+            assert "m more like this: boost similar future recommendations" in help_text
+            assert "l less like this: suppress similar future recommendations" in help_text
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert _modal_plain(app) == ""
     finally:
         conn.close()
 
@@ -537,6 +580,57 @@ async def _test_tui_feedback_key_reloads_rows_and_preserves_selected_artist_afte
         conn.close()
 
 
+def test_tui_wrong_feedback_resets_selection_to_top_after_rerank(tmp_path: Path) -> None:
+    asyncio.run(_test_tui_wrong_feedback_resets_selection_to_top_after_rerank(tmp_path))
+
+
+async def _test_tui_wrong_feedback_resets_selection_to_top_after_rerank(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    try:
+        run_id = "00000000-0000-0000-0000-000000000112"
+        _insert_run(conn, run_id=run_id, mode="balanced")
+        _insert_artist(conn, artist_id=90, name="Wrong Top")
+        _insert_artist(conn, artist_id=91, name="Wrong Selected")
+        _insert_recommendation(
+            conn,
+            run_id=run_id,
+            artist_id=90,
+            rank=1,
+            final_score=0.9,
+            explanation={"summary": "Top.", "tags": [{"tag": "post-punk"}]},
+        )
+        _insert_recommendation(
+            conn,
+            run_id=run_id,
+            artist_id=91,
+            rank=2,
+            final_score=0.8,
+            explanation={"summary": "Selected.", "tags": [{"tag": "coldwave"}]},
+        )
+
+        app = ScrobbleRecsTui(conn)
+        async with app.run_test() as pilot:
+            await pilot.press("j")
+            await pilot.pause()
+            assert app.selected_artist_id == 91
+
+            await pilot.press("w")
+            await pilot.pause()
+
+            assert [row.artist_id for row in app.rows] == [90, 91]
+            assert app.selected_index == 0
+            assert app.selected_artist_id == 90
+            assert "Wrong Top" in _rendered_plain(app, "#detail")
+            assert "Feedback recorded: wrong_genre; reranked 2; hidden 0" in _rendered_plain(
+                app, "#status"
+            )
+    finally:
+        conn.close()
+
+
 def test_tui_feedback_key_uses_selected_artist_after_navigation(
     tmp_path: Path,
     monkeypatch,
@@ -733,3 +827,7 @@ def _insert_single_recommendation(conn, *, artist_id: int, artist: str) -> None:
 
 def _rendered_plain(app: ScrobbleRecsTui, selector: str) -> str:
     return app.query_one(selector).renderable.plain
+
+
+def _modal_plain(app: ScrobbleRecsTui) -> str:
+    return "\n".join(widget.renderable.plain for widget in app.screen.query("#help-modal Static"))

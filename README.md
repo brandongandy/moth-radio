@@ -151,11 +151,19 @@ apply basic filters, and record feedback with keybindings.
 Useful keys:
 
 - `j` / `k`: move through recommendations.
+- `?`: show the in-app help modal.
 - `e`: show or hide debug score components.
 - `/`: toggle the simple search filter.
 - `f`: toggle a tag filter from visible rows.
 - `R`: switch to another persisted run.
-- `s`, `r`, `a`, `o`, `w`, `m`, `l`, `h`: record feedback for the selected artist.
+- `s`: save the selected artist as worth revisiting.
+- `r`: reject the selected artist for the current run.
+- `a`: mark the selected artist as already known.
+- `o`: mark the selected artist as too obvious.
+- `w`: mark the recommendation as the wrong genre for its shown tags.
+- `m`: ask for more recommendations like this artist.
+- `l`: ask for fewer recommendations like this artist.
+- `h`: hide the selected artist across local recommendations.
 
 Feedback is stored locally and reranks the current persisted run without live API
 calls.

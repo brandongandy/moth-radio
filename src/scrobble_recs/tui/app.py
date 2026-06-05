@@ -7,7 +7,8 @@ from duckdb import DuckDBPyConnection
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import Footer, Header, Static
 
 from scrobble_recs.models.feedback import record_feedback_event, rerank_recommendation_run
@@ -29,8 +30,11 @@ class ScrobbleRecsTui(App[None]):
 
     #recommendations {
         width: 42%;
+        height: 1fr;
         border: solid $primary;
         padding: 1;
+        overflow-y: auto;
+        overflow-x: hidden;
     }
 
     #right-pane {
@@ -53,6 +57,20 @@ class ScrobbleRecsTui(App[None]):
         height: 1;
         padding: 0 1;
     }
+
+    HelpModal {
+        align: center middle;
+    }
+
+    #help-modal {
+        width: 74;
+        max-width: 90%;
+        max-height: 90%;
+        border: thick $primary;
+        padding: 1 2;
+        background: $surface;
+        overflow-y: auto;
+    }
     """
 
     BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
@@ -72,7 +90,7 @@ class ScrobbleRecsTui(App[None]):
         Binding("e", "toggle_debug_scores", "Scores"),
         Binding("R", "next_run", "Run"),
         Binding("u", "undo_unavailable", "Undo"),
-        Binding("?", "help_status", "Help"),
+        Binding("?", "show_help", "Help"),
     ]
 
     def __init__(self, conn: DuckDBPyConnection) -> None:
@@ -89,7 +107,7 @@ class ScrobbleRecsTui(App[None]):
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="body"):
-            yield _InspectableStatic(Text(""), id="recommendations")
+            yield _ScrollableInspectableStatic(Text(""), id="recommendations")
             with Vertical(id="right-pane"):
                 yield _InspectableStatic(Text(""), id="detail")
                 yield _InspectableStatic(Text(""), id="score-breakdown")
@@ -158,7 +176,9 @@ class ScrobbleRecsTui(App[None]):
             return
         selected_artist_id = detail.artist_id
         self.rows = self.store.list_recommendations(self.filters, run_id=self.run_id)
-        self.selected_index = _index_for_artist(self.rows, selected_artist_id)
+        self.selected_index = (
+            0 if action == "wrong_genre" else _index_for_artist(self.rows, selected_artist_id)
+        )
         self._render_all()
         self.query_one("#status", Static).update(
             f"Feedback recorded: {action}; reranked {stats.recommendations}; hidden {stats.hidden}"
@@ -167,11 +187,8 @@ class ScrobbleRecsTui(App[None]):
     def action_undo_unavailable(self) -> None:
         self.query_one("#status", Static).update("Undo is outside TUI V1")
 
-    def action_help_status(self) -> None:
-        self.query_one("#status", Static).update(
-            "Keys: j/k move, / search, f tag, e scores, R run, "
-            "s/r/a/o/w/m/l/h feedback keys, u undo, q quit"
-        )
+    def action_show_help(self) -> None:
+        self.push_screen(HelpModal())
 
     def _reload_rows(self) -> None:
         try:
@@ -182,7 +199,7 @@ class ScrobbleRecsTui(App[None]):
             self.rows = []
             self.selected_index = 0
             self.selected_artist_id = None
-            self.query_one("#recommendations", Static).update(Text(""))
+            self.query_one("#recommendations", _ScrollableInspectableStatic).update(Text(""))
             self.query_one("#detail", Static).update(Text(""))
             self.query_one("#score-breakdown", Static).update(Text(""))
             self.query_one("#status", Static).update(str(exc))
@@ -193,10 +210,13 @@ class ScrobbleRecsTui(App[None]):
         self.query_one("#status", Static).update(self._status_text())
 
     def _render_all(self) -> None:
-        self.query_one("#recommendations", Static).update(self._recommendations_text())
+        self.query_one("#recommendations", _ScrollableInspectableStatic).update(
+            self._recommendations_text()
+        )
         detail = self._selected_detail()
         self.query_one("#detail", Static).update(self._detail_text(detail))
         self.query_one("#score-breakdown", Static).update(self._score_breakdown_text(detail))
+        self.call_after_refresh(self._scroll_selected_recommendation_into_view)
 
     def _selected_row(self) -> RecommendationListRow | None:
         if not self.rows:
@@ -283,9 +303,66 @@ class ScrobbleRecsTui(App[None]):
                 return row.primary_tags[0]
         return ""
 
+    def _scroll_selected_recommendation_into_view(self) -> None:
+        recommendations = self.query_one("#recommendations", _ScrollableInspectableStatic)
+        recommendations.scroll_to(
+            y=float(self.selected_index),
+            animate=False,
+            immediate=True,
+        )
+
+
+class HelpModal(ModalScreen[None]):
+    """Modal help for local TUI keybindings."""
+
+    BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
+        Binding("escape", "close", "Close"),
+        Binding("?", "close", "Close"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="help-modal"):
+            yield _InspectableStatic(_help_text())
+
+    def action_close(self) -> None:
+        self.dismiss()
+
 
 def _join_or_none(values: tuple[str, ...]) -> str:
     return ", ".join(values) if values else "none"
+
+
+def _help_text() -> Text:
+    return Text(
+        "\n".join(
+            [
+                "TUI Help",
+                "",
+                "Navigation",
+                "j / k: move through recommendations",
+                "R: switch to another persisted recommendation run",
+                "q: quit",
+                "",
+                "Filters and detail",
+                "/: toggle the simple search filter",
+                "f: toggle a tag filter from visible rows",
+                "e: show or hide debug score components",
+                "u: undo is not available in TUI V1",
+                "",
+                "Feedback",
+                "s save: mark this artist as worth revisiting and boost it",
+                "r reject: do not recommend this artist in this run",
+                "a already know: hide this artist in this run and treat it as known",
+                "o too obvious: hide this artist in this run and penalize obvious tags",
+                "w wrong genre: this recommendation does not fit its shown tags",
+                "m more like this: boost similar future recommendations",
+                "l less like this: suppress similar future recommendations",
+                "h hide artist: suppress this artist across local recommendations",
+                "",
+                "Esc or ?: close help",
+            ]
+        )
+    )
 
 
 def _index_for_artist(rows: list[RecommendationListRow], artist_id: int) -> int:
@@ -331,3 +408,27 @@ def _to_text(renderable: Any) -> Text:
     if isinstance(renderable, Text):
         return renderable
     return Text(str(renderable))
+
+
+class _ScrollableInspectableStatic(VerticalScroll):
+    """Scrollable container with inspectable text content for tests."""
+
+    def __init__(
+        self,
+        content: Any = "",
+        *,
+        name: str | None = None,
+        id: str | None = None,
+        classes: str | None = None,
+        disabled: bool = False,
+    ) -> None:
+        self.renderable = _to_text(content)
+        super().__init__(name=name, id=id, classes=classes, disabled=disabled)
+
+    def compose(self) -> ComposeResult:
+        yield _InspectableStatic(self.renderable, id="recommendation-list-content")
+
+    def update(self, content: Any = "") -> None:
+        self.renderable = _to_text(content)
+        if self.is_mounted:
+            self.query_one("#recommendation-list-content", Static).update(self.renderable)

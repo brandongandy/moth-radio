@@ -448,6 +448,27 @@ Verified:
 - `python -m ruff format --check .` -> 36 files already formatted.
 - `python -m mypy src` -> Success, no issues found in 22 source files.
 
+## 2026-06-04: Task 1 persisted TUI data store
+
+Changed:
+
+- Added the `scrobble_recs.tui` package marker.
+- Added a persisted-run TUI data store for listing local recommendation runs, loading compact recommendation rows, applying in-memory filters, loading detail data, deriving missing-enrichment status labels, and reading feedback history without requiring APIs.
+- Added behavioral tests for latest-run rows, search/tag/knownness/obviousness filters, score breakdown detail loading, and partial-enrichment labels.
+- Updated the Task 1 TUI V1 plan checklist and documented the implementation-log commit deviation.
+
+Verified:
+
+- `python -m pytest tests/test_tui_data.py -v` before implementation -> failed during collection with `ModuleNotFoundError: No module named 'scrobble_recs.tui'`.
+- `python -m pytest tests/test_tui_data.py -v` after implementation -> 3 passed.
+- `python -m ruff format --check .` before formatting -> would reformat `src\scrobble_recs\tui\data.py`.
+- `python -m ruff format src/scrobble_recs/tui/data.py` -> 1 file reformatted.
+- `python -m pytest tests/test_tui_data.py -v` after formatting -> 3 passed.
+- `python -m ruff check .` -> All checks passed.
+- `python -m ruff format --check .` -> 39 files already formatted.
+- `python -m mypy src` -> Success, no issues found in 24 source files.
+- `python -m pytest` -> 151 passed.
+
 ## 2026-06-04: Task 4 lightweight current-run rerank
 
 Changed:

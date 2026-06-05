@@ -108,6 +108,31 @@ scrobble-recs export --config config.example.json --format jsonl --output recs.j
 
 `recommend` does not call live APIs. Run `enrich --source lastfm` first to populate the local graph.
 
+## TUI
+
+Launch the local Textual interface against persisted recommendation runs:
+
+```bash
+scrobble-recs tui --config config.example.json
+```
+
+The TUI reads local DuckDB recommendation data. It does not call live APIs while
+you browse. Use `recommend` first to create a run, then use the TUI to browse
+ranked artists, inspect explanation details and score breakdowns, switch runs,
+apply basic filters, and record feedback with keybindings.
+
+Useful keys:
+
+- `j` / `k`: move through recommendations.
+- `e`: show or hide debug score components.
+- `/`: toggle the simple search filter.
+- `f`: toggle a tag filter from visible rows.
+- `R`: switch to another persisted run.
+- `s`, `r`, `a`, `o`, `w`, `m`, `l`, `h`: record feedback for the selected artist.
+
+Feedback is stored locally and reranks the current persisted run without live API
+calls.
+
 ## Recommendation Algorithm
 
 The recommender starts from multiple local taste regions rather than only the

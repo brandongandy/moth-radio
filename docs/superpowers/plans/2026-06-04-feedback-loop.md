@@ -1744,6 +1744,11 @@ Review follow-up note: expanded the happy-path feedback CLI test to assert
 `--value` and `--note` are forwarded to `record_feedback_event`, and added a
 deterministic `ValueError` CLI test for the error-printing/exit-code path.
 
+Final review deviation note: the default feedback command needed to touch
+`src/scrobble_recs/models/feedback.py` so record+rerank can run in one outer
+transaction without DuckDB nested `BEGIN`; this prevents a failed rerank from
+leaving durable feedback while keeping `--no-rerank` record-only behavior.
+
 Append these tests to `tests/test_cli.py`:
 
 ```python

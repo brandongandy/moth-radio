@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import duckdb
 from typer.testing import CliRunner
 
 from scrobble_recs.cli import app
@@ -354,7 +355,7 @@ def test_feedback_command_records_event_and_reranks(
         calls.append((run_id, artist_id, action, value, note, context or {}))
         return FakeEvent()
 
-    def fake_rerank(conn, run_id):
+    def fake_rerank(conn, run_id, **kwargs):
         reranks.append(run_id)
         return FakeRerankStats()
 
@@ -401,6 +402,44 @@ def test_feedback_command_records_event_and_reranks(
     assert "hidden recommendations: 1" in result.output
 
 
+def test_feedback_command_rolls_back_record_when_default_rerank_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    db_path = tmp_path / "scrobbles.duckdb"
+
+    def fake_rerank(conn, run_id, **kwargs):
+        raise ValueError("recommendation run has no recommendations")
+
+    monkeypatch.setattr("scrobble_recs.cli.rerank_recommendation_run", fake_rerank)
+
+    result = runner.invoke(
+        app,
+        [
+            "feedback",
+            "--config",
+            str(config_path),
+            "--run-id",
+            "00000000-0000-0000-0000-000000000001",
+            "--artist-id",
+            "42",
+            "--action",
+            "more_like_this",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Error: recommendation run has no recommendations" in result.output
+
+    conn = duckdb.connect(str(db_path))
+    try:
+        assert conn.execute("SELECT count(*) FROM feedback_event").fetchone() == (0,)
+    finally:
+        conn.close()
+
+
 def test_feedback_command_can_skip_rerank(tmp_path: Path, monkeypatch) -> None:
     runner = CliRunner()
     config_path = write_config(tmp_path)
@@ -413,7 +452,7 @@ def test_feedback_command_can_skip_rerank(tmp_path: Path, monkeypatch) -> None:
     def fake_record(conn, *, run_id, artist_id, action, value=1.0, context=None, note=None):
         return FakeEvent()
 
-    def fake_rerank(conn, run_id):
+    def fake_rerank(conn, run_id, **kwargs):
         reranks.append(run_id)
         raise AssertionError("rerank should not be called")
 
@@ -453,7 +492,7 @@ def test_feedback_command_prints_record_value_error(
     def fake_record(conn, *, run_id, artist_id, action, value=1.0, context=None, note=None):
         raise ValueError("unsupported feedback action 'favorite'")
 
-    def fake_rerank(conn, run_id):
+    def fake_rerank(conn, run_id, **kwargs):
         reranks.append(run_id)
         raise AssertionError("rerank should not be called")
 

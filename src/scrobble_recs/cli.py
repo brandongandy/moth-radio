@@ -159,20 +159,42 @@ def feedback_command(
     conn = initialize_database(resolved_config)
     try:
         try:
-            event = record_feedback_event(
-                conn,
-                run_id=run_id,
-                artist_id=artist_id,
-                action=action,
-                value=value,
-                context={"tags": tag or []},
-                note=note,
-            )
+            if rerank:
+                conn.execute("BEGIN TRANSACTION")
+                try:
+                    event = record_feedback_event(
+                        conn,
+                        run_id=run_id,
+                        artist_id=artist_id,
+                        action=action,
+                        value=value,
+                        context={"tags": tag or []},
+                        note=note,
+                    )
+                    stats = rerank_recommendation_run(
+                        conn,
+                        run_id,
+                        _manage_transaction=False,
+                    )
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+            else:
+                event = record_feedback_event(
+                    conn,
+                    run_id=run_id,
+                    artist_id=artist_id,
+                    action=action,
+                    value=value,
+                    context={"tags": tag or []},
+                    note=note,
+                )
+                stats = None
             console.print("Feedback recorded")
             console.print(f"feedback id: {event.feedback_id}")
             console.print(f"action: {event.action}")
-            if rerank:
-                stats = rerank_recommendation_run(conn, run_id)
+            if stats is not None:
                 console.print(f"reranked recommendations: {stats.recommendations}")
                 console.print(f"hidden recommendations: {stats.hidden}")
         except ValueError as exc:

@@ -594,3 +594,20 @@ Verified:
 - `python -m pytest tests/test_cli.py::test_tui_command_launches_textual_app -v` before implementation -> failed with `AttributeError: module 'scrobble_recs.cli' has no attribute 'ScrobbleRecsTui'`.
 - `python -m pytest tests/test_cli.py::test_tui_command_launches_textual_app -v` after implementation -> 1 passed.
 - `python -m pytest tests/test_cli.py -v` -> 17 passed.
+
+## 2026-06-04: TUI V1
+
+Changed:
+
+- Added a persisted TUI data store for recommendation runs, filtered recommendation lists, details, score breakdowns, feedback history, and missing-enrichment status labels.
+- Added a Textual recommendation browser with list/detail layout, score breakdown pane, movement keys, basic filters, run switching, and debug score toggle.
+- Added feedback keybindings that record local feedback events, rerank the current persisted run, and reload rows without live API calls.
+- Added `scrobble-recs tui --config ...`.
+
+Verified:
+
+- `python -m pytest tests/test_tui_data.py tests/test_tui_app.py tests/test_cli.py -v`
+- `python -m pytest`
+- `python -m ruff check .`
+- `python -m ruff format --check .`
+- `python -m mypy src`

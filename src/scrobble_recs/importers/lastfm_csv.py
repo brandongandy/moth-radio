@@ -87,6 +87,7 @@ def import_lastfm_csv(
             _replace_import_tables(conn)
             _insert_raw_scrobbles(conn)
             _insert_scrobbles(conn)
+            _insert_artist_mbid_conflict_warnings(conn)
             _insert_import_warnings(conn)
             _insert_provisional_artists(conn)
             _rebuild_artist_listening_facts(conn)
@@ -533,6 +534,43 @@ def _insert_import_warnings(conn: DuckDBPyConnection) -> None:
     )
 
 
+def _insert_artist_mbid_conflict_warnings(conn: DuckDBPyConnection) -> None:
+    next_id = _next_id(conn, "import_warning", "warning_id")
+    conn.execute(
+        """
+        INSERT INTO import_warning (
+            warning_id,
+            import_row_number,
+            warning_code,
+            severity,
+            message,
+            evidence
+        )
+        WITH conflicts AS (
+            SELECT
+                artist_key,
+                min(scrobble_id) AS first_scrobble_id,
+                list_sort(list_distinct(list(NULLIF(trim(artist_mbid_raw), '')))) AS mbids
+            FROM scrobble
+            WHERE artist_key <> ''
+              AND NOT is_duplicate
+              AND NULLIF(trim(artist_mbid_raw), '') IS NOT NULL
+            GROUP BY artist_key
+            HAVING count(DISTINCT NULLIF(trim(artist_mbid_raw), '')) > 1
+        )
+        SELECT
+            ? + row_number() OVER (ORDER BY artist_key) - 1 AS warning_id,
+            first_scrobble_id AS import_row_number,
+            'artist_mbid_conflict' AS warning_code,
+            'warning' AS severity,
+            'artist_key has multiple supplied artist MBIDs' AS message,
+            json_object('artist_key', artist_key, 'artist_mbids', mbids) AS evidence
+        FROM conflicts
+        """,
+        [next_id],
+    )
+
+
 def _insert_provisional_artists(conn: DuckDBPyConnection) -> None:
     next_id = _next_id(conn, "artist", "artist_id")
     conn.execute(
@@ -546,25 +584,57 @@ def _insert_provisional_artists(conn: DuckDBPyConnection) -> None:
             resolution_status,
             resolution_confidence
         )
-        SELECT
-            ? + row_number() OVER (ORDER BY artist_key) - 1 AS artist_id,
-            canonical_name,
-            artist_key,
-            artist_mbid,
-            canonical_name AS lastfm_name,
-            'provisional' AS resolution_status,
-            0.0 AS resolution_confidence
-        FROM (
+        WITH name_counts AS (
             SELECT
                 artist_key,
-                arg_min(artist_raw, scrobble_id) AS canonical_name,
-                arg_min(NULLIF(trim(artist_mbid_raw), ''), scrobble_id) AS artist_mbid
+                artist_raw,
+                count(*) AS plays,
+                min(scrobble_id) AS first_scrobble_id
             FROM scrobble
             WHERE artist_key <> ''
+              AND NOT is_duplicate
+            GROUP BY artist_key, artist_raw
+        ),
+        preferred_names AS (
+            SELECT artist_key, artist_raw AS canonical_name
+            FROM (
+                SELECT
+                    artist_key,
+                    artist_raw,
+                    row_number() OVER (
+                        PARTITION BY artist_key
+                        ORDER BY plays DESC, first_scrobble_id
+                    ) AS row_number
+                FROM name_counts
+            ) ranked_names
+            WHERE row_number = 1
+        ),
+        mbids AS (
+            SELECT
+                artist_key,
+                count(DISTINCT NULLIF(trim(artist_mbid_raw), '')) AS mbid_count,
+                min(NULLIF(trim(artist_mbid_raw), '')) AS artist_mbid
+            FROM scrobble
+            WHERE artist_key <> ''
+              AND NOT is_duplicate
             GROUP BY artist_key
-        ) candidates
+        )
+        SELECT
+            ? + row_number() OVER (ORDER BY names.artist_key) - 1 AS artist_id,
+            names.canonical_name,
+            names.artist_key,
+            CASE WHEN mbids.mbid_count = 1 THEN mbids.artist_mbid ELSE NULL END,
+            names.canonical_name AS lastfm_name,
+            CASE
+                WHEN mbids.mbid_count = 1 THEN 'provisional_mbid'
+                WHEN mbids.mbid_count > 1 THEN 'provisional_mbid_conflict'
+                ELSE 'provisional_name'
+            END AS resolution_status,
+            CASE WHEN mbids.mbid_count = 1 THEN 0.5 ELSE 0.0 END AS resolution_confidence
+        FROM preferred_names names
+        JOIN mbids ON mbids.artist_key = names.artist_key
         WHERE NOT EXISTS (
-            SELECT 1 FROM artist existing WHERE existing.artist_key = candidates.artist_key
+            SELECT 1 FROM artist existing WHERE existing.artist_key = names.artist_key
         )
         """,
         [next_id],

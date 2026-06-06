@@ -84,7 +84,11 @@ def import_command(
     conn = initialize_database(resolved_config)
     try:
         with console.status(f"Importing Last.fm CSV from {csv_path}...", spinner="dots"):
-            stats = import_lastfm_csv(conn, csv_path)
+            stats = import_lastfm_csv(
+                conn,
+                csv_path,
+                near_duplicate_window_seconds=resolved_config.input.near_duplicate_window_seconds,
+            )
         logger.info(
             "Import complete: raw_scrobbles=%s clean_scrobbles=%s duplicate_scrobbles=%s",
             stats.raw_scrobbles,
@@ -356,9 +360,11 @@ def _print_stats(stats: ImportStats) -> None:
     console.print(f"raw scrobbles: {stats.raw_scrobbles}")
     console.print(f"clean scrobbles: {stats.scrobbles}")
     console.print(f"duplicate scrobbles: {stats.duplicate_scrobbles}")
+    console.print(f"near-duplicate scrobbles: {stats.near_duplicate_scrobbles}")
     console.print(f"distinct artists: {stats.distinct_artists}")
     console.print(f"distinct tracks: {stats.distinct_tracks}")
     console.print(f"null artist MBID scrobbles: {stats.null_artist_mbid_scrobbles}")
+    console.print(f"import warnings: {stats.import_warnings}")
 
 
 def _print_diagnostic_check(check: DiagnosticCheck) -> None:

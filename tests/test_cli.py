@@ -5,6 +5,7 @@ import duckdb
 from typer.testing import CliRunner
 
 from scrobble_recs.cli import app
+from scrobble_recs.importers.lastfm_csv import ImportStats
 
 
 def write_config(tmp_path: Path) -> Path:
@@ -129,6 +130,35 @@ def test_import_command_prints_stats(tmp_path: Path) -> None:
     assert "Imported 6 scrobbles" in result.output
     assert "duplicate scrobbles: 1" in result.output
     assert "distinct artists: 4" in result.output
+
+
+def test_import_command_passes_near_duplicate_window(tmp_path: Path, monkeypatch) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["input"]["near_duplicate_window_seconds"] = 30
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    calls: list[int] = []
+
+    def fake_import_lastfm_csv(conn, csv_path, *, near_duplicate_window_seconds=0):
+        calls.append(near_duplicate_window_seconds)
+        return ImportStats(
+            raw_scrobbles=0,
+            scrobbles=0,
+            duplicate_scrobbles=0,
+            near_duplicate_scrobbles=0,
+            distinct_artists=0,
+            distinct_tracks=0,
+            null_artist_mbid_scrobbles=0,
+            import_warnings=0,
+        )
+
+    monkeypatch.setattr("scrobble_recs.cli.import_lastfm_csv", fake_import_lastfm_csv)
+
+    result = runner.invoke(app, ["import", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert calls == [30]
 
 
 def test_build_profile_command_refreshes_local_scores(tmp_path: Path) -> None:

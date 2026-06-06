@@ -166,6 +166,145 @@ def test_import_warns_on_utc_time_mismatch_without_dropping_row(tmp_path: Path) 
     conn.close()
 
 
+def test_import_does_not_mark_near_duplicates_when_window_is_disabled(tmp_path: Path) -> None:
+    csv_path = write_csv(
+        tmp_path / "near_duplicates_disabled.csv",
+        [
+            "1704067200,2024-01-01 00:00:00,The Cure,,Disintegration,,Pictures of You,",
+            "1704067225,2024-01-01 00:00:25,The Cure,,Disintegration,,Pictures of You,",
+        ],
+    )
+    config = load_config(write_config(tmp_path, csv_path))
+    conn = initialize_database(config)
+
+    stats = import_lastfm_csv(conn, csv_path)
+
+    assert stats.scrobbles == 2
+    assert stats.duplicate_scrobbles == 0
+    assert stats.near_duplicate_scrobbles == 0
+    assert conn.execute("SELECT count(*) FROM import_warning").fetchone() == (0,)
+
+    conn.close()
+
+
+def test_import_marks_configured_near_duplicates_without_deleting_rows(tmp_path: Path) -> None:
+    csv_path = write_csv(
+        tmp_path / "near_duplicates_enabled.csv",
+        [
+            "1704067200,2024-01-01 00:00:00,The Cure,,Disintegration,,Pictures of You,",
+            "1704067225,2024-01-01 00:00:25,The Cure,,Disintegration,,Pictures of You,",
+            "1704067265,2024-01-01 00:01:05,The Cure,,Disintegration,,Pictures of You,",
+        ],
+    )
+    config = load_config(write_config(tmp_path, csv_path))
+    conn = initialize_database(config)
+
+    stats = import_lastfm_csv(conn, csv_path, near_duplicate_window_seconds=30)
+
+    assert stats.scrobbles == 3
+    assert conn.execute("SELECT count(*) FROM scrobble").fetchone() == (3,)
+    assert conn.execute(
+        """
+        SELECT CAST(played_at AS VARCHAR), is_duplicate
+        FROM scrobble
+        ORDER BY scrobble_id
+        """
+    ).fetchall() == [
+        ("2024-01-01 00:00:00", False),
+        ("2024-01-01 00:00:25", True),
+        ("2024-01-01 00:01:05", False),
+    ]
+    assert stats.duplicate_scrobbles == 1
+    assert stats.near_duplicate_scrobbles == 1
+    warning_rows = conn.execute(
+        """
+        SELECT import_row_number, warning_code, message, CAST(evidence AS VARCHAR)
+        FROM import_warning
+        ORDER BY warning_id
+        """
+    ).fetchall()
+    assert warning_rows == [
+        (
+            2,
+            "near_duplicate_scrobble",
+            "same artist and track within configured near-duplicate window",
+            '{"uts":1704067225,"artist_key":"the cure",'
+            '"track_key":"pictures of you","window_seconds":30}',
+        )
+    ]
+
+    conn.close()
+
+
+def test_import_does_not_mark_near_duplicates_with_empty_normalized_keys(
+    tmp_path: Path,
+) -> None:
+    csv_path = write_csv(
+        tmp_path / "near_duplicates_empty_keys.csv",
+        [
+            "1704067200,2024-01-01 00:00:00,!!!,,Disintegration,,???,",
+            "1704067225,2024-01-01 00:00:25,***,,Disintegration,,###,",
+        ],
+    )
+    config = load_config(write_config(tmp_path, csv_path))
+    conn = initialize_database(config)
+
+    stats = import_lastfm_csv(conn, csv_path, near_duplicate_window_seconds=30)
+
+    assert stats.scrobbles == 2
+    assert stats.duplicate_scrobbles == 0
+    assert stats.near_duplicate_scrobbles == 0
+    assert conn.execute("SELECT count(*) FROM import_warning").fetchone() == (0,)
+
+    conn.close()
+
+
+def test_import_marks_near_duplicates_in_csv_order_not_timestamp_order(
+    tmp_path: Path,
+) -> None:
+    csv_path = write_csv(
+        tmp_path / "near_duplicates_unsorted.csv",
+        [
+            "1704067225,2024-01-01 00:00:25,The Cure,,Disintegration,,Pictures of You,",
+            "1704067200,2024-01-01 00:00:00,The Cure,,Disintegration,,Pictures of You,",
+        ],
+    )
+    config = load_config(write_config(tmp_path, csv_path))
+    conn = initialize_database(config)
+
+    stats = import_lastfm_csv(conn, csv_path, near_duplicate_window_seconds=30)
+
+    assert stats.scrobbles == 2
+    assert stats.duplicate_scrobbles == 1
+    assert stats.near_duplicate_scrobbles == 1
+    assert conn.execute(
+        """
+        SELECT CAST(played_at AS VARCHAR), is_duplicate
+        FROM scrobble
+        ORDER BY scrobble_id
+        """
+    ).fetchall() == [
+        ("2024-01-01 00:00:25", False),
+        ("2024-01-01 00:00:00", True),
+    ]
+    warning_rows = conn.execute(
+        """
+        SELECT import_row_number, warning_code, message
+        FROM import_warning
+        ORDER BY warning_id
+        """
+    ).fetchall()
+    assert warning_rows == [
+        (
+            2,
+            "near_duplicate_scrobble",
+            "same artist and track within configured near-duplicate window",
+        )
+    ]
+
+    conn.close()
+
+
 def test_import_database_statement_count_is_bounded_for_many_rows(tmp_path: Path) -> None:
     rows = [
         ",".join(

@@ -421,7 +421,7 @@ git commit -m "feat: configure near duplicate import window"
 - Modify: `src/scrobble_recs/importers/lastfm_csv.py`
 - Modify: `tests/test_import.py`
 
-- [ ] **Step 1: Add failing timestamp warning test**
+- [x] **Step 1: Add failing timestamp warning test**
 
 Append to `tests/test_import.py`:
 
@@ -462,7 +462,7 @@ def test_import_warns_on_utc_time_mismatch_without_dropping_row(tmp_path: Path) 
     conn.close()
 ```
 
-- [ ] **Step 2: Run warning test to verify it fails**
+- [x] **Step 2: Run warning test to verify it fails**
 
 Run:
 
@@ -482,7 +482,7 @@ If Task 1 has already been completed, the expected failure is:
 AttributeError: 'ImportStats' object has no attribute 'import_warnings'
 ```
 
-- [ ] **Step 3: Implement warning staging and stats**
+- [x] **Step 3: Implement warning staging and stats**
 
 Modify `src/scrobble_recs/importers/lastfm_csv.py` imports:
 
@@ -773,7 +773,7 @@ def _replace_import_tables(conn: DuckDBPyConnection) -> None:
     conn.execute("DELETE FROM import_warning")
 ```
 
-- [ ] **Step 4: Run warning test to verify it passes**
+- [x] **Step 4: Run warning test to verify it passes**
 
 Run:
 
@@ -787,7 +787,7 @@ Expected:
 1 passed
 ```
 
-- [ ] **Step 5: Run current import tests**
+- [x] **Step 5: Run current import tests**
 
 Run:
 
@@ -802,6 +802,9 @@ all import tests pass
 ```
 
 - [ ] **Step 6: Commit import warnings**
+
+Deviation: skipped commit for this checkpoint because the task executor was instructed not to commit; the controller will commit after review gates.
+Deviation: evidence serialization preserves the specified persisted JSON key order for the Task 3 warning test instead of sorting keys alphabetically.
 
 Run:
 

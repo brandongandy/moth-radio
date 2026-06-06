@@ -1087,7 +1087,7 @@ git commit -m "feat: mark configurable near duplicate scrobbles"
 - Modify: `src/scrobble_recs/importers/lastfm_csv.py`
 - Modify: `tests/test_import.py`
 
-- [ ] **Step 1: Add failing artist MBID consistency tests**
+- [x] **Step 1: Add failing artist MBID consistency tests**
 
 Append to `tests/test_import.py`:
 
@@ -1160,7 +1160,7 @@ def test_import_does_not_trust_conflicting_artist_mbids(tmp_path: Path) -> None:
     conn.close()
 ```
 
-- [ ] **Step 2: Run artist MBID tests to verify they fail**
+- [x] **Step 2: Run artist MBID tests to verify they fail**
 
 Run:
 
@@ -1174,7 +1174,7 @@ Expected:
 AssertionError
 ```
 
-- [ ] **Step 3: Replace provisional artist insert**
+- [x] **Step 3: Replace provisional artist insert**
 
 Modify `_insert_provisional_artists()`:
 
@@ -1300,7 +1300,7 @@ In `import_lastfm_csv()`, call conflict warning insert after `_insert_scrobbles(
 
 Because `_insert_artist_mbid_conflict_warnings()` writes directly to `import_warning`, update `_insert_import_warnings()` to compute `next_id` at call time as shown in Task 3 so staged warning IDs start after conflict warning IDs.
 
-- [ ] **Step 4: Run artist MBID tests to verify they pass**
+- [x] **Step 4: Run artist MBID tests to verify they pass**
 
 Run:
 
@@ -1316,10 +1316,13 @@ Expected:
 
 - [ ] **Step 5: Commit artist identity improvements**
 
+Include `src/scrobble_recs/cli.py` because resolve pending counts must treat
+`provisional_*` statuses as unresolved.
+
 Run:
 
 ```bash
-git add src/scrobble_recs/importers/lastfm_csv.py tests/test_import.py docs/superpowers/plans/2026-06-06-import-local-entity-completeness.md
+git add src/scrobble_recs/cli.py src/scrobble_recs/importers/lastfm_csv.py tests/test_import.py docs/superpowers/plans/2026-06-06-import-local-entity-completeness.md
 git commit -m "feat: require consistent artist mbids on import"
 ```
 

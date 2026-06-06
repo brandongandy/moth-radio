@@ -190,7 +190,8 @@ def resolve_command(
             SELECT count(*)
             FROM artist
             WHERE resolution_status IS NULL
-               OR resolution_status IN ('provisional', 'unresolved')
+               OR resolution_status LIKE 'provisional%'
+               OR resolution_status = 'unresolved'
             """,
         )
     finally:

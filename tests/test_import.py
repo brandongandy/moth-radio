@@ -305,6 +305,140 @@ def test_import_marks_near_duplicates_in_csv_order_not_timestamp_order(
     conn.close()
 
 
+def test_import_keeps_consistent_artist_mbid_on_provisional_artist(tmp_path: Path) -> None:
+    csv_path = write_csv(
+        tmp_path / "consistent_artist_mbid.csv",
+        [
+            "1704067200,2024-01-01 00:00:00,The Cure,mbid-cure,Disintegration,,Pictures of You,",
+            "1704153600,2024-01-02 00:00:00,the cure,mbid-cure,Disintegration,,Plainsong,",
+        ],
+    )
+    config = load_config(write_config(tmp_path, csv_path))
+    conn = initialize_database(config)
+
+    import_lastfm_csv(conn, csv_path)
+
+    artist_row = conn.execute(
+        """
+        SELECT canonical_name, musicbrainz_artist_mbid, resolution_status, resolution_confidence
+        FROM artist
+        WHERE artist_key = 'the cure'
+        """
+    ).fetchone()
+
+    assert artist_row == ("The Cure", "mbid-cure", "provisional_mbid", 0.5)
+    assert conn.execute("SELECT count(*) FROM import_warning").fetchone() == (0,)
+
+    conn.close()
+
+
+def test_import_does_not_trust_conflicting_artist_mbids(tmp_path: Path) -> None:
+    csv_path = write_csv(
+        tmp_path / "conflicting_artist_mbid.csv",
+        [
+            "1704067200,2024-01-01 00:00:00,The Cure,mbid-cure-a,Disintegration,,Pictures of You,",
+            "1704153600,2024-01-02 00:00:00,The Cure,mbid-cure-b,Disintegration,,Plainsong,",
+        ],
+    )
+    config = load_config(write_config(tmp_path, csv_path))
+    conn = initialize_database(config)
+
+    stats = import_lastfm_csv(conn, csv_path)
+
+    artist_row = conn.execute(
+        """
+        SELECT canonical_name, musicbrainz_artist_mbid, resolution_status, resolution_confidence
+        FROM artist
+        WHERE artist_key = 'the cure'
+        """
+    ).fetchone()
+    warnings = conn.execute(
+        """
+        SELECT warning_code, message
+        FROM import_warning
+        ORDER BY warning_id
+        """
+    ).fetchall()
+
+    assert stats.import_warnings == 1
+    assert artist_row == ("The Cure", None, "provisional_mbid_conflict", 0.0)
+    assert warnings == [("artist_mbid_conflict", "artist_key has multiple supplied artist MBIDs")]
+
+    conn.close()
+
+
+def test_import_ignores_duplicate_artist_mbids_for_provisional_identity(
+    tmp_path: Path,
+) -> None:
+    csv_path = write_csv(
+        tmp_path / "duplicate_artist_mbid_ignored.csv",
+        [
+            "1704067200,2024-01-01 00:00:00,THE CURE,mbid-cure,Disintegration,,Plainsong,",
+            "1704153600,2024-01-02 00:00:00,The Cure,mbid-cure,Disintegration,,Pictures of You,",
+            "1704240000,2024-01-03 00:00:00,The Cure,mbid-cure,Disintegration,,Lovesong,",
+            "1704153600,2024-01-02 00:00:00,the cure,mbid-conflict,"
+            "Disintegration,,Pictures of You,",
+        ],
+    )
+    config = load_config(write_config(tmp_path, csv_path))
+    conn = initialize_database(config)
+
+    stats = import_lastfm_csv(conn, csv_path)
+
+    artist_row = conn.execute(
+        """
+        SELECT canonical_name, musicbrainz_artist_mbid, resolution_status, resolution_confidence
+        FROM artist
+        WHERE artist_key = 'the cure'
+        """
+    ).fetchone()
+    conflict_warnings = conn.execute(
+        """
+        SELECT warning_code
+        FROM import_warning
+        WHERE warning_code = 'artist_mbid_conflict'
+        """
+    ).fetchall()
+
+    assert stats.duplicate_scrobbles == 1
+    assert artist_row == ("The Cure", "mbid-cure", "provisional_mbid", 0.5)
+    assert conflict_warnings == []
+
+    conn.close()
+
+
+def test_import_orders_artist_mbid_conflict_warnings_before_staged_warnings(
+    tmp_path: Path,
+) -> None:
+    csv_path = write_csv(
+        tmp_path / "artist_mbid_conflict_and_timestamp_warning.csv",
+        [
+            "1704067200,2024-01-01 00:00:00,The Cure,mbid-cure-a,Disintegration,,Pictures of You,",
+            "1704153600,2024-01-03 00:00:00,The Cure,mbid-cure-b,Disintegration,,Plainsong,",
+        ],
+    )
+    config = load_config(write_config(tmp_path, csv_path))
+    conn = initialize_database(config)
+
+    stats = import_lastfm_csv(conn, csv_path)
+
+    warning_rows = conn.execute(
+        """
+        SELECT warning_id, import_row_number, warning_code
+        FROM import_warning
+        ORDER BY warning_id
+        """
+    ).fetchall()
+
+    assert stats.import_warnings == 2
+    assert warning_rows == [
+        (1, 1, "artist_mbid_conflict"),
+        (2, 2, "timestamp_mismatch"),
+    ]
+
+    conn.close()
+
+
 def test_import_database_statement_count_is_bounded_for_many_rows(tmp_path: Path) -> None:
     rows = [
         ",".join(

@@ -89,6 +89,23 @@ def test_initialize_database_applies_initial_migration(tmp_path: Path) -> None:
     try:
         tables = {row[0] for row in conn.execute("SHOW TABLES").fetchall()}
         scrobble_columns = {row[0] for row in conn.execute("DESCRIBE scrobble").fetchall()}
+        track_columns = {row[0] for row in conn.execute("DESCRIBE track").fetchall()}
+        warning_columns = {row[0] for row in conn.execute("DESCRIBE import_warning").fetchall()}
+        index_rows = {
+            row[0]: (row[1], row[2], row[3])
+            for row in conn.execute(
+                """
+                SELECT index_name, table_name, is_unique, expressions
+                FROM duckdb_indexes()
+                WHERE index_name IN (
+                    'track_artist_key_natural_key',
+                    'import_warning_id_key',
+                    'import_warning_code_key',
+                    'import_warning_row_key'
+                )
+                """
+            ).fetchall()
+        }
     finally:
         conn.close()
 
@@ -100,6 +117,7 @@ def test_initialize_database_applies_initial_migration(tmp_path: Path) -> None:
         "artist_tag",
         "enrichment_work",
         "feedback_event",
+        "import_warning",
         "profile_cluster",
         "raw_scrobble",
         "recommendation",
@@ -107,8 +125,36 @@ def test_initialize_database_applies_initial_migration(tmp_path: Path) -> None:
         "scrobble",
         "tag_profile",
         "tag_top_artist",
+        "track",
     }
     assert {"artist_key", "album_key", "track_key", "is_duplicate"} <= scrobble_columns
+    assert {
+        "track_id",
+        "artist_id",
+        "canonical_title",
+        "track_key",
+        "musicbrainz_recording_mbid",
+        "lastfm_track_name",
+        "resolution_status",
+        "resolution_confidence",
+        "created_at",
+        "updated_at",
+    } <= track_columns
+    assert {
+        "warning_id",
+        "import_row_number",
+        "warning_code",
+        "severity",
+        "message",
+        "evidence",
+        "created_at",
+    } <= warning_columns
+    assert index_rows == {
+        "track_artist_key_natural_key": ("track", True, "[artist_id, track_key]"),
+        "import_warning_id_key": ("import_warning", True, "[warning_id]"),
+        "import_warning_code_key": ("import_warning", False, "[warning_code]"),
+        "import_warning_row_key": ("import_warning", False, "[import_row_number]"),
+    }
 
 
 def test_load_config_includes_lastfm_and_recommendation_defaults(tmp_path: Path) -> None:

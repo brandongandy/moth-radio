@@ -49,7 +49,7 @@ This plan deliberately keeps these out of scope:
 - Create: `src/scrobble_recs/sql/006_import_entities.sql`
 - Modify: `tests/test_config.py`
 
-- [ ] **Step 1: Write the failing migration test**
+- [x] **Step 1: Write the failing migration test**
 
 Modify `tests/test_config.py::test_initialize_database_applies_initial_migration` so the expected table set includes `track` and `import_warning`, and add column assertions:
 
@@ -129,7 +129,7 @@ def test_initialize_database_applies_initial_migration(tmp_path: Path) -> None:
     } <= warning_columns
 ```
 
-- [ ] **Step 2: Run the migration test to verify it fails**
+- [x] **Step 2: Run the migration test to verify it fails**
 
 Run:
 
@@ -145,7 +145,7 @@ AssertionError: Extra items in the right set:
 'import_warning'
 ```
 
-- [ ] **Step 3: Add the migration**
+- [x] **Step 3: Add the migration**
 
 Create `src/scrobble_recs/sql/006_import_entities.sql`:
 
@@ -186,7 +186,7 @@ CREATE INDEX IF NOT EXISTS import_warning_row_key
 ON import_warning (import_row_number);
 ```
 
-- [ ] **Step 4: Run the migration test to verify it passes**
+- [x] **Step 4: Run the migration test to verify it passes**
 
 Run:
 
@@ -201,6 +201,8 @@ Expected:
 ```
 
 - [ ] **Step 5: Commit schema**
+
+Deviation: skipped commit for this checkpoint because the task executor was instructed not to commit; the controller will commit after review gates.
 
 Run:
 

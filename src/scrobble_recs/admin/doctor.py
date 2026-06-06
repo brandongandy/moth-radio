@@ -51,6 +51,7 @@ def run_doctor(
         _rate_limit_check(config),
         _api_cache_check(conn, resolved_now),
         _import_stats_check(conn),
+        _import_warnings_check(conn),
     ]
     return DoctorResult(checks=tuple(checks))
 
@@ -140,4 +141,15 @@ def _import_stats_check(conn: DuckDBPyConnection) -> DiagnosticCheck:
             f"scrobbles={stats.scrobbles}; artists={stats.distinct_artists}; "
             f"tracks={stats.distinct_tracks}"
         ),
+    )
+
+
+def _import_warnings_check(conn: DuckDBPyConnection) -> DiagnosticCheck:
+    warning_count = get_import_stats(conn).import_warnings
+    if warning_count == 0:
+        return DiagnosticCheck("import_warnings", DiagnosticStatus.OK, "warnings=0")
+    return DiagnosticCheck(
+        "import_warnings",
+        DiagnosticStatus.WARN,
+        f"warnings={warning_count}",
     )

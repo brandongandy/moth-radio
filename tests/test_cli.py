@@ -79,6 +79,47 @@ def write_config_with_disabled_lastfm(tmp_path: Path) -> Path:
     return config_path
 
 
+def test_init_command_writes_config_and_initializes_database(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = tmp_path / "nested" / "config.json"
+
+    result = runner.invoke(app, ["init", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert config_path.exists()
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    assert payload["apis"]["lastfm"]["api_key"] == "${LASTFM_API_KEY}"
+    assert payload["recommendation"]["seed_artist_limit"] == 250
+    db_path = tmp_path / "nested" / "data" / "scrobbles.duckdb"
+    assert db_path.exists()
+    assert f"Config: {config_path}" in result.output
+    assert f"Database: {db_path}" in result.output
+
+
+def test_init_command_refuses_to_overwrite_existing_config(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+
+    result = runner.invoke(app, ["init", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "already exists" in result.output
+    assert config_path.read_text(encoding="utf-8") == "{}"
+
+
+def test_init_command_force_overwrites_existing_config(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+
+    result = runner.invoke(app, ["init", "--config", str(config_path), "--force"])
+
+    assert result.exit_code == 0
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    assert payload["app"]["name"] == "scrobble-recs"
+
+
 def test_import_command_prints_stats(tmp_path: Path) -> None:
     runner = CliRunner()
 
@@ -88,6 +129,53 @@ def test_import_command_prints_stats(tmp_path: Path) -> None:
     assert "Imported 6 scrobbles" in result.output
     assert "duplicate scrobbles: 1" in result.output
     assert "distinct artists: 4" in result.output
+
+
+def test_build_profile_command_refreshes_local_scores(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    runner.invoke(app, ["import", "--config", str(config_path)])
+
+    result = runner.invoke(app, ["build-profile", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "Profile refreshed" in result.output
+    assert "artists updated: 4" in result.output
+
+
+def test_build_profile_command_prints_profile_weight_counts(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    runner.invoke(app, ["import", "--config", str(config_path)])
+    conn = duckdb.connect(str(tmp_path / "scrobbles.duckdb"))
+    try:
+        conn.execute(
+            """
+            INSERT INTO artist_tag (
+                artist_id,
+                tag,
+                source,
+                tag_count,
+                normalized_weight,
+                fetched_at
+            )
+            VALUES
+                (4, 'post-punk', 'lastfm', 100.0, 1.0, current_timestamp),
+                (4, 'gothic rock', 'lastfm', 75.0, 0.75, current_timestamp),
+                (1, 'dream pop', 'lastfm', 50.0, 0.50, current_timestamp)
+            """
+        )
+        conn.execute("UPDATE artist_listening_fact SET play_count = 3 WHERE artist_id = 4")
+    finally:
+        conn.close()
+
+    result = runner.invoke(app, ["build-profile", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "Profile refreshed" in result.output
+    assert "artists updated: 4" in result.output
+    assert "tag weights: 2" in result.output
+    assert "genre clusters: 2" in result.output
 
 
 def test_import_command_shows_working_status_and_writes_log(tmp_path: Path) -> None:
@@ -114,9 +202,27 @@ def test_doctor_command_runs_without_api_keys(tmp_path: Path) -> None:
     result = runner.invoke(app, ["doctor", "--config", str(config_path)])
 
     assert result.exit_code == 0
-    assert "Config: ok" in result.output
-    assert "Database: ok" in result.output
-    assert "API keys: not required for import/doctor" in result.output
+    assert "config: ok" in result.output
+    assert "database: ok" in result.output
+    assert "csv: ok" in result.output
+    assert "cache: ok" in result.output
+    assert "lastfm_api_key: warn" in result.output
+    assert "api_cache: ok" in result.output
+    assert "clean scrobbles: 6" in result.output
+
+
+def test_doctor_command_exits_nonzero_when_csv_is_missing(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["input"]["lastfm_csv"] = str(tmp_path / "missing.csv")
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = runner.invoke(app, ["doctor", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "csv: error" in result.output
+    assert "missing" in result.output
 
 
 def test_enrich_command_dispatches_lastfm_source(tmp_path: Path, monkeypatch) -> None:
@@ -183,6 +289,49 @@ def test_enrich_command_reports_disabled_lastfm_before_missing_key(tmp_path: Pat
     assert result.exit_code != 0
     assert "Last.fm enrichment is disabled" in result.output
     assert "Last.fm API key is required for enrichment" not in result.output
+
+
+def test_resolve_command_reports_musicbrainz_disabled_by_default(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    runner.invoke(app, ["import", "--config", str(config_path)])
+
+    result = runner.invoke(
+        app,
+        ["resolve", "--config", str(config_path), "--source", "musicbrainz"],
+    )
+
+    assert result.exit_code == 0
+    assert "MusicBrainz resolution is disabled" in result.output
+    assert "unresolved artists: 4" in result.output
+
+
+def test_resolve_command_rejects_unknown_source(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+
+    result = runner.invoke(app, ["resolve", "--config", str(config_path), "--source", "spotify"])
+
+    assert result.exit_code != 0
+    assert "only --source musicbrainz is supported" in result.output
+
+
+def test_resolve_command_reports_musicbrainz_enabled_not_implemented(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["apis"] = {"musicbrainz": {"enabled": True}}
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    runner.invoke(app, ["import", "--config", str(config_path)])
+
+    result = runner.invoke(
+        app,
+        ["resolve", "--config", str(config_path), "--source", "musicbrainz"],
+    )
+
+    assert result.exit_code == 1
+    assert "unresolved artists: 4" in result.output
+    assert "MusicBrainz resolution is not implemented in this version" in result.output
 
 
 def test_recommend_command_generates_persisted_run(tmp_path: Path, monkeypatch) -> None:

@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
 from math import sqrt
-from typing import Literal, TypeAlias, cast
+from typing import Literal, TypeAlias
 from uuid import uuid4
 
 from duckdb import DuckDBPyConnection
@@ -18,7 +18,7 @@ from scrobble_recs.models.feedback import (
     feedback_obviousness_for_candidate,
     load_feedback_profile,
 )
-from scrobble_recs.models.knownness import ArtistListeningInput, compute_artist_listening_scores
+from scrobble_recs.models.listening import refresh_artist_listening_scores
 from scrobble_recs.models.modes import RecommendationModeSettings, resolve_recommendation_mode
 from scrobble_recs.models.profile import SeedArtist, select_seed_artists
 
@@ -114,7 +114,7 @@ def generate_recommendations(
         subject="artist listening scores",
         status="processing",
     )
-    _refresh_artist_listening_scores(conn, resolved_as_of)
+    refresh_artist_listening_scores(conn, as_of=resolved_as_of)
     _report_progress(
         progress_callback,
         phase="refresh_listening",
@@ -373,50 +373,6 @@ def _candidate_targets_from_seeds(
             [sorted(seed_ids)],
         ).fetchall()
     }
-
-
-def _refresh_artist_listening_scores(conn: DuckDBPyConnection, as_of: datetime) -> None:
-    rows = conn.execute(
-        """
-        SELECT
-            artist_id,
-            play_count,
-            track_count,
-            active_months,
-            first_played_at,
-            last_played_at
-        FROM artist_listening_fact
-        """
-    ).fetchall()
-    for row in rows:
-        scores = compute_artist_listening_scores(
-            ArtistListeningInput(
-                play_count=int(row[1]),
-                track_count=int(row[2]),
-                active_months=int(row[3]),
-                first_played_at=cast(datetime, row[4]),
-                last_played_at=cast(datetime, row[5]),
-            ),
-            as_of=as_of,
-        )
-        conn.execute(
-            """
-            UPDATE artist_listening_fact
-            SET lifetime_weight = ?,
-                recent_weight = ?,
-                knownness = ?,
-                rediscovery_score = ?,
-                updated_at = current_timestamp
-            WHERE artist_id = ?
-            """,
-            [
-                scores.lifetime_weight,
-                scores.recent_weight,
-                scores.knownness,
-                scores.rediscovery_score,
-                int(row[0]),
-            ],
-        )
 
 
 def _load_user_tag_profile(

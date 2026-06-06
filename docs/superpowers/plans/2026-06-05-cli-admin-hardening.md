@@ -58,7 +58,7 @@ Deferred to separate plans:
 - Modify: `src/scrobble_recs/config.py`
 - Test: `tests/test_config.py`
 
-- [ ] **Step 1: Add failing config validation tests**
+- [x] **Step 1: Add failing config validation tests**
 
 Append these tests to `tests/test_config.py`:
 
@@ -152,7 +152,7 @@ Also add `EXPECTED_CSV_COLUMNS` to the existing import line:
 from scrobble_recs.config import DiversityConfig, EXPECTED_CSV_COLUMNS, load_config
 ```
 
-- [ ] **Step 2: Run the config tests to verify they fail**
+- [x] **Step 2: Run the config tests to verify they fail**
 
 Run:
 
@@ -166,7 +166,7 @@ Expected:
 ImportError: cannot import name 'default_config_document'
 ```
 
-- [ ] **Step 3: Add config validators and skeleton document**
+- [x] **Step 3: Add config validators and skeleton document**
 
 Modify `src/scrobble_recs/config.py`.
 
@@ -360,7 +360,7 @@ def default_config_document() -> dict[str, Any]:
     }
 ```
 
-- [ ] **Step 4: Run the config tests to verify they pass**
+- [x] **Step 4: Run the config tests to verify they pass**
 
 Run:
 
@@ -374,7 +374,7 @@ Expected:
 passed
 ```
 
-- [ ] **Step 5: Commit config validation**
+- [x] **Step 5: Commit config validation**
 
 Run:
 
@@ -382,6 +382,15 @@ Run:
 git add src/scrobble_recs/config.py tests/test_config.py
 git commit -m "feat: harden config validation"
 ```
+
+Checkpoint:
+
+- Implementer status: DONE.
+- Verification: focused red test failed before implementation due missing `default_config_document`; `python -m pytest tests/test_config.py -v` passed with 8 tests.
+- Spec review: APPROVED.
+- Code quality review: APPROVED.
+- Architecture gate: severity `none`, continue `yes`.
+- Deviations: copied the approved plan into this isolated worktree as the checkpoint artifact because the source plan was untracked in the original workspace.
 
 ---
 
@@ -393,7 +402,7 @@ git commit -m "feat: harden config validation"
 - Modify: `src/scrobble_recs/cli.py`
 - Modify: `tests/test_cli.py`
 
-- [ ] **Step 1: Add failing init CLI tests**
+- [x] **Step 1: Add failing init CLI tests**
 
 Append these tests to `tests/test_cli.py`:
 
@@ -439,7 +448,7 @@ def test_init_command_force_overwrites_existing_config(tmp_path: Path) -> None:
     assert payload["app"]["name"] == "scrobble-recs"
 ```
 
-- [ ] **Step 2: Run the init tests to verify they fail**
+- [x] **Step 2: Run the init tests to verify they fail**
 
 Run:
 
@@ -453,7 +462,7 @@ Expected:
 No such command 'init'
 ```
 
-- [ ] **Step 3: Add the init service**
+- [x] **Step 3: Add the init service**
 
 Create `src/scrobble_recs/admin/__init__.py`:
 
@@ -516,7 +525,7 @@ def _config_document_for_location(config_path: Path) -> dict[str, Any]:
     return document
 ```
 
-- [ ] **Step 4: Add the init Typer command**
+- [x] **Step 4: Add the init Typer command**
 
 Modify `src/scrobble_recs/cli.py`.
 
@@ -549,7 +558,7 @@ def init_command(
     console.print(f"Log: {result.log_path}")
 ```
 
-- [ ] **Step 5: Run the init tests to verify they pass**
+- [x] **Step 5: Run the init tests to verify they pass**
 
 Run:
 
@@ -563,7 +572,7 @@ Expected:
 3 passed
 ```
 
-- [ ] **Step 6: Commit init work**
+- [x] **Step 6: Commit init work**
 
 Run:
 
@@ -571,6 +580,15 @@ Run:
 git add src/scrobble_recs/admin src/scrobble_recs/cli.py tests/test_cli.py
 git commit -m "feat: add init command"
 ```
+
+Checkpoint:
+
+- Implementer status: DONE.
+- Verification: focused red tests failed before implementation with missing-command exit code 2; focused init tests passed with 3 tests; `python -m pytest tests/test_cli.py -v` passed with 21 tests.
+- Spec review: APPROVED.
+- Code quality review: APPROVED.
+- Architecture gate: severity `mechanical`, continue `yes`.
+- Deviations: `init` success output uses `soft_wrap=True`; gate classified this as harmless CLI presentation detail.
 
 ---
 
@@ -580,7 +598,7 @@ git commit -m "feat: add init command"
 - Modify: `src/scrobble_recs/apis/cache.py`
 - Modify: `tests/test_api_cache.py`
 
-- [ ] **Step 1: Add failing cache stale/stat tests**
+- [x] **Step 1: Add failing cache stale/stat tests**
 
 Append these tests to `tests/test_api_cache.py`:
 
@@ -661,7 +679,7 @@ def test_api_cache_summary_counts_fresh_stale_and_error_rows(tmp_path: Path) -> 
     conn.close()
 ```
 
-- [ ] **Step 2: Run cache tests to verify they fail**
+- [x] **Step 2: Run cache tests to verify they fail**
 
 Run:
 
@@ -675,7 +693,7 @@ Expected:
 AttributeError: 'ApiCache' object has no attribute 'get_stale_success'
 ```
 
-- [ ] **Step 3: Implement stale reads and summary stats**
+- [x] **Step 3: Implement stale reads and summary stats**
 
 Modify `src/scrobble_recs/apis/cache.py`.
 
@@ -777,7 +795,7 @@ def _query_int(conn: DuckDBPyConnection, sql: str, params: list[object]) -> int:
     return int(row[0] or 0)
 ```
 
-- [ ] **Step 4: Run cache tests to verify they pass**
+- [x] **Step 4: Run cache tests to verify they pass**
 
 Run:
 
@@ -791,7 +809,7 @@ Expected:
 passed
 ```
 
-- [ ] **Step 5: Commit cache diagnostics primitives**
+- [x] **Step 5: Commit cache diagnostics primitives**
 
 Run:
 
@@ -799,6 +817,15 @@ Run:
 git add src/scrobble_recs/apis/cache.py tests/test_api_cache.py
 git commit -m "feat: expose api cache diagnostics"
 ```
+
+Checkpoint:
+
+- Implementer status: DONE.
+- Verification: focused red tests failed before implementation with missing `ApiCache` methods; `python -m pytest tests/test_api_cache.py -v` passed with 9 tests; changed-file ruff check passed.
+- Spec review: APPROVED.
+- Code quality review: APPROVED.
+- Architecture gate: severity `none`, continue `yes`.
+- Deviations: none.
 
 ---
 
@@ -808,7 +835,7 @@ git commit -m "feat: expose api cache diagnostics"
 - Modify: `src/scrobble_recs/apis/lastfm.py`
 - Modify: `tests/test_lastfm_client.py`
 
-- [ ] **Step 1: Add failing Last.fm retry/stale tests**
+- [x] **Step 1: Add failing Last.fm retry/stale tests**
 
 Append these tests to `tests/test_lastfm_client.py`:
 
@@ -876,7 +903,7 @@ def test_lastfm_client_does_not_retry_4xx_errors(tmp_path: Path) -> None:
     conn.close()
 ```
 
-- [ ] **Step 2: Run Last.fm tests to verify they fail**
+- [x] **Step 2: Run Last.fm tests to verify they fail**
 
 Run:
 
@@ -890,11 +917,25 @@ Expected:
 TypeError: LastFmApiConfig.__init__() got an unexpected keyword argument 'max_retries'
 ```
 
-- [ ] **Step 3: Implement retry/stale behavior**
+- [x] **Step 3: Implement retry/stale behavior**
 
 Modify `src/scrobble_recs/apis/lastfm.py`.
 
-Replace the HTTP part of `_request` after the fresh-cache check with:
+Replace the HTTP part of `_request` after the fresh-cache check with retry
+handling that:
+
+- Attempts each uncached Last.fm request `max_retries + 1` times.
+- Caches successful 2xx responses.
+- Writes non-transient 4xx error responses and raises without retry.
+- Retries transient 429 and 5xx responses.
+- Checks for a stale successful cache entry after exhausted transient responses
+  before writing any final transient failure row, because `api_cache.cache_key`
+  replacement would otherwise erase the stale success needed for fallback.
+- Treats `httpx.TransportError` as a transient failure with retry and stale
+  fallback. Transport errors have no HTTP response to cache, so they raise after
+  retries only when no stale success exists.
+
+The implementation shape is:
 
 ```python
         request_params = {
@@ -904,45 +945,46 @@ Replace the HTTP part of `_request` after the fresh-cache check with:
             **params,
         }
         request_url = self._config.base_url
-        last_error_message: str | None = None
-        response_json: JsonObject = {}
-        response_status = 0
         attempts = self._config.max_retries + 1
+        last_status: int | None = None
+        last_payload: JsonObject | None = None
+        last_transport_error: str | None = None
+
         for attempt in range(attempts):
             self._rate_limiter.wait()
-            response = self._http_client.get(request_url, params=request_params)
-            response_status = response.status_code
-            response_json = _response_json(response)
-            expires_at = now + timedelta(days=self._config.cache_ttl_days)
-            last_error_message = (
-                _extract_error_message(response_json) if response_status >= 400 else None
-            )
-            self._cache.write_response(
-                source=_SOURCE,
-                endpoint=method,
-                request_url=request_url,
-                request_params=cache_params,
-                response_status=response_status,
-                response_json=response_json,
-                fetched_at=now,
-                expires_at=expires_at,
-                error_message=last_error_message,
-            )
-            if 200 <= response_status <= 299:
+            try:
+                response = self._http_client.get(request_url, params=request_params)
+            except httpx.TransportError as exc:
+                last_transport_error = str(exc).strip()
+                if attempt < attempts - 1:
+                    retry_sleep(2.0**attempt)
+                    continue
+                break
+
+            if 200 <= response.status_code <= 299:
+                response_json = _response_json(response)
+                write_success_response(response_json)
                 return response_json
-            if response_status < 500 and response_status != 429:
-                break
-            if attempt == attempts - 1:
-                break
+
+            response_json = _error_response_json(response)
+            last_status = response.status_code
+            last_payload = response_json
+            if response.status_code < 500 and response.status_code != 429:
+                write_error_response(response.status_code, response_json)
+                raise RuntimeError(error_message(response.status_code, response_json))
+            if attempt < attempts - 1 and response.status_code == 429:
+                retry_sleep(2.0**attempt)
 
         stale = self._cache.get_stale_success(_SOURCE, method, cache_params)
-        if stale is not None and (response_status == 429 or response_status >= 500):
+        if stale is not None:
             return stale
-        message = last_error_message or f"Last.fm request failed with status {response_status}"
-        raise RuntimeError(message)
+        if last_status is None or last_payload is None:
+            raise RuntimeError(last_transport_error or "Last.fm request failed before receiving a response")
+        write_error_response(last_status, last_payload)
+        raise RuntimeError(error_message(last_status, last_payload))
 ```
 
-- [ ] **Step 4: Run Last.fm tests to verify they pass**
+- [x] **Step 4: Run Last.fm tests to verify they pass**
 
 Run:
 
@@ -956,7 +998,7 @@ Expected:
 passed
 ```
 
-- [ ] **Step 5: Commit API retry work**
+- [x] **Step 5: Commit API retry work**
 
 Run:
 
@@ -965,18 +1007,38 @@ git add src/scrobble_recs/apis/lastfm.py tests/test_lastfm_client.py
 git commit -m "feat: use stale cache for transient lastfm failures"
 ```
 
+Checkpoint:
+
+- Implementer status: DONE_WITH_APPROVED_DEVIATIONS.
+- Verification: focused stale fallback and 4xx tests were exercised red/green;
+  additional regression tests covered non-JSON 503 responses, transport-error
+  fallback, and 429 retry backoff. `python -m pytest tests/test_lastfm_client.py
+  -v` passed with 14 tests. `python -m ruff check
+  src\scrobble_recs\apis\lastfm.py tests\test_lastfm_client.py` passed.
+- Spec review: APPROVED after Option A; no gaps or unapproved extra behavior.
+- Code quality review: APPROVED after Option A; no blocking/material findings.
+- Architecture gate: severity `none`, continue `yes`.
+- Deviations: approved by human decision Option A on 2026-06-05. Task 4
+  preserves stale successful cache rows before writing final transient HTTP
+  failures, because replacing the cache row first would erase fallback data.
+  Task 4 also treats `httpx.TransportError` as transient with retry and stale
+  fallback, with no cache write when no HTTP response exists.
+
 ---
 
 ### Task 5: Public Local Profile Refresh And Build-Profile Command
 
 **Files:**
 - Create: `src/scrobble_recs/models/listening.py`
+- Create: `src/scrobble_recs/models/profile_builder.py`
+- Create: `src/scrobble_recs/sql/005_profile.sql`
 - Modify: `src/scrobble_recs/models/recommend.py`
 - Modify: `src/scrobble_recs/cli.py`
 - Test: `tests/test_profile.py`
 - Test: `tests/test_cli.py`
+- Test: `tests/test_config.py`
 
-- [ ] **Step 1: Add failing local profile refresh tests**
+- [x] **Step 1: Add failing local profile refresh tests**
 
 Append this test to `tests/test_profile.py`:
 
@@ -1014,7 +1076,7 @@ from datetime import datetime
 from pathlib import Path
 ```
 
-- [ ] **Step 2: Add failing build-profile CLI test**
+- [x] **Step 2: Add failing build-profile CLI test**
 
 Append this test to `tests/test_cli.py`:
 
@@ -1031,7 +1093,7 @@ def test_build_profile_command_refreshes_local_scores(tmp_path: Path) -> None:
     assert "artists updated: 4" in result.output
 ```
 
-- [ ] **Step 3: Run profile tests to verify they fail**
+- [x] **Step 3: Run profile tests to verify they fail**
 
 Run:
 
@@ -1045,7 +1107,7 @@ Expected:
 ModuleNotFoundError: No module named 'scrobble_recs.models.listening'
 ```
 
-- [ ] **Step 4: Create the public listening refresh module**
+- [x] **Step 4: Create the public listening refresh module**
 
 Create `src/scrobble_recs/models/listening.py`:
 
@@ -1121,7 +1183,7 @@ def refresh_artist_listening_scores(
     return ListeningRefreshStats(artists_updated=updated)
 ```
 
-- [ ] **Step 5: Reuse the public refresh helper in recommendations**
+- [x] **Step 5: Reuse the public refresh helper in recommendations**
 
 Modify `src/scrobble_recs/models/recommend.py`.
 
@@ -1149,7 +1211,7 @@ Delete the private `_refresh_artist_listening_scores` function and remove now-un
 from scrobble_recs.models.knownness import ArtistListeningInput, compute_artist_listening_scores
 ```
 
-- [ ] **Step 6: Add the build-profile CLI command**
+- [x] **Step 6: Add the build-profile CLI command**
 
 Modify `src/scrobble_recs/cli.py`.
 
@@ -1178,7 +1240,7 @@ def build_profile_command(
     console.print(f"artists updated: {stats.artists_updated}")
 ```
 
-- [ ] **Step 7: Run profile and recommendation tests**
+- [x] **Step 7: Run profile and recommendation tests**
 
 Run:
 
@@ -1192,14 +1254,77 @@ Expected:
 passed
 ```
 
-- [ ] **Step 8: Commit build-profile work**
+- [x] **Step 8: Expand build-profile to full local profile behavior**
 
-Run:
+Human decision: Option B, require full build-profile behavior now rather than
+committing the narrow listening-score-only implementation.
 
-```bash
-git add src/scrobble_recs/models/listening.py src/scrobble_recs/models/recommend.py src/scrobble_recs/cli.py tests/test_profile.py tests/test_cli.py
-git commit -m "feat: add local build-profile command"
-```
+Implemented:
+
+- Added `tag_profile` and `profile_cluster` persistence in
+  `src/scrobble_recs/sql/005_profile.sql`.
+- Added `src/scrobble_recs/models/profile_builder.py` as the public local
+  profile builder.
+- `build_profile()` refreshes artist listening scores, selects local seed
+  artists using configured seed limits and min scrobbles, derives normalized
+  tag weights from local `artist_tag` rows for selected seeds, and persists
+  deterministic tag-based genre clusters with inspectable JSON payloads.
+- Review fix: `profile_cluster.cluster_key` now uses
+  `source:readable-slug:stable-tag-hash` so distinct tags that slugify to the
+  same value still persist as separate clusters.
+- `scrobble-recs build-profile --config ...` now prints artist, tag weight,
+  and genre cluster counts.
+
+- [x] **Step 9: Parent gate review / commit decision**
+
+Task 5 checkpoint notes:
+
+- Human decision on resume: Option A approved on 2026-06-05.
+  `profile_cluster` is approved as the durable storage contract for §7 genre
+  clusters, including the columns and indexes in `005_profile.sql`,
+  inspectable JSON evidence payloads, deterministic one-tag-per-cluster
+  baseline behavior, and collision-safe `source:readable-slug:stable-tag-hash`
+  keys.
+- Deviation: `build-profile` uses `datetime.now(tz=UTC).replace(tzinfo=None)`
+  instead of `datetime.utcnow()` to keep naive UTC behavior without Python 3.12
+  deprecation warnings.
+- Deviation: `refresh_artist_listening_scores()` also updates
+  `artist_listening_fact.updated_at = current_timestamp`, preserving the
+  previous recommendation refresh behavior that the plan's extracted helper
+  omitted.
+- Verified red:
+  `python -m pytest tests/test_profile.py::test_refresh_artist_listening_scores_updates_weights_for_build_profile tests/test_cli.py::test_build_profile_command_refreshes_local_scores -v`
+  failed before implementation with missing `scrobble_recs.models.listening`.
+- Verified green:
+  `python -m pytest tests/test_profile.py tests/test_recommend.py tests/test_cli.py::test_build_profile_command_refreshes_local_scores -v`
+  passed with 38 tests.
+- Option B red verification:
+  `python -m pytest tests/test_profile.py::test_build_profile_persists_tag_profile_and_genre_clusters tests/test_cli.py::test_build_profile_command_prints_profile_weight_counts -v`
+  failed before implementation with missing `scrobble_recs.models.profile_builder`
+  and missing CLI tag/cluster counts.
+- Option B green verification:
+  `python -m pytest tests/test_profile.py tests/test_recommend.py tests/test_cli.py::test_build_profile_command_refreshes_local_scores tests/test_cli.py::test_build_profile_command_prints_profile_weight_counts -v`
+  passed with 40 tests.
+- Review fix red verification:
+  `python -m pytest tests/test_profile.py::test_build_profile_persists_clusters_for_slug_colliding_tags -v`
+  failed before the fix with a duplicate `profile_cluster` key
+  `lastfm:post-punk`.
+- Review fix green verification:
+  `python -m pytest tests/test_profile.py tests/test_recommend.py tests/test_cli.py::test_build_profile_command_refreshes_local_scores tests/test_cli.py::test_build_profile_command_prints_profile_weight_counts tests/test_config.py::test_initialize_database_applies_initial_migration -v`
+  passed with 42 tests.
+- Spec review: APPROVED after the collision fix.
+- Code quality review: APPROVED.
+- Architecture gate verdict after resume: `severity: local-design`,
+  `continue: yes`. The prior architectural stop condition was resolved by the
+  recorded Option A approval.
+- Previous architecture gate verdict: `severity: architectural`,
+  `continue: no`. Execution paused before commit because `profile_cluster` was
+  a new durable schema contract not explicitly specified in the approved schema.
+- Required human decision: approve `profile_cluster` as the durable storage
+  contract for §7 genre clusters, including deterministic one-tag-per-cluster
+  baseline behavior and collision-safe keys, or require a different
+  representation before commit. Decision applied: Option A approved.
+- Commit status: gate permits Task 5 commit after Option A approval.
 
 ---
 
@@ -1209,7 +1334,7 @@ git commit -m "feat: add local build-profile command"
 - Create: `src/scrobble_recs/admin/doctor.py`
 - Test: `tests/test_admin_doctor.py`
 
-- [ ] **Step 1: Add failing doctor backend tests**
+- [x] **Step 1: Add failing doctor backend tests**
 
 Create `tests/test_admin_doctor.py`:
 
@@ -1320,7 +1445,7 @@ Add this import at the top:
 from datetime import datetime
 ```
 
-- [ ] **Step 2: Run doctor backend tests to verify they fail**
+- [x] **Step 2: Run doctor backend tests to verify they fail**
 
 Run:
 
@@ -1334,7 +1459,7 @@ Expected:
 ModuleNotFoundError: No module named 'scrobble_recs.admin.doctor'
 ```
 
-- [ ] **Step 3: Implement doctor diagnostics**
+- [x] **Step 3: Implement doctor diagnostics**
 
 Create `src/scrobble_recs/admin/doctor.py`:
 
@@ -1481,7 +1606,7 @@ def _import_stats_check(conn: DuckDBPyConnection) -> DiagnosticCheck:
     )
 ```
 
-- [ ] **Step 4: Run doctor backend tests to verify they pass**
+- [x] **Step 4: Run doctor backend tests to verify they pass**
 
 Run:
 
@@ -1495,7 +1620,7 @@ Expected:
 3 passed
 ```
 
-- [ ] **Step 5: Commit doctor backend**
+- [x] **Step 5: Commit doctor backend**
 
 Run:
 
@@ -1503,6 +1628,31 @@ Run:
 git add src/scrobble_recs/admin/doctor.py tests/test_admin_doctor.py
 git commit -m "feat: add doctor diagnostics backend"
 ```
+
+Task 6 checkpoint notes:
+
+- Implementer status: DONE_WITH_CONCERNS.
+- Verified red:
+  `python -m pytest tests/test_admin_doctor.py -v` failed before implementation
+  with `ModuleNotFoundError: No module named 'scrobble_recs.admin.doctor'`.
+- Verified green:
+  `python -m pytest tests/test_admin_doctor.py -v` passed with 3 tests.
+- Adjacent focused verification:
+  `python -m pytest tests/test_api_cache.py tests/test_import.py -v` passed
+  with 22 tests.
+- Changed-file lint verification:
+  `python -m ruff check src/scrobble_recs/admin/doctor.py tests/test_admin_doctor.py`
+  passed.
+- Spec review: APPROVED.
+- Code quality review: APPROVED; no findings. Residual untested branches are
+  bad CSV header, unwritable cache path, Last.fm disabled/configured states,
+  API cache error warning, and non-empty import stats.
+- Deviation: `run_doctor()` uses
+  `datetime.now(UTC).replace(tzinfo=None)` instead of `datetime.utcnow()` to
+  preserve naive UTC comparison behavior without Python 3.12 deprecation
+  warnings.
+- Architecture gate: severity `mechanical`, continue `yes`.
+- Commit status: gate permits Task 6 commit.
 
 ---
 
@@ -1512,7 +1662,7 @@ git commit -m "feat: add doctor diagnostics backend"
 - Modify: `src/scrobble_recs/cli.py`
 - Modify: `tests/test_cli.py`
 
-- [ ] **Step 1: Update doctor CLI tests for diagnostics**
+- [x] **Step 1: Update doctor CLI tests for diagnostics**
 
 Replace `test_doctor_command_runs_without_api_keys` in `tests/test_cli.py` with:
 
@@ -1551,7 +1701,7 @@ def test_doctor_command_exits_nonzero_when_csv_is_missing(tmp_path: Path) -> Non
     assert "missing" in result.output
 ```
 
-- [ ] **Step 2: Run doctor CLI tests to verify they fail**
+- [x] **Step 2: Run doctor CLI tests to verify they fail**
 
 Run:
 
@@ -1565,7 +1715,7 @@ Expected:
 AssertionError because the current doctor output is shallow and missing diagnostic lines
 ```
 
-- [ ] **Step 3: Wire doctor CLI to diagnostic backend**
+- [x] **Step 3: Wire doctor CLI to diagnostic backend**
 
 Modify `src/scrobble_recs/cli.py`.
 
@@ -1604,7 +1754,7 @@ def _print_diagnostic_check(check: DiagnosticCheck) -> None:
     console.print(f"{check.name}: {check.status.value} - {check.message}", soft_wrap=True)
 ```
 
-- [ ] **Step 4: Run CLI tests to verify they pass**
+- [x] **Step 4: Run CLI tests to verify they pass**
 
 Run:
 
@@ -1618,7 +1768,7 @@ Expected:
 passed
 ```
 
-- [ ] **Step 5: Commit doctor CLI hardening**
+- [x] **Step 5: Commit doctor CLI hardening**
 
 Run:
 
@@ -1626,6 +1776,25 @@ Run:
 git add src/scrobble_recs/cli.py tests/test_cli.py
 git commit -m "feat: harden doctor command"
 ```
+
+Task 7 checkpoint notes:
+
+- Implementer status: DONE.
+- Verified red:
+  `python -m pytest tests/test_cli.py::test_doctor_command_runs_without_api_keys tests/test_cli.py::test_doctor_command_exits_nonzero_when_csv_is_missing -v`
+  failed before implementation with the expected shallow doctor output and
+  missing CSV exit code behavior.
+- Verified green:
+  `python -m pytest tests/test_cli.py -v` passed with 24 tests.
+- Spec review: APPROVED.
+- Code quality review: APPROVED; no findings. Residual low risk: the tests do
+  not explicitly assert every diagnostic line from `run_doctor()`, but the CLI
+  loops over all checks.
+- Deviation: commit step intentionally not run because the controller requested
+  review/gate/commit ownership.
+- Architecture gate: severity `none`, continue `yes`.
+- Commit status: gate permits Task 7 commit.
+- Concerns: none.
 
 ---
 
@@ -1635,7 +1804,7 @@ git commit -m "feat: harden doctor command"
 - Modify: `src/scrobble_recs/cli.py`
 - Modify: `tests/test_cli.py`
 
-- [ ] **Step 1: Add failing resolve CLI tests**
+- [x] **Step 1: Add failing resolve CLI tests**
 
 Append these tests to `tests/test_cli.py`:
 
@@ -1661,7 +1830,7 @@ def test_resolve_command_rejects_unknown_source(tmp_path: Path) -> None:
     assert "only --source musicbrainz is supported" in result.output
 ```
 
-- [ ] **Step 2: Run resolve CLI tests to verify they fail**
+- [x] **Step 2: Run resolve CLI tests to verify they fail**
 
 Run:
 
@@ -1675,7 +1844,7 @@ Expected:
 No such command 'resolve'
 ```
 
-- [ ] **Step 3: Add local resolve boundary command**
+- [x] **Step 3: Add local resolve boundary command**
 
 Modify `src/scrobble_recs/cli.py`.
 
@@ -1723,7 +1892,7 @@ def _count_query(conn: DuckDBPyConnection, sql: str) -> int:
     return int(row[0] or 0)
 ```
 
-- [ ] **Step 4: Run resolve tests to verify they pass**
+- [x] **Step 4: Run resolve tests to verify they pass**
 
 Run:
 
@@ -1737,7 +1906,7 @@ Expected:
 2 passed
 ```
 
-- [ ] **Step 5: Commit resolve command boundary**
+- [x] **Step 5: Commit resolve command boundary**
 
 Run:
 
@@ -1745,6 +1914,35 @@ Run:
 git add src/scrobble_recs/cli.py tests/test_cli.py
 git commit -m "feat: add resolve command boundary"
 ```
+
+Task 8 checkpoint notes:
+
+- Implementer status: DONE.
+- Verified red:
+  `python -m pytest tests/test_cli.py::test_resolve_command_reports_musicbrainz_disabled_by_default tests/test_cli.py::test_resolve_command_rejects_unknown_source -v`
+  failed before implementation because Typer reported `No such command 'resolve'`.
+- Verified green:
+  `python -m pytest tests/test_cli.py::test_resolve_command_reports_musicbrainz_disabled_by_default tests/test_cli.py::test_resolve_command_rejects_unknown_source -v`
+  passed with 2 tests.
+- Additional verification:
+  `python -m pytest tests/test_cli.py -v` passed with 26 tests.
+- Code quality review initially requested stronger behavior coverage for the
+  local unresolved-artist count and the enabled MusicBrainz not-implemented
+  branch.
+- Review fix verification:
+  `python -m pytest tests/test_cli.py::test_resolve_command_reports_musicbrainz_disabled_by_default tests/test_cli.py::test_resolve_command_rejects_unknown_source tests/test_cli.py::test_resolve_command_reports_musicbrainz_enabled_not_implemented -v`
+  passed with 3 tests.
+- Review fix full CLI verification:
+  `python -m pytest tests/test_cli.py -v` passed with 27 tests.
+- Changed-file lint verification:
+  `python -m ruff check src/scrobble_recs/cli.py tests/test_cli.py` passed.
+- Spec review: APPROVED.
+- Code quality review: APPROVED after review fixes.
+- Deviation: commit step intentionally not run because the controller requested
+  review/gate/commit ownership.
+- Architecture gate: severity `none`, continue `yes`.
+- Commit status: gate permits Task 8 commit.
+- Concerns: none.
 
 ---
 
@@ -1754,7 +1952,7 @@ git commit -m "feat: add resolve command boundary"
 - Modify: `README.md`
 - Modify: `docs/implementation-log.md`
 
-- [ ] **Step 1: Run the full test suite**
+- [x] **Step 1: Run the full test suite**
 
 Run:
 
@@ -1768,7 +1966,7 @@ Expected:
 passed
 ```
 
-- [ ] **Step 2: Run ruff check**
+- [x] **Step 2: Run ruff check**
 
 Run:
 
@@ -1782,7 +1980,7 @@ Expected:
 All checks passed
 ```
 
-- [ ] **Step 3: Run ruff format check**
+- [x] **Step 3: Run ruff format check**
 
 Run:
 
@@ -1796,7 +1994,7 @@ Expected:
 already formatted
 ```
 
-- [ ] **Step 4: Run mypy**
+- [x] **Step 4: Run mypy**
 
 Run:
 
@@ -1810,7 +2008,7 @@ Expected:
 Success: no issues found
 ```
 
-- [ ] **Step 5: Verify admin commands through the CLI**
+- [x] **Step 5: Verify admin commands through the CLI**
 
 Run:
 
@@ -1830,7 +2028,7 @@ build-profile prints Profile refreshed
 resolve prints unresolved artists and disabled/not-implemented status
 ```
 
-- [ ] **Step 6: Update README**
+- [x] **Step 6: Update README**
 
 Update `README.md` so the "How To Use It" section includes:
 
@@ -1878,7 +2076,7 @@ the configured maximum and falls back to a stale successful cache entry when one
 exists. Tests cover this behavior with mocked HTTP; they do not call Last.fm.
 ```
 
-- [ ] **Step 7: Update implementation log**
+- [x] **Step 7: Update implementation log**
 
 Append this entry to `docs/implementation-log.md`:
 
@@ -1913,7 +2111,7 @@ Verified:
 - `python -m scrobble_recs resolve --config config.example.json --source musicbrainz`
 ```
 
-- [ ] **Step 8: Commit docs and verification**
+- [x] **Step 8: Commit docs and verification**
 
 Run:
 
@@ -1921,6 +2119,47 @@ Run:
 git add README.md docs/implementation-log.md
 git commit -m "docs: record cli admin hardening"
 ```
+
+Task 9 checkpoint notes:
+
+- Full test suite: `python -m pytest` passed with 201 tests.
+- Ruff check: `python -m ruff check .` passed.
+- Ruff format check initially failed on seven files, so
+  `python -m ruff format .` was run. The only content diff left by formatting
+  is in `tests/test_lastfm_client.py`; other modified markers are line-ending
+  refresh noise.
+- Full verification after formatting:
+  `python -m pytest` passed with 201 tests,
+  `python -m ruff check .` passed,
+  `python -m ruff format --check .` reported 49 files already formatted, and
+  `python -m mypy src` succeeded with no issues in 31 source files.
+- CLI smoke verification used `$env:PYTHONPATH='src'` so `python -m
+  scrobble_recs` resolved to this worktree source instead of an older installed
+  package.
+- CLI smoke verification:
+  `python -m scrobble_recs init --config ./.tmp-admin-hardening/config.json --force`
+  printed Config, Database, Cache, and Log paths.
+- CLI smoke verification:
+  `python -m scrobble_recs doctor --config ./.tmp-admin-hardening/config.json`
+  printed diagnostic lines and exited 1 for the true missing CSV skeleton error.
+- CLI smoke verification:
+  `python -m scrobble_recs doctor --config config.example.json` printed
+  diagnostic lines and exited 0.
+- CLI smoke verification:
+  `python -m scrobble_recs build-profile --config config.example.json` printed
+  `Profile refreshed`.
+- CLI smoke verification:
+  `python -m scrobble_recs resolve --config config.example.json --source musicbrainz`
+  printed unresolved artist count and MusicBrainz disabled status.
+- Docs updated: `README.md` and `docs/implementation-log.md`.
+- Deviation: Task 9 includes the `tests/test_lastfm_client.py` formatting
+  cleanup required to satisfy `ruff format --check`.
+- Spec review: APPROVED.
+- Code quality review: APPROVED; no findings. Commit should remain
+  path-limited to the four intended Task 9 files because the worktree also
+  reports line-ending noise and an unrelated untracked pause file.
+- Architecture gate: severity `mechanical`, continue `yes`.
+- Commit status: gate permits Task 9 commit.
 
 ---
 

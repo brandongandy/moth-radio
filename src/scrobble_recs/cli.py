@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, cast
 
@@ -10,6 +11,8 @@ from rich.console import Console
 from rich.markup import escape
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn
 
+from scrobble_recs.admin.doctor import DiagnosticCheck, run_doctor
+from scrobble_recs.admin.init import initialize_project
 from scrobble_recs.config import ScrobbleRecsConfig, load_config
 from scrobble_recs.db import initialize_database
 from scrobble_recs.enrichment.lastfm import (
@@ -20,6 +23,7 @@ from scrobble_recs.enrichment.lastfm import (
 from scrobble_recs.export import ExportFormat, export_recommendations
 from scrobble_recs.importers.lastfm_csv import ImportStats, get_import_stats, import_lastfm_csv
 from scrobble_recs.models.feedback import record_feedback_event, rerank_recommendation_run
+from scrobble_recs.models.profile_builder import build_profile
 from scrobble_recs.models.recommend import (
     RecommendationProgress,
     RecommendationStats,
@@ -44,6 +48,26 @@ _RECOMMENDATION_PHASE_LABELS = {
     "build_explanations": "Build explanations",
     "persist_run": "Persist run",
 }
+
+
+@app.command("init")
+def init_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Overwrite an existing config file."),
+    ] = False,
+) -> None:
+    try:
+        result = initialize_project(config, force=force)
+    except FileExistsError as exc:
+        console.print(f"Error: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"Config: {result.config_path}", soft_wrap=True)
+    console.print(f"Database: {result.db_path}", soft_wrap=True)
+    console.print(f"Cache: {result.cache_dir}", soft_wrap=True)
+    console.print(f"Log: {result.log_path}", soft_wrap=True)
 
 
 @app.command("import")
@@ -77,6 +101,25 @@ def import_command(
     _print_stats(stats)
 
 
+@app.command("build-profile")
+def build_profile_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+) -> None:
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        stats = build_profile(
+            conn, resolved_config, as_of=datetime.now(tz=UTC).replace(tzinfo=None)
+        )
+    finally:
+        conn.close()
+
+    console.print("Profile refreshed")
+    console.print(f"artists updated: {stats.artists_updated}")
+    console.print(f"tag weights: {stats.tag_weights}")
+    console.print(f"genre clusters: {stats.genre_clusters}")
+
+
 @app.command("doctor")
 def doctor_command(
     config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
@@ -84,18 +127,16 @@ def doctor_command(
     resolved_config = load_config(config)
     conn = initialize_database(resolved_config)
     try:
+        result = run_doctor(resolved_config, conn)
         stats = get_import_stats(conn)
     finally:
         conn.close()
 
-    console.print("Config: ok")
-    console.print("Database: ok")
-    if resolved_config.input.lastfm_csv.exists():
-        console.print("CSV: ok")
-    else:
-        console.print(f"CSV: missing at {resolved_config.input.lastfm_csv}")
-    console.print("API keys: not required for import/doctor")
+    for check in result.checks:
+        _print_diagnostic_check(check)
     _print_stats(stats)
+    if result.has_errors:
+        raise typer.Exit(code=1)
 
 
 @app.command("enrich")
@@ -123,6 +164,40 @@ def enrich_command(
 
     console.print("Last.fm enrichment complete")
     _print_enrichment_stats(stats)
+
+
+@app.command("resolve")
+def resolve_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    source: Annotated[
+        str,
+        typer.Option("--source", help="Resolution source to run."),
+    ] = "musicbrainz",
+) -> None:
+    if source != "musicbrainz":
+        raise typer.BadParameter("only --source musicbrainz is supported")
+
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        unresolved_artists = _count_query(
+            conn,
+            """
+            SELECT count(*)
+            FROM artist
+            WHERE resolution_status IS NULL
+               OR resolution_status IN ('provisional', 'unresolved')
+            """,
+        )
+    finally:
+        conn.close()
+
+    console.print(f"unresolved artists: {unresolved_artists}")
+    if not resolved_config.apis.musicbrainz.enabled:
+        console.print("MusicBrainz resolution is disabled")
+        return
+    console.print("MusicBrainz resolution is not implemented in this version")
+    raise typer.Exit(code=1)
 
 
 @app.command("recommend")
@@ -270,6 +345,13 @@ def feedback_command(
         conn.close()
 
 
+def _count_query(conn: DuckDBPyConnection, sql: str) -> int:
+    row = conn.execute(sql).fetchone()
+    if row is None:
+        return 0
+    return int(row[0] or 0)
+
+
 def _print_stats(stats: ImportStats) -> None:
     console.print(f"raw scrobbles: {stats.raw_scrobbles}")
     console.print(f"clean scrobbles: {stats.scrobbles}")
@@ -277,6 +359,10 @@ def _print_stats(stats: ImportStats) -> None:
     console.print(f"distinct artists: {stats.distinct_artists}")
     console.print(f"distinct tracks: {stats.distinct_tracks}")
     console.print(f"null artist MBID scrobbles: {stats.null_artist_mbid_scrobbles}")
+
+
+def _print_diagnostic_check(check: DiagnosticCheck) -> None:
+    console.print(f"{check.name}: {check.status.value} - {check.message}", soft_wrap=True)
 
 
 def _print_enrichment_stats(stats: LastFmEnrichmentStats) -> None:

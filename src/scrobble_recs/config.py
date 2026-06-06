@@ -64,6 +64,7 @@ class InputConfig(BaseModel):
     timezone: str = "UTC"
     timestamp_column: str = "uts"
     csv_columns: list[str] = Field(default_factory=lambda: list(EXPECTED_CSV_COLUMNS))
+    near_duplicate_window_seconds: int = 0
 
     @field_validator("lastfm_csv", mode="before")
     @classmethod
@@ -82,6 +83,13 @@ class InputConfig(BaseModel):
     def csv_columns_must_match_contract(cls, value: list[str]) -> list[str]:
         if tuple(value) != EXPECTED_CSV_COLUMNS:
             raise ValueError(f"csv_columns must exactly match {list(EXPECTED_CSV_COLUMNS)}")
+        return value
+
+    @field_validator("near_duplicate_window_seconds")
+    @classmethod
+    def near_duplicate_window_must_be_non_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("near_duplicate_window_seconds must be non-negative")
         return value
 
 
@@ -269,6 +277,7 @@ def default_config_document() -> dict[str, Any]:
             "timezone": "UTC",
             "timestamp_column": "uts",
             "csv_columns": list(EXPECTED_CSV_COLUMNS),
+            "near_duplicate_window_seconds": 0,
         },
         "apis": {
             "lastfm": {

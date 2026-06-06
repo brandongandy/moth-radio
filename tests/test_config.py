@@ -202,6 +202,87 @@ def test_load_config_includes_lastfm_and_recommendation_defaults(tmp_path: Path)
     assert config.recommendation.min_seed_scrobbles == 3
 
 
+def test_load_config_includes_near_duplicate_default(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "scrobble-recs",
+                    "db_path": str(tmp_path / "db.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": str(tmp_path / "scrobbles.csv"),
+                    "timezone": "UTC",
+                    "timestamp_column": "uts",
+                    "csv_columns": list(EXPECTED_CSV_COLUMNS),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.input.near_duplicate_window_seconds == 0
+
+
+def test_load_config_accepts_and_validates_near_duplicate_window(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "scrobble-recs",
+                    "db_path": str(tmp_path / "db.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": str(tmp_path / "scrobbles.csv"),
+                    "timezone": "UTC",
+                    "timestamp_column": "uts",
+                    "csv_columns": list(EXPECTED_CSV_COLUMNS),
+                    "near_duplicate_window_seconds": 30,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.input.near_duplicate_window_seconds == 30
+
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "scrobble-recs",
+                    "db_path": str(tmp_path / "db.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": str(tmp_path / "scrobbles.csv"),
+                    "timezone": "UTC",
+                    "timestamp_column": "uts",
+                    "csv_columns": list(EXPECTED_CSV_COLUMNS),
+                    "near_duplicate_window_seconds": -1,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError) as exc_info:
+        load_config(config_path)
+
+    assert "near_duplicate_window_seconds must be non-negative" in str(exc_info.value)
+
+
 def test_lastfm_api_key_interpolates_from_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -365,6 +446,7 @@ def test_default_config_document_contains_spec_defaults() -> None:
     document = default_config_document()
 
     assert document["app"]["name"] == "scrobble-recs"
+    assert document["input"]["near_duplicate_window_seconds"] == 0
     assert document["apis"]["lastfm"]["api_key"] == "${LASTFM_API_KEY}"
     assert document["apis"]["lastfm"]["rate_limit_per_second"] == 2.0
     assert document["apis"]["musicbrainz"]["rate_limit_per_second"] == 1.0

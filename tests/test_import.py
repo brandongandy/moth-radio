@@ -134,6 +134,38 @@ def test_import_replaces_previous_import_tables_on_rerun(tmp_path: Path) -> None
     conn.close()
 
 
+def test_import_warns_on_utc_time_mismatch_without_dropping_row(tmp_path: Path) -> None:
+    csv_path = write_csv(
+        tmp_path / "timestamp_mismatch.csv",
+        ["1704067200,2024-01-02 00:00:00,The Cure,mbid-cure,Disintegration,,Pictures of You,"],
+    )
+    config = load_config(write_config(tmp_path, csv_path))
+    conn = initialize_database(config)
+
+    stats = import_lastfm_csv(conn, csv_path)
+
+    assert stats.scrobbles == 1
+    assert stats.import_warnings == 1
+    warning_rows = conn.execute(
+        """
+        SELECT import_row_number, warning_code, severity, message, CAST(evidence AS VARCHAR)
+        FROM import_warning
+        ORDER BY warning_id
+        """
+    ).fetchall()
+    assert warning_rows == [
+        (
+            1,
+            "timestamp_mismatch",
+            "warning",
+            "utc_time does not match uts",
+            '{"uts":1704067200,"utc_time":"2024-01-02 00:00:00","played_at":"2024-01-01 00:00:00"}',
+        )
+    ]
+
+    conn.close()
+
+
 def test_import_database_statement_count_is_bounded_for_many_rows(tmp_path: Path) -> None:
     rows = [
         ",".join(

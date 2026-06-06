@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -22,9 +23,11 @@ class ImportStats:
     raw_scrobbles: int
     scrobbles: int
     duplicate_scrobbles: int
+    near_duplicate_scrobbles: int
     distinct_artists: int
     distinct_tracks: int
     null_artist_mbid_scrobbles: int
+    import_warnings: int
 
 
 _STAGING_COLUMNS = (
@@ -52,18 +55,39 @@ _STAGING_COLUMNS = (
     "is_duplicate",
 )
 _STAGING_TABLE = "_scrobble_recs_import_stage"
+_WARNING_COLUMNS = (
+    "import_row_number",
+    "warning_code",
+    "severity",
+    "message",
+    "evidence",
+)
+_WARNING_STAGE_TABLE = "_scrobble_recs_import_warning_stage"
 
 
-def import_lastfm_csv(conn: DuckDBPyConnection, csv_path: Path) -> ImportStats:
+def import_lastfm_csv(
+    conn: DuckDBPyConnection,
+    csv_path: Path,
+    *,
+    near_duplicate_window_seconds: int = 0,
+) -> ImportStats:
     with TemporaryDirectory(prefix="scrobble_recs_import_") as temp_dir:
         staging_csv = Path(temp_dir) / "validated_lastfm_import.csv"
-        _write_validated_import_csv(csv_path, staging_csv)
+        warning_csv = Path(temp_dir) / "validated_lastfm_import_warnings.csv"
+        _write_validated_import_csv(
+            csv_path,
+            staging_csv,
+            warning_csv,
+            near_duplicate_window_seconds=near_duplicate_window_seconds,
+        )
         conn.execute("BEGIN TRANSACTION")
         try:
             _create_import_stage(conn, staging_csv)
+            _create_warning_stage(conn, warning_csv)
             _replace_import_tables(conn)
             _insert_raw_scrobbles(conn)
             _insert_scrobbles(conn)
+            _insert_import_warnings(conn)
             _insert_provisional_artists(conn)
             _rebuild_artist_listening_facts(conn)
         except Exception:
@@ -71,6 +95,7 @@ def import_lastfm_csv(conn: DuckDBPyConnection, csv_path: Path) -> ImportStats:
             raise
         conn.execute("COMMIT")
         conn.execute(f"DROP TABLE IF EXISTS {_STAGING_TABLE}")
+        conn.execute(f"DROP TABLE IF EXISTS {_WARNING_STAGE_TABLE}")
     return get_import_stats(conn)
 
 
@@ -81,6 +106,14 @@ def get_import_stats(conn: DuckDBPyConnection) -> ImportStats:
         duplicate_scrobbles=_query_int(
             conn,
             "SELECT count(*) FROM scrobble WHERE is_duplicate",
+        ),
+        near_duplicate_scrobbles=_query_int(
+            conn,
+            """
+            SELECT count(*)
+            FROM import_warning
+            WHERE warning_code = 'near_duplicate_scrobble'
+            """,
         ),
         distinct_artists=_query_int(
             conn,
@@ -98,25 +131,49 @@ def get_import_stats(conn: DuckDBPyConnection) -> ImportStats:
             WHERE artist_mbid_raw IS NULL OR trim(artist_mbid_raw) = ''
             """,
         ),
+        import_warnings=_query_int(conn, "SELECT count(*) FROM import_warning"),
     )
 
 
-def _write_validated_import_csv(csv_path: Path, staging_csv: Path) -> None:
+def _write_validated_import_csv(
+    csv_path: Path,
+    staging_csv: Path,
+    warning_csv: Path,
+    *,
+    near_duplicate_window_seconds: int,
+) -> None:
     with csv_path.open("r", encoding="utf-8", newline="") as file:
         reader = csv.DictReader(file, strict=True)
         staging_csv.parent.mkdir(parents=True, exist_ok=True)
-        with staging_csv.open("w", encoding="utf-8", newline="") as output_file:
+        with (
+            staging_csv.open("w", encoding="utf-8", newline="") as output_file,
+            warning_csv.open("w", encoding="utf-8", newline="") as warning_file,
+        ):
             writer = csv.DictWriter(output_file, fieldnames=list(_STAGING_COLUMNS))
+            warning_writer = csv.DictWriter(warning_file, fieldnames=list(_WARNING_COLUMNS))
             writer.writeheader()
+            warning_writer.writeheader()
 
             seen_scrobbles: set[tuple[int, str, str, str]] = set()
-            _write_validated_rows(reader, writer, seen_scrobbles)
+            seen_near_duplicates: dict[tuple[str, str], list[tuple[int, int]]] = {}
+            _write_validated_rows(
+                reader,
+                writer,
+                warning_writer,
+                seen_scrobbles,
+                seen_near_duplicates,
+                near_duplicate_window_seconds=near_duplicate_window_seconds,
+            )
 
 
 def _write_validated_rows(
     reader: csv.DictReader[str],
     writer: csv.DictWriter[str],
+    warning_writer: csv.DictWriter[str],
     seen_scrobbles: set[tuple[int, str, str, str]],
+    seen_near_duplicates: dict[tuple[str, str], list[tuple[int, int]]],
+    *,
+    near_duplicate_window_seconds: int,
 ) -> None:
     try:
         if reader.fieldnames != list(EXPECTED_COLUMNS):
@@ -145,9 +202,17 @@ def _write_validated_rows(
 
             played_at = _parse_uts(cleaned["uts"], row_index)
             uts = int(cleaned["uts"])
+            _warn_on_utc_time_mismatch(
+                warning_writer,
+                import_row_number=row_index - 1,
+                uts=uts,
+                utc_time=cleaned["utc_time"],
+                played_at=played_at,
+            )
             artist_key = normalize_key(cleaned["artist"])
             album_key = normalize_key(cleaned["album"])
             track_key = normalize_key(cleaned["track"])
+            _ = seen_near_duplicates, near_duplicate_window_seconds
             duplicate_key = (uts, artist_key, track_key, album_key)
             is_duplicate = duplicate_key in seen_scrobbles
             seen_scrobbles.add(duplicate_key)
@@ -183,6 +248,62 @@ def _write_validated_rows(
         raise ValueError(f"Malformed CSV at line {line_number}: {exc}") from exc
 
 
+def _warn_on_utc_time_mismatch(
+    warning_writer: csv.DictWriter[str],
+    *,
+    import_row_number: int,
+    uts: int,
+    utc_time: str,
+    played_at: datetime,
+) -> None:
+    if utc_time == "":
+        return
+
+    try:
+        parsed_utc_time = datetime.strptime(utc_time, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        _write_warning(
+            warning_writer,
+            import_row_number=import_row_number,
+            warning_code="invalid_utc_time",
+            message="utc_time is not formatted as YYYY-MM-DD HH:MM:SS",
+            evidence={"uts": uts, "utc_time": utc_time},
+        )
+        return
+
+    if parsed_utc_time != played_at:
+        _write_warning(
+            warning_writer,
+            import_row_number=import_row_number,
+            warning_code="timestamp_mismatch",
+            message="utc_time does not match uts",
+            evidence={
+                "uts": uts,
+                "utc_time": utc_time,
+                "played_at": played_at.isoformat(sep=" "),
+            },
+        )
+
+
+def _write_warning(
+    warning_writer: csv.DictWriter[str],
+    *,
+    import_row_number: int,
+    warning_code: str,
+    message: str,
+    evidence: dict[str, object],
+) -> None:
+    warning_writer.writerow(
+        {
+            "import_row_number": import_row_number,
+            "warning_code": warning_code,
+            "severity": "warning",
+            "message": message,
+            "evidence": json.dumps(evidence, separators=(",", ":")),
+        }
+    )
+
+
 def _create_import_stage(conn: DuckDBPyConnection, staging_csv: Path) -> None:
     conn.execute(f"DROP TABLE IF EXISTS {_STAGING_TABLE}")
     conn.execute(
@@ -214,6 +335,23 @@ def _create_import_stage(conn: DuckDBPyConnection, staging_csv: Path) -> None:
         FROM read_csv(?, header=true, all_varchar=true, nullstr='\\0')
         """,
         [staging_csv.as_posix()],
+    )
+
+
+def _create_warning_stage(conn: DuckDBPyConnection, warning_csv: Path) -> None:
+    conn.execute(f"DROP TABLE IF EXISTS {_WARNING_STAGE_TABLE}")
+    conn.execute(
+        f"""
+        CREATE TEMP TABLE {_WARNING_STAGE_TABLE} AS
+        SELECT
+            CAST(import_row_number AS UBIGINT) AS import_row_number,
+            warning_code,
+            severity,
+            message,
+            evidence
+        FROM read_csv(?, header=true, all_varchar=true, nullstr='\\0')
+        """,
+        [warning_csv.as_posix()],
     )
 
 
@@ -307,14 +445,47 @@ def _insert_scrobbles(conn: DuckDBPyConnection) -> None:
 
 
 def _replace_import_tables(conn: DuckDBPyConnection) -> None:
-    conn.execute("DELETE FROM enrichment_work")
-    conn.execute("DELETE FROM artist_similarity_edge")
-    conn.execute("DELETE FROM artist_tag")
-    conn.execute("DELETE FROM tag_top_artist")
-    conn.execute("DELETE FROM artist_listening_fact")
-    conn.execute("DELETE FROM artist")
-    conn.execute("DELETE FROM scrobble")
-    conn.execute("DELETE FROM raw_scrobble")
+    conn.execute(
+        """
+        DELETE FROM enrichment_work;
+        DELETE FROM artist_similarity_edge;
+        DELETE FROM artist_tag;
+        DELETE FROM tag_top_artist;
+        DELETE FROM artist_listening_fact;
+        DELETE FROM track;
+        DELETE FROM artist;
+        DELETE FROM scrobble;
+        DELETE FROM raw_scrobble;
+        DELETE FROM import_warning;
+        """
+    )
+
+
+def _insert_import_warnings(conn: DuckDBPyConnection) -> None:
+    next_id = _next_id(conn, "import_warning", "warning_id")
+    conn.execute(
+        """
+        INSERT INTO import_warning (
+            warning_id,
+            import_row_number,
+            warning_code,
+            severity,
+            message,
+            evidence
+        )
+        SELECT
+            ? + row_number() OVER (ORDER BY import_row_number, warning_code, message) - 1
+                AS warning_id,
+            import_row_number,
+            warning_code,
+            severity,
+            message,
+            CAST(evidence AS JSON) AS evidence
+        FROM _scrobble_recs_import_warning_stage
+        ORDER BY import_row_number, warning_code, message
+        """,
+        [next_id],
+    )
 
 
 def _insert_provisional_artists(conn: DuckDBPyConnection) -> None:

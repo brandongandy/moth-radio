@@ -367,6 +367,117 @@ def test_import_does_not_trust_conflicting_artist_mbids(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_import_creates_provisional_track_entities(tmp_path: Path) -> None:
+    fixture = Path("tests/fixtures/tiny_lastfm_export.csv")
+    config = load_config(write_config(tmp_path, fixture))
+    conn = initialize_database(config)
+
+    stats = import_lastfm_csv(conn, fixture)
+
+    track_rows = conn.execute(
+        """
+        SELECT a.canonical_name, t.canonical_title, t.track_key, t.musicbrainz_recording_mbid,
+               t.resolution_status, t.resolution_confidence
+        FROM track t
+        JOIN artist a ON a.artist_id = t.artist_id
+        ORDER BY a.canonical_name, t.canonical_title
+        """
+    ).fetchall()
+
+    assert stats.distinct_tracks == 5
+    assert track_rows == [
+        (
+            "Cocteau Twins",
+            "Cherry-coloured Funk",
+            "cherry coloured funk",
+            None,
+            "provisional_name",
+            0.0,
+        ),
+        ("Pixies", "Debaser", "debaser", None, "provisional_name", 0.0),
+        ("Slowdive", "Alison", "alison", None, "provisional_name", 0.0),
+        ("The Cure", "Boys Don't Cry", "boys don t cry", None, "provisional_name", 0.0),
+        (
+            "The Cure",
+            "Pictures of You",
+            "pictures of you",
+            None,
+            "provisional_name",
+            0.0,
+        ),
+    ]
+
+    conn.close()
+
+
+def test_import_keeps_consistent_track_mbid_on_provisional_track(tmp_path: Path) -> None:
+    csv_path = write_csv(
+        tmp_path / "consistent_track_mbid.csv",
+        [
+            "1704067200,2024-01-01 00:00:00,The Cure,mbid-cure,"
+            "Disintegration,,Pictures of You,recording-a",
+            "1704153600,2024-01-02 00:00:00,the cure,mbid-cure,"
+            "Disintegration,,Pictures of You,recording-a",
+        ],
+    )
+    config = load_config(write_config(tmp_path, csv_path))
+    conn = initialize_database(config)
+
+    stats = import_lastfm_csv(conn, csv_path)
+
+    track_row = conn.execute(
+        """
+        SELECT canonical_title, musicbrainz_recording_mbid, resolution_status, resolution_confidence
+        FROM track
+        WHERE track_key = 'pictures of you'
+        """
+    ).fetchone()
+
+    assert stats.import_warnings == 0
+    assert track_row == ("Pictures of You", "recording-a", "provisional_mbid", 0.5)
+    assert conn.execute("SELECT count(*) FROM import_warning").fetchone() == (0,)
+
+    conn.close()
+
+
+def test_import_does_not_trust_conflicting_track_mbids(tmp_path: Path) -> None:
+    csv_path = write_csv(
+        tmp_path / "conflicting_track_mbid.csv",
+        [
+            "1704067200,2024-01-01 00:00:00,The Cure,mbid-cure,"
+            "Disintegration,,Pictures of You,recording-a",
+            "1704153600,2024-01-02 00:00:00,The Cure,mbid-cure,"
+            "Disintegration,,Pictures of You,recording-b",
+        ],
+    )
+    config = load_config(write_config(tmp_path, csv_path))
+    conn = initialize_database(config)
+
+    stats = import_lastfm_csv(conn, csv_path)
+
+    track_row = conn.execute(
+        """
+        SELECT canonical_title, musicbrainz_recording_mbid, resolution_status, resolution_confidence
+        FROM track
+        """
+    ).fetchone()
+    warnings = conn.execute(
+        """
+        SELECT warning_code, message
+        FROM import_warning
+        ORDER BY warning_id
+        """
+    ).fetchall()
+
+    assert stats.import_warnings == 1
+    assert track_row == ("Pictures of You", None, "provisional_mbid_conflict", 0.0)
+    assert warnings == [
+        ("track_mbid_conflict", "artist_key and track_key have multiple supplied track MBIDs")
+    ]
+
+    conn.close()
+
+
 def test_import_ignores_duplicate_artist_mbids_for_provisional_identity(
     tmp_path: Path,
 ) -> None:

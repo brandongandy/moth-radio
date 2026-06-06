@@ -823,7 +823,7 @@ git commit -m "feat: persist import warnings"
 - Modify: `tests/test_import.py`
 - Modify: `tests/test_cli.py`
 
-- [ ] **Step 1: Add failing near-duplicate tests**
+- [x] **Step 1: Add failing near-duplicate tests**
 
 Append to `tests/test_import.py`:
 
@@ -902,7 +902,7 @@ def test_import_marks_configured_near_duplicates_without_deleting_rows(tmp_path:
     conn.close()
 ```
 
-- [ ] **Step 2: Run near-duplicate tests to verify they fail**
+- [x] **Step 2: Run near-duplicate tests to verify they fail**
 
 Run:
 
@@ -916,7 +916,7 @@ Expected:
 AssertionError: assert 0 == 1
 ```
 
-- [ ] **Step 3: Implement near-duplicate detection**
+- [x] **Step 3: Implement near-duplicate detection**
 
 In `_write_validated_rows()`, replace duplicate computation with:
 
@@ -996,7 +996,7 @@ def _print_stats(stats: ImportStats) -> None:
     console.print(f"import warnings: {stats.import_warnings}")
 ```
 
-- [ ] **Step 4: Add CLI dispatch coverage**
+- [x] **Step 4: Add CLI dispatch coverage**
 
 Add this test to `tests/test_cli.py`:
 
@@ -1051,7 +1051,7 @@ def test_import_command_passes_near_duplicate_window(tmp_path: Path, monkeypatch
 
 Use the existing `write_csv`, `CliRunner`, `app`, `ImportStats`, and `EXPECTED_CSV_COLUMNS` imports or add them at the top of `tests/test_cli.py` if missing.
 
-- [ ] **Step 5: Run near-duplicate and CLI tests**
+- [x] **Step 5: Run near-duplicate and CLI tests**
 
 Run:
 
@@ -1064,6 +1064,11 @@ Expected:
 ```text
 3 passed
 ```
+
+Deviation: the import tests assert persisted row order with `played_at` because `scrobble`
+does not store `uts`; near-duplicate warning evidence is also asserted. Review follow-up added
+coverage for blank normalized artist/track keys and documented that near-duplicate canonical
+rows follow CSV import order, not chronological order.
 
 - [ ] **Step 6: Commit near-duplicate behavior**
 

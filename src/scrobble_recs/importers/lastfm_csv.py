@@ -212,10 +212,31 @@ def _write_validated_rows(
             artist_key = normalize_key(cleaned["artist"])
             album_key = normalize_key(cleaned["album"])
             track_key = normalize_key(cleaned["track"])
-            _ = seen_near_duplicates, near_duplicate_window_seconds
             duplicate_key = (uts, artist_key, track_key, album_key)
-            is_duplicate = duplicate_key in seen_scrobbles
+            is_exact_duplicate = duplicate_key in seen_scrobbles
             seen_scrobbles.add(duplicate_key)
+            is_near_duplicate = _is_near_duplicate(
+                seen_near_duplicates,
+                row_number=row_index - 1,
+                uts=uts,
+                artist_key=artist_key,
+                track_key=track_key,
+                near_duplicate_window_seconds=near_duplicate_window_seconds,
+            )
+            if is_near_duplicate and not is_exact_duplicate:
+                _write_warning(
+                    warning_writer,
+                    import_row_number=row_index - 1,
+                    warning_code="near_duplicate_scrobble",
+                    message="same artist and track within configured near-duplicate window",
+                    evidence={
+                        "uts": uts,
+                        "artist_key": artist_key,
+                        "track_key": track_key,
+                        "window_seconds": near_duplicate_window_seconds,
+                    },
+                )
+            is_duplicate = is_exact_duplicate or is_near_duplicate
 
             writer.writerow(
                 {
@@ -246,6 +267,30 @@ def _write_validated_rows(
     except csv.Error as exc:
         line_number = max(reader.line_num + 1, 1)
         raise ValueError(f"Malformed CSV at line {line_number}: {exc}") from exc
+
+
+def _is_near_duplicate(
+    seen_near_duplicates: dict[tuple[str, str], list[tuple[int, int]]],
+    *,
+    row_number: int,
+    uts: int,
+    artist_key: str,
+    track_key: str,
+    near_duplicate_window_seconds: int,
+) -> bool:
+    if near_duplicate_window_seconds <= 0:
+        return False
+    if artist_key == "" or track_key == "":
+        return False
+
+    key = (artist_key, track_key)
+    previous_scrobbles = seen_near_duplicates.setdefault(key, [])
+    is_duplicate = any(
+        abs(uts - previous_uts) <= near_duplicate_window_seconds
+        for previous_uts, _previous_row_number in previous_scrobbles
+    )
+    previous_scrobbles.append((uts, row_number))
+    return is_duplicate
 
 
 def _warn_on_utc_time_mismatch(

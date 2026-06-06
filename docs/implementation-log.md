@@ -813,3 +813,24 @@ Verified:
 - `python -m ruff check .`
 - `python -m ruff format --check .`
 - `python -m mypy src`
+
+## 2026-06-06: Import and local entity completeness
+
+Changed:
+
+- Added local `track` entities for distinct imported artist/track pairs.
+- Added persisted `import_warning` rows for non-fatal import data quality issues.
+- Added `input.near_duplicate_window_seconds` with near-duplicate marking disabled by default.
+- Added configured near-duplicate marking for same artist and track within the configured window.
+- Added timestamp mismatch warnings for `utc_time` values that disagree with `uts`.
+- Changed provisional artist and track MBID assignment to require locally consistent supplied MBIDs.
+- Added artist and track MBID conflict warnings.
+- Updated doctor and CLI import stats to surface import warnings.
+
+Verified:
+
+- `python -m pytest tests/test_import.py tests/test_config.py tests/test_admin_doctor.py tests/test_cli.py -v`
+- `python -m pytest`
+- `python -m ruff check .`
+- `python -m ruff format --check .`
+- `python -m mypy src`

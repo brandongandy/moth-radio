@@ -1598,7 +1598,7 @@ Expected:
 all import tests pass
 ```
 
-- [ ] **Step 6: Commit track entities**
+- [x] **Step 6: Commit track entities**
 
 Run:
 
@@ -1617,7 +1617,7 @@ git commit -m "feat: create provisional track entities on import"
 - Modify: `README.md`
 - Modify: `docs/implementation-log.md`
 
-- [ ] **Step 1: Add failing doctor warning test**
+- [x] **Step 1: Add failing doctor warning test**
 
 Append to `tests/test_admin_doctor.py`:
 
@@ -1655,7 +1655,7 @@ def test_run_doctor_reports_import_warnings(tmp_path: Path) -> None:
     assert checks["import_warnings"].message == "warnings=1"
 ```
 
-- [ ] **Step 2: Run doctor test to verify it fails**
+- [x] **Step 2: Run doctor test to verify it fails**
 
 Run:
 
@@ -1669,7 +1669,7 @@ Expected:
 KeyError: 'import_warnings'
 ```
 
-- [ ] **Step 3: Implement doctor warning check**
+- [x] **Step 3: Implement doctor warning check**
 
 Modify `run_doctor()` checks list:
 
@@ -1701,7 +1701,7 @@ def _import_warnings_check(conn: DuckDBPyConnection) -> DiagnosticCheck:
     )
 ```
 
-- [ ] **Step 4: Run focused tests**
+- [x] **Step 4: Run focused tests**
 
 Run:
 
@@ -1715,7 +1715,7 @@ Expected:
 all selected tests pass
 ```
 
-- [ ] **Step 5: Update README**
+- [x] **Step 5: Update README**
 
 Add this section near the import command documentation:
 
@@ -1746,7 +1746,7 @@ Near duplicates are marked with `scrobble.is_duplicate = true`; rows are not
 deleted from `raw_scrobble` or `scrobble`.
 ```
 
-- [ ] **Step 6: Update implementation log**
+- [x] **Step 6: Update implementation log**
 
 Append to `docs/implementation-log.md`:
 
@@ -1773,7 +1773,7 @@ Verified:
 - `python -m mypy src`
 ```
 
-- [ ] **Step 7: Run focused verification**
+- [x] **Step 7: Run focused verification**
 
 Run:
 
@@ -1787,7 +1787,7 @@ Expected:
 all selected tests pass
 ```
 
-- [ ] **Step 8: Run full verification**
+- [x] **Step 8: Run full verification**
 
 Run:
 
@@ -1807,7 +1807,7 @@ ruff format reports all files already formatted
 mypy reports Success: no issues found
 ```
 
-- [ ] **Step 9: Commit docs and verification**
+- [x] **Step 9: Commit docs and verification**
 
 Run:
 

@@ -68,6 +68,31 @@ The import command prints the configured log path before it starts, shows a
 terminal spinner while the CSV import is running, and writes import lifecycle
 messages to `app.log_path`.
 
+## Import Completeness
+
+Import keeps both raw rows and cleaned local entities. Each distinct normalized
+artist becomes a provisional `artist`, and each distinct normalized
+artist/track pair becomes a provisional `track`. Supplied MusicBrainz IDs are
+used only when they are consistent across matching local rows; conflicting
+artist or track MBIDs are ignored for provisional identity and recorded as
+local import warnings.
+
+The importer rejects malformed CSV structure, missing `uts`, missing `artist`,
+missing `track`, non-integer `uts`, duplicate header rows inside the file, and
+impossible timestamps. Non-fatal data quality issues such as `utc_time`
+mismatches, conflicting MBIDs, and configured near duplicates are stored in
+DuckDB in `import_warning` and shown by `doctor`.
+
+Near-duplicate marking is disabled by default. Enable the spec's 30-second
+rule by adding this to the config input block:
+
+```json
+"near_duplicate_window_seconds": 30
+```
+
+Near duplicates are marked with `scrobble.is_duplicate = true`; rows are not
+deleted from `raw_scrobble` or `scrobble`.
+
 Check local configuration and imported data:
 
 ```bash
@@ -75,9 +100,9 @@ scrobble-recs doctor --config config.example.json
 ```
 
 `doctor` validates the config, database path, CSV header, cache path, API key
-state, rate-limit settings, import counts, and API cache state. Missing Last.fm
-keys are warnings because import, local browsing, and persisted recommendation
-runs do not require live APIs.
+state, rate-limit settings, import counts, import warning counts, and API cache
+state. Missing Last.fm keys are warnings because import, local browsing, and
+persisted recommendation runs do not require live APIs.
 
 Refresh local listening scores and profile tables without generating
 recommendations:

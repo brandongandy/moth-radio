@@ -61,6 +61,8 @@ def test_run_doctor_reports_ok_local_state(tmp_path: Path) -> None:
     assert checks["cache"].status is DiagnosticStatus.OK
     assert checks["lastfm_api_key"].status is DiagnosticStatus.WARN
     assert checks["rate_limits"].status is DiagnosticStatus.OK
+    assert checks["import_warnings"].status is DiagnosticStatus.OK
+    assert checks["import_warnings"].message == "warnings=0"
 
 
 def test_run_doctor_reports_missing_csv_as_error(tmp_path: Path) -> None:
@@ -101,3 +103,36 @@ def test_run_doctor_includes_api_cache_summary(tmp_path: Path) -> None:
     assert checks["api_cache"].status is DiagnosticStatus.OK
     assert "entries=1" in checks["api_cache"].message
     assert "fresh=1" in checks["api_cache"].message
+
+
+def test_run_doctor_reports_import_warnings(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path))
+    conn = initialize_database(config)
+    try:
+        conn.execute(
+            """
+            INSERT INTO import_warning (
+                warning_id,
+                import_row_number,
+                warning_code,
+                severity,
+                message,
+                evidence
+            )
+            VALUES (
+                1,
+                2,
+                'timestamp_mismatch',
+                'warning',
+                'utc_time does not match uts',
+                '{}'
+            )
+            """
+        )
+        result = run_doctor(config, conn)
+    finally:
+        conn.close()
+
+    checks = {check.name: check for check in result.checks}
+    assert checks["import_warnings"].status is DiagnosticStatus.WARN
+    assert checks["import_warnings"].message == "warnings=1"

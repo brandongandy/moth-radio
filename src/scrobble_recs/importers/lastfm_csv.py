@@ -88,8 +88,10 @@ def import_lastfm_csv(
             _insert_raw_scrobbles(conn)
             _insert_scrobbles(conn)
             _insert_artist_mbid_conflict_warnings(conn)
+            _insert_track_mbid_conflict_warnings(conn)
             _insert_import_warnings(conn)
             _insert_provisional_artists(conn)
+            _insert_provisional_tracks(conn)
             _rebuild_artist_listening_facts(conn)
         except Exception:
             conn.execute("ROLLBACK")
@@ -535,7 +537,6 @@ def _insert_import_warnings(conn: DuckDBPyConnection) -> None:
 
 
 def _insert_artist_mbid_conflict_warnings(conn: DuckDBPyConnection) -> None:
-    next_id = _next_id(conn, "import_warning", "warning_id")
     conn.execute(
         """
         INSERT INTO import_warning (
@@ -546,7 +547,10 @@ def _insert_artist_mbid_conflict_warnings(conn: DuckDBPyConnection) -> None:
             message,
             evidence
         )
-        WITH conflicts AS (
+        WITH next_id AS (
+            SELECT coalesce(max(warning_id), 0) AS base_id FROM import_warning
+        ),
+        conflicts AS (
             SELECT
                 artist_key,
                 min(scrobble_id) AS first_scrobble_id,
@@ -559,15 +563,58 @@ def _insert_artist_mbid_conflict_warnings(conn: DuckDBPyConnection) -> None:
             HAVING count(DISTINCT NULLIF(trim(artist_mbid_raw), '')) > 1
         )
         SELECT
-            ? + row_number() OVER (ORDER BY artist_key) - 1 AS warning_id,
+            next_id.base_id + row_number() OVER (ORDER BY artist_key) AS warning_id,
             first_scrobble_id AS import_row_number,
             'artist_mbid_conflict' AS warning_code,
             'warning' AS severity,
             'artist_key has multiple supplied artist MBIDs' AS message,
             json_object('artist_key', artist_key, 'artist_mbids', mbids) AS evidence
-        FROM conflicts
-        """,
-        [next_id],
+        FROM conflicts, next_id
+        """
+    )
+
+
+def _insert_track_mbid_conflict_warnings(conn: DuckDBPyConnection) -> None:
+    conn.execute(
+        """
+        INSERT INTO import_warning (
+            warning_id,
+            import_row_number,
+            warning_code,
+            severity,
+            message,
+            evidence
+        )
+        WITH next_id AS (
+            SELECT coalesce(max(warning_id), 0) AS base_id FROM import_warning
+        ),
+        conflicts AS (
+            SELECT
+                artist_key,
+                track_key,
+                min(scrobble_id) AS first_scrobble_id,
+                list_sort(list_distinct(list(NULLIF(trim(track_mbid_raw), '')))) AS mbids
+            FROM scrobble
+            WHERE artist_key <> ''
+              AND track_key <> ''
+              AND NOT is_duplicate
+              AND NULLIF(trim(track_mbid_raw), '') IS NOT NULL
+            GROUP BY artist_key, track_key
+            HAVING count(DISTINCT NULLIF(trim(track_mbid_raw), '')) > 1
+        )
+        SELECT
+            next_id.base_id + row_number() OVER (ORDER BY artist_key, track_key) AS warning_id,
+            first_scrobble_id AS import_row_number,
+            'track_mbid_conflict' AS warning_code,
+            'warning' AS severity,
+            'artist_key and track_key have multiple supplied track MBIDs' AS message,
+            json_object(
+                'artist_key', artist_key,
+                'track_key', track_key,
+                'track_mbids', mbids
+            ) AS evidence
+        FROM conflicts, next_id
+        """
     )
 
 
@@ -638,6 +685,92 @@ def _insert_provisional_artists(conn: DuckDBPyConnection) -> None:
         )
         """,
         [next_id],
+    )
+
+
+def _insert_provisional_tracks(conn: DuckDBPyConnection) -> None:
+    conn.execute(
+        """
+        INSERT INTO track (
+            track_id,
+            artist_id,
+            canonical_title,
+            track_key,
+            musicbrainz_recording_mbid,
+            lastfm_track_name,
+            resolution_status,
+            resolution_confidence
+        )
+        WITH next_id AS (
+            SELECT coalesce(max(track_id), 0) AS base_id FROM track
+        ),
+        title_counts AS (
+            SELECT
+                s.artist_key,
+                s.track_key,
+                s.track_raw,
+                count(*) AS plays,
+                min(s.scrobble_id) AS first_scrobble_id
+            FROM scrobble s
+            WHERE s.artist_key <> ''
+              AND s.track_key <> ''
+              AND NOT s.is_duplicate
+            GROUP BY s.artist_key, s.track_key, s.track_raw
+        ),
+        preferred_titles AS (
+            SELECT artist_key, track_key, track_raw AS canonical_title
+            FROM (
+                SELECT
+                    artist_key,
+                    track_key,
+                    track_raw,
+                    row_number() OVER (
+                        PARTITION BY artist_key, track_key
+                        ORDER BY plays DESC, first_scrobble_id
+                    ) AS row_number
+                FROM title_counts
+            ) ranked_titles
+            WHERE row_number = 1
+        ),
+        mbids AS (
+            SELECT
+                artist_key,
+                track_key,
+                count(DISTINCT NULLIF(trim(track_mbid_raw), '')) AS mbid_count,
+                min(NULLIF(trim(track_mbid_raw), '')) AS track_mbid
+            FROM scrobble
+            WHERE artist_key <> ''
+              AND track_key <> ''
+              AND NOT is_duplicate
+            GROUP BY artist_key, track_key
+        )
+        SELECT
+            next_id.base_id + row_number() OVER (ORDER BY a.artist_id, titles.track_key)
+                AS track_id,
+            a.artist_id,
+            titles.canonical_title,
+            titles.track_key,
+            CASE WHEN mbids.mbid_count = 1 THEN mbids.track_mbid ELSE NULL END,
+            titles.canonical_title AS lastfm_track_name,
+            CASE
+                WHEN mbids.mbid_count = 1 THEN 'provisional_mbid'
+                WHEN mbids.mbid_count > 1 THEN 'provisional_mbid_conflict'
+                ELSE 'provisional_name'
+            END AS resolution_status,
+            CASE WHEN mbids.mbid_count = 1 THEN 0.5 ELSE 0.0 END AS resolution_confidence
+        FROM preferred_titles titles
+        JOIN artist a ON a.artist_key = titles.artist_key
+        JOIN mbids
+          ON mbids.artist_key = titles.artist_key
+         AND mbids.track_key = titles.track_key
+        CROSS JOIN next_id
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM track existing
+            WHERE existing.artist_id = a.artist_id
+              AND existing.track_key = titles.track_key
+        )
+        """
     )
 
 

@@ -1334,7 +1334,7 @@ git commit -m "feat: require consistent artist mbids on import"
 - Modify: `src/scrobble_recs/importers/lastfm_csv.py`
 - Modify: `tests/test_import.py`
 
-- [ ] **Step 1: Add failing track entity tests**
+- [x] **Step 1: Add failing track entity tests**
 
 Append to `tests/test_import.py`:
 
@@ -1406,7 +1406,7 @@ def test_import_does_not_trust_conflicting_track_mbids(tmp_path: Path) -> None:
     conn.close()
 ```
 
-- [ ] **Step 2: Run track tests to verify they fail**
+- [x] **Step 2: Run track tests to verify they fail**
 
 Run:
 
@@ -1420,7 +1420,7 @@ Expected:
 AssertionError
 ```
 
-- [ ] **Step 3: Implement track warning and insert functions**
+- [x] **Step 3: Implement track warning and insert functions**
 
 Add conflict warning insert:
 
@@ -1568,7 +1568,9 @@ Update `import_lastfm_csv()` order:
 
 Keep `_replace_import_tables()` deleting `track` before `artist`.
 
-- [ ] **Step 4: Run track tests to verify they pass**
+Execution note: to preserve the existing bounded database statement-count test, the implemented warning and track inserts compute ID bases inside their SQL statements instead of issuing separate `_next_id()` queries.
+
+- [x] **Step 4: Run track tests to verify they pass**
 
 Run:
 
@@ -1582,7 +1584,7 @@ Expected:
 2 passed
 ```
 
-- [ ] **Step 5: Run import test file**
+- [x] **Step 5: Run import test file**
 
 Run:
 

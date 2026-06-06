@@ -219,7 +219,7 @@ git commit -m "feat: add local track and import warning tables"
 - Modify: `src/scrobble_recs/config.py`
 - Modify: `tests/test_config.py`
 
-- [ ] **Step 1: Add failing config tests**
+- [x] **Step 1: Add failing config tests**
 
 Append to `tests/test_config.py`:
 
@@ -321,7 +321,7 @@ def test_default_config_document_contains_spec_defaults() -> None:
     assert document["recommendation"]["obviousness"]["top_n_per_tag_hide"] == 3
 ```
 
-- [ ] **Step 2: Run config tests to verify they fail**
+- [x] **Step 2: Run config tests to verify they fail**
 
 Run:
 
@@ -335,7 +335,7 @@ Expected:
 AttributeError: 'InputConfig' object has no attribute 'near_duplicate_window_seconds'
 ```
 
-- [ ] **Step 3: Implement config field**
+- [x] **Step 3: Implement config field**
 
 Modify `src/scrobble_recs/config.py` `InputConfig`:
 
@@ -388,7 +388,7 @@ Modify `default_config_document()` input block:
 },
 ```
 
-- [ ] **Step 4: Run config tests to verify they pass**
+- [x] **Step 4: Run config tests to verify they pass**
 
 Run:
 
@@ -403,6 +403,8 @@ Expected:
 ```
 
 - [ ] **Step 5: Commit config**
+
+Deviation: skipped commit for this checkpoint because the task executor was instructed not to commit; the controller will commit after review gates.
 
 Run:
 

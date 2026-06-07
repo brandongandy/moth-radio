@@ -208,6 +208,33 @@ def test_build_profile_command_prints_profile_weight_counts(tmp_path: Path) -> N
     assert "genre clusters: 2" in result.output
 
 
+def test_build_profile_command_shows_working_status(tmp_path: Path, monkeypatch) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    calls: list[str] = []
+
+    class FakeStats:
+        artists_updated = 4
+        tag_weights = 2
+        genre_clusters = 2
+
+    def fake_build_profile(conn, config, *, as_of=None):
+        calls.append(config.app.name)
+        return FakeStats()
+
+    monkeypatch.setattr("scrobble_recs.cli.build_profile", fake_build_profile)
+
+    result = runner.invoke(app, ["build-profile", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert calls == ["scrobble-recs"]
+    assert "Refreshing local listening profile" in result.output
+    assert "Profile refreshed" in result.output
+    assert "artists updated: 4" in result.output
+    assert "tag weights: 2" in result.output
+    assert "genre clusters: 2" in result.output
+
+
 def test_import_command_shows_working_status_and_writes_log(tmp_path: Path) -> None:
     runner = CliRunner()
     config_path = write_config(tmp_path)

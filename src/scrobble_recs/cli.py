@@ -112,9 +112,13 @@ def build_profile_command(
     resolved_config = load_config(config)
     conn = initialize_database(resolved_config)
     try:
-        stats = build_profile(
-            conn, resolved_config, as_of=datetime.now(tz=UTC).replace(tzinfo=None)
-        )
+        console.print("Refreshing local listening profile from local DuckDB data...")
+        with console.status("Refreshing local listening profile...", spinner="dots"):
+            stats = build_profile(
+                conn,
+                resolved_config,
+                as_of=datetime.now(tz=UTC).replace(tzinfo=None),
+            )
     finally:
         conn.close()
 

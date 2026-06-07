@@ -1,5 +1,26 @@
 # Implementation Log
 
+## 2026-06-07: Build-profile working status
+
+Changed:
+
+- Added visible `build-profile` startup output and a Rich spinner while local
+  listening scores, tag profiles, and profile clusters are recomputed.
+- Updated the README with the build-profile status behavior.
+
+Verified:
+
+- `python -m pytest tests/test_cli.py::test_build_profile_command_shows_working_status -v`
+  before implementation -> failed because the command printed only final profile
+  stats.
+- `python -m pytest tests/test_cli.py::test_build_profile_command_shows_working_status -v`
+  after implementation -> 1 passed.
+- `python -m pytest tests/test_cli.py -v` -> 29 passed.
+- `python -m ruff check .` -> All checks passed.
+- `python -m ruff format --check .` -> 49 files already formatted.
+- `python -m mypy src` -> Success, no issues found in 31 source files.
+- `python -m pytest` -> 218 passed.
+
 ## 2026-06-05: CLI/Admin hardening
 
 Changed:

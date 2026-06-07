@@ -111,6 +111,9 @@ recommendations:
 scrobble-recs build-profile --config config.example.json
 ```
 
+The command prints a startup line and shows a terminal spinner while local
+profile tables are recomputed.
+
 MusicBrainz resolution is intentionally separate from local profile and
 recommendation work:
 

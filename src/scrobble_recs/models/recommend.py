@@ -70,6 +70,7 @@ class _CandidateScore:
     obviousness_penalty: float
     diversity_penalty: float
     primary_tag: str | None
+    quality_gate: _QualityGateDecision
     explanation: dict[str, object]
 
 
@@ -89,6 +90,13 @@ class _FeedbackScore:
     score: float
     contributions: dict[str, float]
     effects: list[str]
+
+
+@dataclass(frozen=True)
+class _QualityGateDecision:
+    passed: bool
+    reasons: tuple[str, ...]
+    thresholds: dict[str, float]
 
 
 def generate_recommendations(
@@ -600,6 +608,18 @@ def _score_candidates(
             rediscovery_score=rediscovery,
         ):
             continue
+
+        quality_gate = _quality_gate_decision(
+            config,
+            mode,
+            lastfm_similarity_score=lastfm_score,
+            tag_similarity_score=tag_score,
+            feedback_score=feedback.score,
+            rediscovery_score=rediscovery,
+        )
+        if not quality_gate.passed:
+            continue
+
         weights = config.recommendation.weights
         raw_score = _raw_score(
             weights,
@@ -633,6 +653,7 @@ def _score_candidates(
                 obviousness_penalty=obviousness_penalty,
                 diversity_penalty=0.0,
                 primary_tag=_primary_tag(artist_id, tag_profile, scoring_data),
+                quality_gate=quality_gate,
                 explanation={},
             )
         )
@@ -930,6 +951,51 @@ def _raw_score(
     )
 
 
+def _quality_gate_decision(
+    config: ScrobbleRecsConfig,
+    mode: RecommendationModeSettings,
+    *,
+    lastfm_similarity_score: float,
+    tag_similarity_score: float,
+    feedback_score: float,
+    rediscovery_score: float,
+) -> _QualityGateDecision:
+    gate = config.recommendation.quality_gate
+    if not gate.enabled:
+        return _QualityGateDecision(
+            passed=True,
+            reasons=("disabled",),
+            thresholds={
+                "min_lastfm_similarity_score": 0.0,
+                "min_tag_similarity_score": 0.0,
+                "min_positive_feedback_score": 0.0,
+            },
+        )
+
+    multiplier = gate.rediscovery_mode_multiplier if mode.name == "rediscovery" else 1.0
+    min_lastfm = gate.min_lastfm_similarity_score * multiplier
+    min_tag = gate.min_tag_similarity_score * multiplier
+    min_feedback = gate.min_positive_feedback_score * multiplier
+    reasons: list[str] = []
+    if lastfm_similarity_score >= min_lastfm:
+        reasons.append("lastfm_similarity")
+    if tag_similarity_score >= min_tag:
+        reasons.append("tag_similarity")
+    if feedback_score >= min_feedback:
+        reasons.append("feedback")
+    if not gate.rediscovery_requires_taste_match and rediscovery_score > 0.0:
+        reasons.append("rediscovery")
+    return _QualityGateDecision(
+        passed=bool(reasons),
+        reasons=tuple(reasons),
+        thresholds={
+            "min_lastfm_similarity_score": min_lastfm,
+            "min_tag_similarity_score": min_tag,
+            "min_positive_feedback_score": min_feedback,
+        },
+    )
+
+
 def _explanation(
     score: _CandidateScore,
     scoring_data: _ScoringData,
@@ -960,6 +1026,17 @@ def _explanation(
             f"{score.artist_name} is similar to high-weight seed artists"
             " and fits tags from the local listening profile."
         ),
+        "quality_gate": {
+            "passed": score.quality_gate.passed,
+            "reasons": list(score.quality_gate.reasons),
+            "thresholds": score.quality_gate.thresholds,
+            "scores": {
+                "lastfm_similarity_score": score.lastfm_similarity_score,
+                "tag_similarity_score": score.tag_similarity_score,
+                "feedback_score": score.feedback_score,
+                "rediscovery_score": score.rediscovery_score,
+            },
+        },
         "seed_artists": [
             {
                 "artist": seed_name,

@@ -1921,3 +1921,56 @@ def _insert_run_for_feedback(conn, *, run_id: str) -> None:
         """,
         [run_id],
     )
+
+
+def test_generate_recommendations_skips_rediscovery_without_current_taste_match(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=500,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=500, tag="post-punk", weight=100.0)
+    _insert_scoring_artist(
+        conn,
+        artist_id=501,
+        name="Old Random Local",
+        play_count=5,
+        lifetime_weight=0.0,
+        recent_weight=0.0,
+        knownness=0.02,
+        rediscovery_score=0.95,
+    )
+    conn.execute(
+        """
+        INSERT INTO tag_top_artist (
+            tag,
+            artist_id,
+            source,
+            tag_rank,
+            tag_count,
+            fetched_at
+        )
+        VALUES ('spoken word', 501, 'lastfm', 91, 1.0, current_timestamp)
+        """
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=5,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    assert stats.recommendations == 0
+    assert _recommendation_names(conn, stats.run_id) == []
+    conn.close()

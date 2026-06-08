@@ -94,9 +94,7 @@ def build_user_tag_profile(
         return []
 
     normalized_weak_tags = {
-        _normalize_tag_key(tag)
-        for tag in (weak_tags or [])
-        if _normalize_tag_key(tag) != ""
+        _normalize_tag_key(tag) for tag in (weak_tags or []) if _normalize_tag_key(tag) != ""
     }
 
     raw_weights: dict[str, float] = {}
@@ -126,9 +124,7 @@ def build_user_tag_profile(
             continue
         tag_weight = float(normalized_weight)
         specificity = _tag_specificity(len(artists_by_tag.get(normalized_tag, set())))
-        weak_multiplier = (
-            weak_tag_penalty if normalized_tag in normalized_weak_tags else 1.0
-        )
+        weak_multiplier = weak_tag_penalty if normalized_tag in normalized_weak_tags else 1.0
         contribution = seed.seed_weight * tag_weight * specificity * weak_multiplier
         if contribution <= 0.0:
             continue

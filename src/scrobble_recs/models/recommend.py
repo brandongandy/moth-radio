@@ -71,6 +71,7 @@ class _CandidateScore:
     diversity_penalty: float
     primary_tag: str | None
     quality_gate: _QualityGateDecision
+    fatigue: _FatiguePenalty
     explanation: dict[str, object]
 
 
@@ -97,6 +98,13 @@ class _QualityGateDecision:
     passed: bool
     reasons: tuple[str, ...]
     thresholds: dict[str, float]
+
+
+@dataclass(frozen=True)
+class _FatiguePenalty:
+    prior_run_appearances: int
+    latest_run_rank: int | None
+    penalty: float
 
 
 def generate_recommendations(
@@ -191,6 +199,7 @@ def generate_recommendations(
         status="processing",
     )
     scoring_data = _load_scoring_data(conn, seed_ids, feedback_profile)
+    fatigue_by_artist = _load_fatigue_by_artist(conn, config, feedback_profile)
     _report_progress(
         progress_callback,
         phase="load_candidates",
@@ -215,6 +224,7 @@ def generate_recommendations(
         effective_tag_profile,
         scoring_data,
         feedback_profile,
+        fatigue_by_artist,
     )
     _report_progress(
         progress_callback,
@@ -536,6 +546,53 @@ def _load_scoring_data(
     )
 
 
+def _load_fatigue_by_artist(
+    conn: DuckDBPyConnection,
+    config: ScrobbleRecsConfig,
+    feedback_profile: FeedbackProfile,
+) -> dict[int, _FatiguePenalty]:
+    fatigue = config.recommendation.fatigue
+    if not fatigue.enabled:
+        return {}
+    recent_runs = conn.execute(
+        """
+        SELECT run_id
+        FROM recommendation_run
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        [fatigue.lookback_runs],
+    ).fetchall()
+    run_ids = [row[0] for row in recent_runs]
+    if not run_ids:
+        return {}
+    rows = conn.execute(
+        """
+        SELECT
+            artist_id,
+            count(*) AS appearances,
+            min(CASE WHEN run_id = ?::UUID THEN rank ELSE NULL END) AS latest_rank
+        FROM recommendation
+        WHERE run_id::VARCHAR IN (SELECT unnest(?))
+        GROUP BY artist_id
+        """,
+        [str(run_ids[0]), [str(r) for r in run_ids]],
+    ).fetchall()
+    result: dict[int, _FatiguePenalty] = {}
+    for artist_id, appearances, latest_rank in rows:
+        resolved_artist_id = int(artist_id)
+        if feedback_profile.artist_adjustments.get(resolved_artist_id, 0.0) > 0.0:
+            continue
+        latest_penalty = fatigue.latest_run_penalty if latest_rank is not None else 0.0
+        repeat_penalty = fatigue.repeat_appearance_penalty * max(0, int(appearances) - 1)
+        result[resolved_artist_id] = _FatiguePenalty(
+            prior_run_appearances=int(appearances),
+            latest_run_rank=None if latest_rank is None else int(latest_rank),
+            penalty=latest_penalty + repeat_penalty,
+        )
+    return result
+
+
 def _score_candidates(
     config: ScrobbleRecsConfig,
     mode: RecommendationModeSettings,
@@ -544,6 +601,7 @@ def _score_candidates(
     tag_profile: dict[str, float],
     scoring_data: _ScoringData,
     feedback_profile: FeedbackProfile,
+    fatigue_by_artist: dict[int, _FatiguePenalty],
 ) -> list[_CandidateScore]:
     seed_weight_by_id = {seed.artist_id: seed.seed_weight for seed in seeds}
     total_seed_weight = sum(seed_weight_by_id.values()) or 1.0
@@ -628,7 +686,11 @@ def _score_candidates(
         obviousness_penalty = (
             mode.obviousness_penalty_weight * obviousness if obviousness_enabled else 0.0
         )
-        final_score = raw_score - knownness_penalty - obviousness_penalty
+        fatigue = fatigue_by_artist.get(
+            artist_id,
+            _FatiguePenalty(prior_run_appearances=0, latest_run_rank=None, penalty=0.0),
+        )
+        final_score = raw_score - knownness_penalty - obviousness_penalty - fatigue.penalty
         if final_score <= 0:
             continue
         scores.append(
@@ -650,6 +712,7 @@ def _score_candidates(
                 diversity_penalty=0.0,
                 primary_tag=_primary_tag(artist_id, tag_profile, scoring_data),
                 quality_gate=quality_gate,
+                fatigue=fatigue,
                 explanation={},
             )
         )
@@ -1055,6 +1118,11 @@ def _explanation(
             "knownness": score.knownness_penalty,
             "obviousness": score.obviousness_penalty,
             "diversity": score.diversity_penalty,
+        },
+        "fatigue": {
+            "prior_run_appearances": score.fatigue.prior_run_appearances,
+            "latest_run_rank": score.fatigue.latest_run_rank,
+            "penalty": score.fatigue.penalty,
         },
         "feedback": {
             "score": score.feedback_score,

@@ -2099,3 +2099,145 @@ def test_generate_recommendations_rediscovery_mode_relaxes_gate_thresholds(
     assert _recommendation_names(conn, balanced.run_id) == []
     assert _recommendation_names(conn, rediscovery.run_id) == ["Relaxed Threshold Candidate"]
     conn.close()
+
+
+def test_generate_recommendations_demotes_recently_recommended_artist(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=530,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=530, tag="coldwave", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=530,
+        candidate_id=531,
+        candidate_name="Repeated Candidate",
+        tag="coldwave",
+        tag_rank=40,
+        similarity=0.80,
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=530,
+        candidate_id=532,
+        candidate_name="Fresh Candidate",
+        tag="coldwave",
+        tag_rank=41,
+        similarity=0.78,
+    )
+    _insert_run_for_feedback(conn, run_id="00000000-0000-0000-0000-000000000530")
+    conn.execute(
+        """
+        INSERT INTO recommendation (
+            run_id, rank, artist_id, final_score, raw_score, explanation
+        )
+        VALUES (
+            '00000000-0000-0000-0000-000000000530',
+            1, 531, 0.9, 0.9, '{}'
+        )
+        """
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=2,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    assert _recommendation_names(conn, stats.run_id) == [
+        "Fresh Candidate",
+        "Repeated Candidate",
+    ]
+    (explanation_json,) = conn.execute(
+        "SELECT explanation FROM recommendation WHERE run_id = ? AND artist_id = 531",
+        [stats.run_id],
+    ).fetchone()
+    explanation = json.loads(explanation_json)
+    assert explanation["fatigue"]["prior_run_appearances"] == 1
+    assert explanation["fatigue"]["latest_run_rank"] == 1
+    assert explanation["fatigue"]["penalty"] > 0.0
+    conn.close()
+
+
+def test_generate_recommendations_positive_feedback_bypasses_fatigue(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=540,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=540, tag="coldwave", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=540,
+        candidate_id=541,
+        candidate_name="Saved Repeated Candidate",
+        tag="coldwave",
+        tag_rank=40,
+        similarity=0.80,
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=540,
+        candidate_id=542,
+        candidate_name="Fresh Candidate",
+        tag="coldwave",
+        tag_rank=41,
+        similarity=0.78,
+    )
+    _insert_run_for_feedback(conn, run_id="00000000-0000-0000-0000-000000000540")
+    conn.execute(
+        """
+        INSERT INTO recommendation (
+            run_id, rank, artist_id, final_score, raw_score, explanation
+        )
+        VALUES (
+            '00000000-0000-0000-0000-000000000540',
+            1, 541, 0.9, 0.9, '{}'
+        )
+        """
+    )
+    record_feedback_event(
+        conn,
+        run_id="00000000-0000-0000-0000-000000000540",
+        artist_id=541,
+        action="save",
+        feedback_id="00000000-0000-0000-0000-000000000541",
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=2,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    assert _recommendation_names(conn, stats.run_id)[0] == "Saved Repeated Candidate"
+    (explanation_json,) = conn.execute(
+        "SELECT explanation FROM recommendation WHERE run_id = ? AND artist_id = 541",
+        [stats.run_id],
+    ).fetchone()
+    explanation = json.loads(explanation_json)
+    assert explanation["fatigue"]["penalty"] == 0.0
+    conn.close()

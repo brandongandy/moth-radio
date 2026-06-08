@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
-from math import sqrt
+from math import log, sqrt
 from typing import Literal, TypeAlias
 from uuid import uuid4
 
@@ -156,7 +156,12 @@ def generate_recommendations(
         subject="tags and feedback",
         status="processing",
     )
-    tag_profile = _load_user_tag_profile(conn, seeds)
+    tag_profile = _load_user_tag_profile(
+        conn,
+        seeds,
+        weak_tags=config.recommendation.tag_profile.weak_tags,
+        weak_tag_penalty=config.recommendation.tag_profile.weak_tag_penalty,
+    )
     effective_tag_profile = apply_feedback_to_tag_profile(
         _apply_tag_focus(tag_profile, mode_settings),
         feedback_profile,
@@ -378,6 +383,9 @@ def _candidate_targets_from_seeds(
 def _load_user_tag_profile(
     conn: DuckDBPyConnection,
     seeds: list[SeedArtist],
+    *,
+    weak_tags: list[str] | None = None,
+    weak_tag_penalty: float = 1.0,
 ) -> dict[str, float]:
     profile: dict[str, float] = {}
     seed_weight_by_id = {seed.artist_id: seed.seed_weight for seed in seeds}
@@ -391,13 +399,32 @@ def _load_user_tag_profile(
         WHERE source = 'lastfm'
         """
     ).fetchall()
+
+    normalized_weak_tags = {
+        _normalize_tag_key(tag)
+        for tag in (weak_tags or [])
+        if _normalize_tag_key(tag) != ""
+    }
+    artists_by_tag: dict[str, set[int]] = {}
+    for artist_id, tag, _normalized_weight in rows:
+        seed_weight = seed_weight_by_id.get(int(artist_id))
+        if seed_weight is None:
+            continue
+        normalized_tag = _normalize_tag_key(tag)
+        if normalized_tag:
+            artists_by_tag.setdefault(normalized_tag, set()).add(int(artist_id))
+
     for artist_id, tag, normalized_weight in rows:
         seed_weight = seed_weight_by_id.get(int(artist_id))
         if seed_weight is None:
             continue
         normalized_tag = _normalize_tag_key(tag)
-        profile[normalized_tag] = profile.get(normalized_tag, 0.0) + seed_weight * float(
-            normalized_weight
+        specificity = _tag_specificity(len(artists_by_tag.get(normalized_tag, set())))
+        weak_multiplier = (
+            weak_tag_penalty if normalized_tag in normalized_weak_tags else 1.0
+        )
+        profile[normalized_tag] = profile.get(normalized_tag, 0.0) + (
+            seed_weight * float(normalized_weight) * specificity * weak_multiplier
         )
 
     max_weight = max(profile.values(), default=0.0)
@@ -715,6 +742,12 @@ def _candidate_tag_vector(
 
 def _normalize_tag_key(tag: object) -> str:
     return str(tag).strip().casefold()
+
+
+def _tag_specificity(seed_artist_count: int) -> float:
+    if seed_artist_count < 1:
+        return 0.0
+    return 1.0 / log(2 + seed_artist_count)
 
 
 def _apply_tag_focus(

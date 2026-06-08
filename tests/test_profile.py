@@ -756,3 +756,48 @@ def _insert_artist_tag(conn, *, artist_id: int, tag: str, weight: float) -> None
         """,
         [artist_id, tag, weight * 100.0, weight],
     )
+
+
+def test_build_profile_damps_weak_and_overbroad_tags(tmp_path: Path) -> None:
+    from scrobble_recs.models.profile_builder import build_profile
+
+    config = load_config(_config_path(tmp_path))
+    conn = initialize_database(config)
+    try:
+        _insert_profile_artist(
+            conn,
+            artist_id=70,
+            name="Specific Anchor One",
+            play_count=100,
+            lifetime_weight=10.0,
+            recent_weight=10.0,
+            knownness=0.5,
+            rediscovery_score=0.0,
+            last_played_at="2026-05-01",
+        )
+        _insert_profile_artist(
+            conn,
+            artist_id=71,
+            name="Specific Anchor Two",
+            play_count=90,
+            lifetime_weight=9.0,
+            recent_weight=9.0,
+            knownness=0.5,
+            rediscovery_score=0.0,
+            last_played_at="2026-05-01",
+        )
+        _insert_artist_tag(conn, artist_id=70, tag="rock", weight=1.0)
+        _insert_artist_tag(conn, artist_id=70, tag="zeuhl", weight=0.8)
+        _insert_artist_tag(conn, artist_id=71, tag="rock", weight=1.0)
+
+        build_profile(conn, config, as_of=datetime(2026, 6, 5, 12, 0, 0))
+
+        rows = {
+            str(tag): float(user_weight)
+            for tag, user_weight in conn.execute(
+                "SELECT tag, user_weight FROM tag_profile WHERE source = 'lastfm'"
+            ).fetchall()
+        }
+        assert rows["zeuhl"] > rows["rock"]
+    finally:
+        conn.close()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -60,7 +61,12 @@ def build_profile(
             limit=config.recommendation.seed_artist_limit,
             min_scrobbles=config.recommendation.min_seed_scrobbles,
         )
-        tag_profile = build_user_tag_profile(conn, seeds)
+        tag_profile = build_user_tag_profile(
+            conn,
+            seeds,
+            weak_tags=config.recommendation.tag_profile.weak_tags,
+            weak_tag_penalty=config.recommendation.tag_profile.weak_tag_penalty,
+        )
         _persist_tag_profile(conn, tag_profile)
         clusters = _build_genre_clusters(tag_profile)
         _persist_genre_clusters(conn, clusters)
@@ -79,10 +85,19 @@ def build_profile(
 def build_user_tag_profile(
     conn: DuckDBPyConnection,
     seeds: list[SeedArtist],
+    *,
+    weak_tags: list[str] | None = None,
+    weak_tag_penalty: float = 1.0,
 ) -> list[_TagProfileEntry]:
     seed_by_id = {seed.artist_id: seed for seed in seeds}
     if not seed_by_id:
         return []
+
+    normalized_weak_tags = {
+        _normalize_tag_key(tag)
+        for tag in (weak_tags or [])
+        if _normalize_tag_key(tag) != ""
+    }
 
     raw_weights: dict[str, float] = {}
     contributions: dict[str, list[_TagContribution]] = {}
@@ -95,6 +110,13 @@ def build_user_tag_profile(
         """,
         [_PROFILE_SOURCE, sorted(seed_by_id)],
     ).fetchall()
+
+    artists_by_tag: dict[str, set[int]] = {}
+    for artist_id, tag, _normalized_weight in rows:
+        normalized_tag = _normalize_tag_key(tag)
+        if normalized_tag:
+            artists_by_tag.setdefault(normalized_tag, set()).add(int(artist_id))
+
     for artist_id, tag, normalized_weight in rows:
         seed = seed_by_id.get(int(artist_id))
         if seed is None:
@@ -103,7 +125,11 @@ def build_user_tag_profile(
         if normalized_tag == "":
             continue
         tag_weight = float(normalized_weight)
-        contribution = seed.seed_weight * tag_weight
+        specificity = _tag_specificity(len(artists_by_tag.get(normalized_tag, set())))
+        weak_multiplier = (
+            weak_tag_penalty if normalized_tag in normalized_weak_tags else 1.0
+        )
+        contribution = seed.seed_weight * tag_weight * specificity * weak_multiplier
         if contribution <= 0.0:
             continue
         raw_weights[normalized_tag] = raw_weights.get(normalized_tag, 0.0) + contribution
@@ -233,6 +259,12 @@ def _sort_contributions(
 
 def _normalize_tag_key(tag: object) -> str:
     return str(tag).strip().casefold()
+
+
+def _tag_specificity(seed_artist_count: int) -> float:
+    if seed_artist_count < 1:
+        return 0.0
+    return 1.0 / math.log(2 + seed_artist_count)
 
 
 def _slugify(value: str) -> str:

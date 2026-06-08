@@ -1,5 +1,22 @@
 # Implementation Log
 
+## 2026-06-07: Recommendation quality gate
+
+Changed:
+
+- Added recommendation quality-gate config, fatigue config, and weak tag-profile config.
+- Dampened weak/generic tags and tags shared by many seed artists.
+- Required rediscovery recommendations to have a current taste match.
+- Added cross-run fatigue for repeated recommendations.
+- Added quality-gate and fatigue evidence to recommendation explanations.
+
+Verified:
+
+- `python -m pytest tests/test_config.py -v`
+- `python -m pytest tests/test_profile.py -v`
+- `python -m pytest tests/test_recommend.py -v`
+- Full verification commands listed below before final completion.
+
 ## 2026-06-07: Build-profile working status
 
 Changed:

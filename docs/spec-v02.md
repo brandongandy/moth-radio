@@ -871,6 +871,10 @@ Purpose:
 - reduce generic tags such as `rock`, `alternative`, `indie`, `seen live`
 - preserve more specific taste tags such as `coldwave`, `minimal synth`, `zeuhl`, `jangle pop`
 
+Tag profile construction applies tag specificity and weak-tag penalties. Weak
+tags are not deleted; their contribution is multiplied down so broad Last.fm
+labels and community artifacts cannot swamp specific tags.
+
 Add a configurable tag denylist / weaklist:
 
 ```json
@@ -882,9 +886,18 @@ Add a configurable tag denylist / weaklist:
       "favourite",
       "favorite",
       "spotify",
-      "lastfm"
+      "lastfm",
+      "soundtrack",
+      "spoken word",
+      "rock",
+      "indie",
+      "alternative",
+      "pop",
+      "electronic",
+      "classic rock",
+      "female vocalists"
     ],
-    "generic_tag_penalty": 0.25
+    "weak_tag_penalty": 0.25
   }
 }
 ```
@@ -966,6 +979,12 @@ last_played_at older than 2 years
 knownness < threshold
 not hidden/rejected
 ```
+
+Rediscovery candidates must pass the recommendation quality gate before their
+rediscovery score contributes to ranking. The gate requires current taste
+evidence from Last.fm seed similarity, tag similarity, or positive feedback.
+Rediscovery mode may relax gate thresholds, but it must not remove the gate by
+default.
 
 Rediscovery source should be visible in explanation.
 
@@ -1081,6 +1100,9 @@ pre_diversity_score =
   - knownness_penalty
   - obviousness_penalty
 ```
+
+Final scoring subtracts fatigue for artists shown in recent persisted runs.
+Positive feedback can bypass fatigue for the affected artist.
 
 Diversity reranking happens after scoring.
 

@@ -240,11 +240,17 @@ tables.
 
 Each candidate receives component scores for Last.fm similarity, tag fit,
 rediscovery value, and feedback. Knownness suppresses artists that already have
-substantial local listening history, while rediscovery gives lightly played or
-dormant artists room to surface. Obviousness uses tag top-artist ranks to
-penalize broad "you probably already know this" recommendations without
-hard-excluding every popular artist. A diversity reranker keeps the top of the
-list from collapsing into one tag or similarity neighborhood.
+substantial local listening history. Rediscovery does not act as a standalone
+recommendation source. An old, lightly played artist must still match the
+current profile through seed similarity, tag fit, or positive feedback before
+rediscovery can boost it. Broad Last.fm tags are damped so generic tags such as
+`rock`, `indie`, `soundtrack`, and `spoken word` do not dominate more specific
+taste evidence. Obviousness uses tag top-artist ranks to penalize broad "you
+probably already know this" recommendations without hard-excluding every
+popular artist. Artists shown in recent recommendation runs receive a fatigue
+penalty unless positive feedback says they should remain prominent. A diversity
+reranker keeps the top of the list from collapsing into one tag or similarity
+neighborhood.
 
 `recommend` supports mode-specific ranking from local data:
 

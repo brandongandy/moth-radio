@@ -409,9 +409,7 @@ def _load_user_tag_profile(
     ).fetchall()
 
     normalized_weak_tags = {
-        _normalize_tag_key(tag)
-        for tag in (weak_tags or [])
-        if _normalize_tag_key(tag) != ""
+        _normalize_tag_key(tag) for tag in (weak_tags or []) if _normalize_tag_key(tag) != ""
     }
     artists_by_tag: dict[str, set[int]] = {}
     for artist_id, tag, _normalized_weight in rows:
@@ -428,9 +426,7 @@ def _load_user_tag_profile(
             continue
         normalized_tag = _normalize_tag_key(tag)
         specificity = _tag_specificity(len(artists_by_tag.get(normalized_tag, set())))
-        weak_multiplier = (
-            weak_tag_penalty if normalized_tag in normalized_weak_tags else 1.0
-        )
+        weak_multiplier = weak_tag_penalty if normalized_tag in normalized_weak_tags else 1.0
         profile[normalized_tag] = profile.get(normalized_tag, 0.0) + (
             seed_weight * float(normalized_weight) * specificity * weak_multiplier
         )

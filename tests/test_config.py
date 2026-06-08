@@ -453,3 +453,48 @@ def test_default_config_document_contains_spec_defaults() -> None:
     assert document["recommendation"]["seed_artist_limit"] == 250
     assert document["recommendation"]["similar_artists_per_seed"] == 100
     assert document["recommendation"]["obviousness"]["top_n_per_tag_hide"] == 3
+    assert document["recommendation"]["quality_gate"]["enabled"] is True
+    assert document["recommendation"]["quality_gate"]["rediscovery_requires_taste_match"] is True
+    assert document["recommendation"]["fatigue"]["enabled"] is True
+    assert document["recommendation"]["fatigue"]["lookback_runs"] == 5
+    assert "soundtrack" in document["recommendation"]["tag_profile"]["weak_tags"]
+    assert "spoken word" in document["recommendation"]["tag_profile"]["weak_tags"]
+
+
+def test_recommendation_quality_gate_defaults_are_loaded(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "scrobble-recs",
+                    "db_path": str(tmp_path / "db.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": str(tmp_path / "scrobbles.csv"),
+                    "timezone": "UTC",
+                    "timestamp_column": "uts",
+                    "csv_columns": list(EXPECTED_CSV_COLUMNS),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.recommendation.quality_gate.enabled is True
+    assert config.recommendation.quality_gate.rediscovery_requires_taste_match is True
+    assert config.recommendation.quality_gate.min_lastfm_similarity_score == pytest.approx(0.01)
+    assert config.recommendation.quality_gate.min_tag_similarity_score == pytest.approx(0.05)
+    assert config.recommendation.quality_gate.min_positive_feedback_score == pytest.approx(0.05)
+    assert config.recommendation.quality_gate.rediscovery_mode_multiplier == pytest.approx(0.75)
+    assert config.recommendation.fatigue.enabled is True
+    assert config.recommendation.fatigue.lookback_runs == 5
+    assert config.recommendation.fatigue.latest_run_penalty == pytest.approx(0.12)
+    assert config.recommendation.fatigue.repeat_appearance_penalty == pytest.approx(0.04)
+    assert "soundtrack" in config.recommendation.tag_profile.weak_tags
+    assert "spoken word" in config.recommendation.tag_profile.weak_tags
+    assert config.recommendation.tag_profile.weak_tag_penalty == pytest.approx(0.25)

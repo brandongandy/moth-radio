@@ -1974,3 +1974,128 @@ def test_generate_recommendations_skips_rediscovery_without_current_taste_match(
     assert stats.recommendations == 0
     assert _recommendation_names(conn, stats.run_id) == []
     conn.close()
+
+
+def test_generate_recommendations_allows_rediscovery_with_tag_match(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=510,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=510, tag="coldwave", weight=100.0)
+
+    # Insert candidate manually with dates that produce a positive rediscovery_score
+    conn.execute(
+        """
+        INSERT INTO artist (artist_id, canonical_name, artist_key, lastfm_name)
+        VALUES (511, 'Old Matching Local', 'old-matching-local', 'Old Matching Local')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO artist_listening_fact (
+            artist_id, play_count, track_count, active_months,
+            first_played_at, last_played_at
+        )
+        VALUES (511, 1, 3, 2, '2018-01-01', '2023-01-01')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO tag_top_artist (
+            tag, artist_id, source, tag_rank, tag_count, fetched_at
+        )
+        VALUES ('coldwave', 511, 'lastfm', 40, 1.0, current_timestamp)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO artist_similarity_edge (
+            source_artist_id, target_artist_id, source,
+            source_score, normalized_score, evidence, fetched_at
+        )
+        VALUES (510, 511, 'lastfm', 0.10, 0.10, '{}', current_timestamp)
+        """
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=5,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    assert _recommendation_names(conn, stats.run_id) == ["Old Matching Local"]
+    (explanation_json,) = conn.execute(
+        "SELECT explanation FROM recommendation WHERE run_id = ? AND artist_id = 511",
+        [stats.run_id],
+    ).fetchone()
+    explanation = json.loads(explanation_json)
+    assert explanation["quality_gate"]["passed"] is True
+    assert "tag_similarity" in explanation["quality_gate"]["reasons"]
+    conn.close()
+
+
+def test_generate_recommendations_rediscovery_mode_relaxes_gate_thresholds(
+    tmp_path: Path,
+) -> None:
+    config_path = write_config(tmp_path)
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["recommendation"]["quality_gate"] = {
+        "enabled": True,
+        "rediscovery_requires_taste_match": True,
+        "min_lastfm_similarity_score": 0.50,
+        "min_tag_similarity_score": 0.50,
+        "min_positive_feedback_score": 0.05,
+        "rediscovery_mode_multiplier": 0.50,
+    }
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    config = load_config(config_path)
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=520,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=520, tag="coldwave", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=520,
+        candidate_id=521,
+        candidate_name="Relaxed Threshold Candidate",
+        tag="noise",
+        tag_rank=80,
+        similarity=0.30,
+    )
+
+    balanced = generate_recommendations(
+        conn,
+        config,
+        limit=5,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+    rediscovery = generate_recommendations(
+        conn,
+        config,
+        limit=5,
+        mode="rediscovery",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    assert _recommendation_names(conn, balanced.run_id) == []
+    assert _recommendation_names(conn, rediscovery.run_id) == ["Relaxed Threshold Candidate"]
+    conn.close()

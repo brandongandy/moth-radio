@@ -222,6 +222,94 @@ class DiversityConfig(BaseModel):
     max_same_primary_tag_in_top_20: int = 4
 
 
+class QualityGateConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    rediscovery_requires_taste_match: bool = True
+    min_lastfm_similarity_score: float = 0.01
+    min_tag_similarity_score: float = 0.05
+    min_positive_feedback_score: float = 0.05
+    rediscovery_mode_multiplier: float = 0.75
+
+    @model_validator(mode="after")
+    def validate_thresholds(self) -> QualityGateConfig:
+        for field_name in (
+            "min_lastfm_similarity_score",
+            "min_tag_similarity_score",
+            "min_positive_feedback_score",
+        ):
+            value = float(getattr(self, field_name))
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{field_name} must be between 0 and 1")
+        if not 0.0 < self.rediscovery_mode_multiplier <= 1.0:
+            raise ValueError("rediscovery_mode_multiplier must be greater than 0 and at most 1")
+        return self
+
+
+class FatigueConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    lookback_runs: int = 5
+    latest_run_penalty: float = 0.12
+    repeat_appearance_penalty: float = 0.04
+
+    @model_validator(mode="after")
+    def validate_fatigue(self) -> FatigueConfig:
+        if self.lookback_runs < 1:
+            raise ValueError("lookback_runs must be at least 1")
+        if self.latest_run_penalty < 0.0:
+            raise ValueError("latest_run_penalty must be non-negative")
+        if self.repeat_appearance_penalty < 0.0:
+            raise ValueError("repeat_appearance_penalty must be non-negative")
+        return self
+
+
+class TagProfileConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    weak_tags: list[str] = Field(
+        default_factory=lambda: [
+            "seen live",
+            "favorite",
+            "favorites",
+            "favourite",
+            "lastfm",
+            "spotify",
+            "soundtrack",
+            "spoken word",
+            "rock",
+            "indie",
+            "alternative",
+            "pop",
+            "electronic",
+            "classic rock",
+            "female vocalists",
+            "80s",
+            "90s",
+            "70s",
+            "american",
+            "canadian",
+            "british",
+            "japanese",
+        ]
+    )
+    weak_tag_penalty: float = 0.25
+
+    @field_validator("weak_tags")
+    @classmethod
+    def normalize_weak_tags(cls, value: list[str]) -> list[str]:
+        return sorted({tag.strip().casefold() for tag in value if tag.strip()})
+
+    @field_validator("weak_tag_penalty")
+    @classmethod
+    def weak_tag_penalty_must_be_ratio(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("weak_tag_penalty must be between 0 and 1")
+        return value
+
+
 class RecommendationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -234,6 +322,9 @@ class RecommendationConfig(BaseModel):
     obviousness: ObviousnessConfig = Field(default_factory=ObviousnessConfig)
     weights: RecommendationWeightsConfig = Field(default_factory=RecommendationWeightsConfig)
     diversity: DiversityConfig = Field(default_factory=DiversityConfig)
+    quality_gate: QualityGateConfig = Field(default_factory=QualityGateConfig)
+    fatigue: FatigueConfig = Field(default_factory=FatigueConfig)
+    tag_profile: TagProfileConfig = Field(default_factory=TagProfileConfig)
 
     @model_validator(mode="after")
     def validate_operational_defaults(self) -> RecommendationConfig:
@@ -328,6 +419,47 @@ def default_config_document() -> dict[str, Any]:
                 "enabled": True,
                 "lambda": 0.75,
                 "max_same_primary_tag_in_top_20": 4,
+            },
+            "quality_gate": {
+                "enabled": True,
+                "rediscovery_requires_taste_match": True,
+                "min_lastfm_similarity_score": 0.01,
+                "min_tag_similarity_score": 0.05,
+                "min_positive_feedback_score": 0.05,
+                "rediscovery_mode_multiplier": 0.75,
+            },
+            "fatigue": {
+                "enabled": True,
+                "lookback_runs": 5,
+                "latest_run_penalty": 0.12,
+                "repeat_appearance_penalty": 0.04,
+            },
+            "tag_profile": {
+                "weak_tags": [
+                    "seen live",
+                    "favorite",
+                    "favorites",
+                    "favourite",
+                    "lastfm",
+                    "spotify",
+                    "soundtrack",
+                    "spoken word",
+                    "rock",
+                    "indie",
+                    "alternative",
+                    "pop",
+                    "electronic",
+                    "classic rock",
+                    "female vocalists",
+                    "80s",
+                    "90s",
+                    "70s",
+                    "american",
+                    "canadian",
+                    "british",
+                    "japanese",
+                ],
+                "weak_tag_penalty": 0.25,
             },
         },
         "tui": {

@@ -122,9 +122,9 @@ def test_run_doctor_reports_import_warnings(tmp_path: Path) -> None:
             VALUES (
                 1,
                 2,
-                'timestamp_mismatch',
+                'artist_mbid_conflict',
                 'warning',
-                'utc_time does not match uts',
+                'artist_key has multiple supplied artist MBIDs',
                 '{}'
             )
             """

@@ -35,10 +35,12 @@ class RecommendationListRow:
     obviousness: float
     why_short: str
     feedback_state: str
+    classification: str
 
 
 @dataclass(frozen=True)
 class ScoreBreakdown:
+    display_score: float
     final_score: float
     raw_score: float
     lastfm_similarity_score: float
@@ -118,6 +120,7 @@ class TuiRecommendationStore:
                 r.rank,
                 a.canonical_name,
                 r.final_score,
+                max(r.final_score) OVER () AS max_final_score,
                 r.knownness,
                 r.obviousness,
                 r.feedback_score,
@@ -135,11 +138,11 @@ class TuiRecommendationStore:
                 artist_id=int(row[1]),
                 rank=int(row[2]),
                 artist=str(row[3]),
-                final_score=float(row[4] or 0.0),
-                knownness=float(row[5] or 0.0),
-                obviousness=float(row[6] or 0.0),
-                feedback_score=float(row[7] or 0.0),
-                explanation=_parse_json(row[8]),
+                final_score=_display_score(float(row[4] or 0.0), float(row[5] or 0.0)),
+                knownness=float(row[6] or 0.0),
+                obviousness=float(row[7] or 0.0),
+                feedback_score=float(row[8] or 0.0),
+                explanation=_parse_json(row[9]),
             )
             for row in rows
         ]
@@ -152,6 +155,11 @@ class TuiRecommendationStore:
                 r.rank,
                 a.canonical_name,
                 r.final_score,
+                (
+                    SELECT max(final_score)
+                    FROM recommendation
+                    WHERE run_id = ?
+                ) AS max_final_score,
                 r.raw_score,
                 r.lastfm_similarity_score,
                 r.tag_similarity_score,
@@ -168,24 +176,25 @@ class TuiRecommendationStore:
             WHERE r.run_id = ?
               AND r.artist_id = ?
             """,
-            [run_id, artist_id],
+            [run_id, run_id, artist_id],
         ).fetchone()
         if row is None:
             raise ValueError(f"recommendation {artist_id} does not exist in run {run_id}")
 
-        explanation = _parse_json(row[13])
+        explanation = _parse_json(row[14])
         score_breakdown = ScoreBreakdown(
+            display_score=_display_score(float(row[2] or 0.0), float(row[3] or 0.0)),
             final_score=float(row[2] or 0.0),
-            raw_score=float(row[3] or 0.0),
-            lastfm_similarity_score=float(row[4] or 0.0),
-            tag_similarity_score=float(row[5] or 0.0),
-            cluster_fit_score=float(row[6] or 0.0),
-            rediscovery_score=float(row[7] or 0.0),
-            metadata_graph_score=float(row[8] or 0.0),
-            feedback_score=float(row[9] or 0.0),
-            knownness=float(row[10] or 0.0),
-            obviousness=float(row[11] or 0.0),
-            diversity_penalty=float(row[12] or 0.0),
+            raw_score=float(row[4] or 0.0),
+            lastfm_similarity_score=float(row[5] or 0.0),
+            tag_similarity_score=float(row[6] or 0.0),
+            cluster_fit_score=float(row[7] or 0.0),
+            rediscovery_score=float(row[8] or 0.0),
+            metadata_graph_score=float(row[9] or 0.0),
+            feedback_score=float(row[10] or 0.0),
+            knownness=float(row[11] or 0.0),
+            obviousness=float(row[12] or 0.0),
+            diversity_penalty=float(row[13] or 0.0),
         )
         return RecommendationDetail(
             run_id=run_id,
@@ -250,6 +259,7 @@ def _list_row(
         obviousness=obviousness,
         why_short=str(explanation.get("summary", "")),
         feedback_state=_feedback_state(feedback_score),
+        classification=_classification_label(explanation),
     )
 
 
@@ -332,3 +342,20 @@ def _feedback_state(feedback_score: float) -> str:
     if feedback_score < 0.0:
         return "suppressed"
     return ""
+
+
+def _display_score(final_score: float, max_final_score: float) -> float:
+    if max_final_score <= 0.0:
+        return 0.0
+    return max(0.0, min(final_score / max_final_score, 1.0))
+
+
+def _classification_label(explanation: dict[str, Any]) -> str:
+    classification = _bool_map(explanation.get("classification", {}))
+    if classification.get("is_rediscovery"):
+        return "redis"
+    if classification.get("is_obvious"):
+        return "obvious"
+    if classification.get("is_new_artist"):
+        return "new"
+    return "sim"

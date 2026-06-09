@@ -134,6 +134,105 @@ def test_import_replaces_previous_import_tables_on_rerun(tmp_path: Path) -> None
     conn.close()
 
 
+def test_import_replaces_previous_tracks_after_reopening_database(tmp_path: Path) -> None:
+    fixture = Path("tests/fixtures/tiny_lastfm_export.csv")
+    config = load_config(write_config(tmp_path, fixture))
+    conn = initialize_database(config)
+
+    import_lastfm_csv(conn, fixture)
+    conn.close()
+
+    conn = initialize_database(config)
+    stats = import_lastfm_csv(conn, fixture)
+
+    assert stats.scrobbles == 6
+    assert stats.distinct_artists == 4
+    assert stats.distinct_tracks == 5
+    assert conn.execute("SELECT count(*) FROM track").fetchone() == (5,)
+
+    conn.close()
+
+
+def test_import_replaces_previous_import_warnings_on_rerun(tmp_path: Path) -> None:
+    csv_path = write_csv(
+        tmp_path / "conflicting_artist_mbid.csv",
+        [
+            "1704067200,2024-01-01 00:00:00,The Cure,mbid-cure-a,Disintegration,,Pictures of You,",
+            "1704153600,2024-01-02 00:00:00,The Cure,mbid-cure-b,Disintegration,,Plainsong,",
+        ],
+    )
+    config = load_config(write_config(tmp_path, csv_path))
+    conn = initialize_database(config)
+
+    import_lastfm_csv(conn, csv_path)
+    stats = import_lastfm_csv(conn, csv_path)
+
+    warning_rows = conn.execute(
+        """
+        SELECT import_row_number, warning_code
+        FROM import_warning
+        ORDER BY warning_id
+        """
+    ).fetchall()
+
+    assert stats.import_warnings == 1
+    assert warning_rows == [(1, "artist_mbid_conflict")]
+
+    conn.close()
+
+
+def test_import_replaces_many_existing_import_warnings_without_reusing_ids(
+    tmp_path: Path,
+) -> None:
+    csv_path = write_csv(
+        tmp_path / "conflicting_artist_mbid.csv",
+        [
+            "1704067200,2024-01-01 00:00:00,The Cure,mbid-cure-a,Disintegration,,Pictures of You,",
+            "1704153600,2024-01-02 00:00:00,The Cure,mbid-cure-b,Disintegration,,Plainsong,",
+        ],
+    )
+    config = load_config(write_config(tmp_path, csv_path))
+    conn = initialize_database(config)
+    conn.execute(
+        """
+        INSERT INTO import_warning (
+            warning_id,
+            import_row_number,
+            warning_code,
+            severity,
+            message,
+            evidence
+        )
+        SELECT
+            row_number() OVER () AS warning_id,
+            row_number() OVER () AS import_row_number,
+            'near_duplicate_scrobble' AS warning_code,
+            'warning' AS severity,
+            'old import warning' AS message,
+            '{}'::JSON AS evidence
+        FROM range(5000)
+        """
+    )
+    conn.close()
+
+    conn = initialize_database(config)
+
+    stats = import_lastfm_csv(conn, csv_path)
+
+    warning_rows = conn.execute(
+        """
+        SELECT import_row_number, warning_code
+        FROM import_warning
+        ORDER BY warning_id
+        """
+    ).fetchall()
+
+    assert stats.import_warnings == 1
+    assert warning_rows == [(1, "artist_mbid_conflict")]
+
+    conn.close()
+
+
 def test_import_warns_on_utc_time_mismatch_without_dropping_row(tmp_path: Path) -> None:
     csv_path = write_csv(
         tmp_path / "timestamp_mismatch.csv",

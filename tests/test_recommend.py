@@ -331,12 +331,61 @@ def test_generate_recommendations_reports_phase_progress(tmp_path: Path) -> None
         ("score_candidates", 0, 3, "candidate artists", "processing"),
         ("score_candidates", 3, 3, "2 positive scores", "completed"),
         ("rerank_diversity", 0, 2, "ranked candidates", "processing"),
+        ("rerank_diversity", 1, 2, "1 selected", "processing"),
+        ("rerank_diversity", 2, 2, "2 selected", "processing"),
         ("rerank_diversity", 2, 2, "2 selected", "completed"),
         ("build_explanations", 0, 2, "recommendations", "processing"),
         ("build_explanations", 2, 2, "recommendations", "completed"),
         ("persist_run", 0, 2, "recommendation rows", "processing"),
         ("persist_run", 2, 2, "recommendation rows", "completed"),
     ]
+    conn.close()
+
+
+def test_generate_recommendations_reports_incremental_rerank_progress(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    config.recommendation.diversity.max_same_primary_tag_in_top_20 = 30
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=1200,
+        name="Seed Source",
+        play_count=80,
+        lifetime_weight=10.0,
+        recent_weight=10.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=1200, tag="post-punk", weight=100.0)
+    for offset in range(1, 31):
+        _insert_candidate_from_seed(
+            conn,
+            seed_id=1200,
+            candidate_id=1200 + offset,
+            candidate_name=f"Candidate {offset:02d}",
+            tag="post-punk" if offset % 2 else "dream pop",
+            tag_rank=20 + offset,
+            similarity=0.95 - offset * 0.01,
+        )
+    events = []
+
+    generate_recommendations(
+        conn,
+        config,
+        limit=25,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+        progress_callback=events.append,
+    )
+
+    rerank_processing_counts = [
+        event.current
+        for event in events
+        if event.phase == "rerank_diversity" and event.status == "processing"
+    ]
+    assert rerank_processing_counts[0] == 0
+    assert any(0 < current < 25 for current in rerank_processing_counts)
+    assert rerank_processing_counts[-1] == 25
     conn.close()
 
 

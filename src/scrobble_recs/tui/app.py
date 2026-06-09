@@ -7,9 +7,9 @@ from duckdb import DuckDBPyConnection
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Footer, Header, Static
+from textual.widgets import DataTable, Footer, Header, Static
 
 from scrobble_recs.models.feedback import record_feedback_event, rerank_recommendation_run
 from scrobble_recs.tui.data import (
@@ -23,39 +23,76 @@ from scrobble_recs.tui.data import (
 class ScrobbleRecsTui(App[None]):
     """Textual browser for persisted recommendation runs."""
 
+    TITLE = "Moth Radio"
+
     CSS = """
-    #body {
+    Screen {
+        background: #1a2a38;
+        color: #e4e6e0;
+    }
+
+    Header {
+        background: #263849;
+        color: #e4e6e0;
+    }
+
+    Footer {
+        background: #263849;
+        color: #e4e6e0;
+    }
+
+    #main {
         height: 1fr;
+        layout: horizontal;
     }
 
     #recommendations {
-        width: 42%;
+        width: 46%;
         height: 1fr;
-        border: solid $primary;
-        padding: 1;
-        overflow-y: auto;
-        overflow-x: hidden;
+        border: solid #4e7a98;
+        background: #263849;
     }
 
-    #right-pane {
-        width: 58%;
+    #right {
+        width: 54%;
+        height: 1fr;
+        layout: vertical;
     }
 
     #detail {
-        height: 1fr;
-        border: solid $primary;
-        padding: 1;
+        height: 2fr;
+        border: solid #4e7a98;
+        background: #263849;
+        padding: 1 2;
     }
 
     #score-breakdown {
-        height: auto;
-        border: solid $secondary;
-        padding: 1;
+        height: 1fr;
+        border: solid #4e7a98;
+        background: #263849;
+        padding: 1 2;
     }
 
     #status {
         height: 1;
         padding: 0 1;
+        background: #1a2a38;
+        color: #a8b6c0;
+    }
+
+    DataTable {
+        background: #263849;
+        color: #e4e6e0;
+    }
+
+    DataTable > .datatable--header {
+        background: #2d4354;
+        color: #a8b6c0;
+    }
+
+    DataTable > .datatable--cursor {
+        background: #40576b;
+        color: #e4e6e0;
     }
 
     HelpModal {
@@ -66,9 +103,10 @@ class ScrobbleRecsTui(App[None]):
         width: 74;
         max-width: 90%;
         max-height: 90%;
-        border: thick $primary;
+        border: thick #40ABE5;
         padding: 1 2;
-        background: $surface;
+        background: #263849;
+        color: #e4e6e0;
         overflow-y: auto;
     }
     """
@@ -106,11 +144,11 @@ class ScrobbleRecsTui(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Horizontal(id="body"):
-            yield _ScrollableInspectableStatic(Text(""), id="recommendations")
-            with Vertical(id="right-pane"):
-                yield _InspectableStatic(Text(""), id="detail")
-                yield _InspectableStatic(Text(""), id="score-breakdown")
+        with Horizontal(id="main"):
+            yield RecommendationTable(id="recommendations")
+            with Vertical(id="right"):
+                yield RecommendationDetailPanel(id="detail")
+                yield ScoreBreakdownPanel(id="score-breakdown")
         yield _InspectableStatic("", id="status")
         yield Footer()
 
@@ -199,9 +237,12 @@ class ScrobbleRecsTui(App[None]):
             self.rows = []
             self.selected_index = 0
             self.selected_artist_id = None
-            self.query_one("#recommendations", _ScrollableInspectableStatic).update(Text(""))
-            self.query_one("#detail", Static).update(Text(""))
-            self.query_one("#score-breakdown", Static).update(Text(""))
+            self.query_one("#recommendations", RecommendationTable).set_rows([], 0)
+            self.query_one("#detail", RecommendationDetailPanel).update_detail(None)
+            self.query_one("#score-breakdown", ScoreBreakdownPanel).update_scores(
+                None,
+                self.show_debug_scores,
+            )
             self.query_one("#status", Static).update(str(exc))
             return
 
@@ -210,13 +251,16 @@ class ScrobbleRecsTui(App[None]):
         self.query_one("#status", Static).update(self._status_text())
 
     def _render_all(self) -> None:
-        self.query_one("#recommendations", _ScrollableInspectableStatic).update(
-            self._recommendations_text()
+        self.query_one("#recommendations", RecommendationTable).set_rows(
+            self.rows,
+            self.selected_index,
         )
         detail = self._selected_detail()
-        self.query_one("#detail", Static).update(self._detail_text(detail))
-        self.query_one("#score-breakdown", Static).update(self._score_breakdown_text(detail))
-        self.call_after_refresh(self._scroll_selected_recommendation_into_view)
+        self.query_one("#detail", RecommendationDetailPanel).update_detail(detail)
+        self.query_one("#score-breakdown", ScoreBreakdownPanel).update_scores(
+            detail,
+            self.show_debug_scores,
+        )
 
     def _selected_row(self) -> RecommendationListRow | None:
         if not self.rows:
@@ -232,67 +276,6 @@ class ScrobbleRecsTui(App[None]):
             return None
         return self.store.get_detail(self.run_id, artist_id=row.artist_id)
 
-    def _recommendations_text(self) -> Text:
-        if not self.rows:
-            return Text("No recommendations for the current run.")
-
-        text = Text()
-        for index, row in enumerate(self.rows):
-            marker = ">" if index == self.selected_index else " "
-            tags = ", ".join(row.primary_tags) if row.primary_tags else "untagged"
-            feedback = f" [{row.feedback_state}]" if row.feedback_state else ""
-            text.append(
-                f"{marker} #{row.rank:03d} {row.artist} "
-                f"score: {row.score:.3f} tags: {tags}{feedback}\n"
-            )
-        return text
-
-    def _detail_text(self, detail: RecommendationDetail | None) -> Text:
-        if detail is None:
-            return Text("No recommendation selected.")
-
-        lines = [
-            f"{detail.artist}",
-            f"rank: {detail.rank}",
-            "",
-            detail.summary or "No explanation summary recorded.",
-            "",
-            f"seed artists: {_join_or_none(detail.seed_artists)}",
-            f"tags: {_join_or_none(detail.tags)}",
-            f"status: {_join_or_none(detail.status_labels)}",
-        ]
-        if detail.classification:
-            labels = [name for name, enabled in detail.classification.items() if enabled]
-            lines.append(f"classification: {_join_or_none(tuple(labels))}")
-        if detail.feedback_history:
-            lines.append(f"feedback history: {_join_or_none(detail.feedback_history)}")
-        return Text("\n".join(lines))
-
-    def _score_breakdown_text(self, detail: RecommendationDetail | None) -> Text:
-        if detail is None:
-            return Text("")
-
-        score = detail.score_breakdown
-        lines = [
-            f"final: {score.final_score:.3f}",
-            f"raw: {score.raw_score:.3f}",
-            f"knownness: {score.knownness:.3f}",
-            f"obviousness: {score.obviousness:.3f}",
-            f"feedback: {score.feedback_score:.3f}",
-        ]
-        if self.show_debug_scores:
-            lines.extend(
-                [
-                    f"lastfm: {score.lastfm_similarity_score:.3f}",
-                    f"tags: {score.tag_similarity_score:.3f}",
-                    f"cluster fit: {score.cluster_fit_score:.3f}",
-                    f"rediscovery: {score.rediscovery_score:.3f}",
-                    f"metadata graph: {score.metadata_graph_score:.3f}",
-                    f"diversity penalty: {score.diversity_penalty:.3f}",
-                ]
-            )
-        return Text("\n".join(lines))
-
     def _status_text(self) -> str:
         run_label = self.run_id or "none"
         return f"run: {run_label}; recommendations: {len(self.rows)}"
@@ -303,13 +286,111 @@ class ScrobbleRecsTui(App[None]):
                 return row.primary_tags[0]
         return ""
 
-    def _scroll_selected_recommendation_into_view(self) -> None:
-        recommendations = self.query_one("#recommendations", _ScrollableInspectableStatic)
-        recommendations.scroll_to(
-            y=float(self.selected_index),
-            animate=False,
-            immediate=True,
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.data_table.id != "recommendations":
+            return
+        if not self.rows or event.cursor_row == self.selected_index:
+            return
+        self.selected_index = event.cursor_row
+        detail = self._selected_detail()
+        self.query_one("#detail", RecommendationDetailPanel).update_detail(detail)
+        self.query_one("#score-breakdown", ScoreBreakdownPanel).update_scores(
+            detail,
+            self.show_debug_scores,
         )
+
+
+class RecommendationTable(DataTable[str]):
+    """Compact recommendation table with test-visible plain content."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.renderable = Text("")
+        self._columns_added = False
+        super().__init__(*args, **kwargs)
+        self.cursor_type = "row"
+        self.show_cursor = True
+        self.zebra_stripes = True
+
+    def on_mount(self) -> None:
+        self.border_title = "Recommendations"
+        self._ensure_columns()
+
+    def set_rows(self, rows: list[RecommendationListRow], selected_index: int) -> None:
+        self._ensure_columns()
+        self.clear()
+        self.renderable = _recommendations_plain(rows)
+        for row in rows:
+            tags = _truncate(_join_or_none(row.primary_tags), 22)
+            classification = row.feedback_state or row.classification
+            self.add_row(
+                f"{row.rank:03d}",
+                _truncate(row.artist, 28),
+                f"{row.score:.3f}",
+                tags,
+                _truncate(classification, 10),
+                key=str(row.artist_id),
+            )
+        if rows:
+            cursor_row = min(selected_index, len(rows) - 1)
+            self.move_cursor(row=cursor_row, column=0, animate=False)
+
+    def _ensure_columns(self) -> None:
+        if self._columns_added:
+            return
+        self.add_columns("#", "Artist", "Score", "Tags", "Class")
+        self._columns_added = True
+
+
+class _InspectableStatic(Static):
+    """Compatibility shim for Textual versions that hide Static content."""
+
+    def __init__(
+        self,
+        content: Any = "",
+        *,
+        expand: bool = False,
+        shrink: bool = False,
+        markup: bool = True,
+        name: str | None = None,
+        id: str | None = None,
+        classes: str | None = None,
+        disabled: bool = False,
+    ) -> None:
+        self.renderable = _to_text(content)
+        super().__init__(
+            self.renderable,
+            expand=expand,
+            shrink=shrink,
+            markup=markup,
+            name=name,
+            id=id,
+            classes=classes,
+            disabled=disabled,
+        )
+
+    def update(self, content: Any = "", *, layout: bool = True) -> None:
+        self.renderable = _to_text(content)
+        super().update(self.renderable, layout=layout)
+
+
+class RecommendationDetailPanel(_InspectableStatic):
+    """Selected recommendation detail panel."""
+
+    def on_mount(self) -> None:
+        self.border_title = "Selected Recommendation"
+
+    def update_detail(self, detail: RecommendationDetail | None) -> None:
+        self.update(_detail_text(detail))
+
+
+class ScoreBreakdownPanel(_InspectableStatic):
+    """Compact score breakdown panel."""
+
+    def on_mount(self) -> None:
+        self.border_title = "Score Breakdown"
+
+    def update_scores(self, detail: RecommendationDetail | None, show_debug_scores: bool) -> None:
+        self.update(_score_breakdown_text(detail, show_debug_scores))
 
 
 class HelpModal(ModalScreen[None]):
@@ -330,6 +411,97 @@ class HelpModal(ModalScreen[None]):
 
 def _join_or_none(values: tuple[str, ...]) -> str:
     return ", ".join(values) if values else "none"
+
+
+def _recommendations_plain(rows: list[RecommendationListRow]) -> Text:
+    if not rows:
+        return Text("No recommendations for the current run.")
+    lines = ["#    Artist                         Score  Tags                   Class"]
+    for row in rows:
+        tags = _truncate(_join_or_none(row.primary_tags), 22)
+        classification = row.feedback_state or row.classification
+        lines.append(
+            f"{row.rank:03d}  {_truncate(row.artist, 28):28}  "
+            f"{row.score:.3f}  {tags:22}  {_truncate(classification, 10)}"
+        )
+    return Text("\n".join(lines))
+
+
+def _detail_text(detail: RecommendationDetail | None) -> Text:
+    if detail is None:
+        return Text("No recommendation selected.")
+
+    lines = [
+        detail.artist,
+        f"rank {detail.rank}",
+        "",
+        detail.summary or "No explanation summary recorded.",
+        "",
+        f"Seed artists: {_join_or_none(detail.seed_artists)}",
+        f"Tags: {_join_or_none(detail.tags)}",
+        f"Status: {_join_or_none(detail.status_labels)}",
+    ]
+    if detail.classification:
+        labels = tuple(name for name, enabled in detail.classification.items() if enabled)
+        lines.append(f"Classification: {_join_or_none(labels)}")
+    if detail.feedback_history:
+        lines.append(f"Feedback history: {_join_or_none(detail.feedback_history)}")
+    return Text("\n".join(lines))
+
+
+def _score_breakdown_text(
+    detail: RecommendationDetail | None,
+    show_debug_scores: bool,
+) -> Text:
+    if detail is None:
+        return Text("")
+
+    score = detail.score_breakdown
+    rows = [
+        ("Match", score.display_score),
+        ("Final", score.final_score),
+        ("Raw", score.raw_score),
+        ("Knownness", score.knownness),
+        ("Obviousness", score.obviousness),
+        ("Feedback", score.feedback_score),
+    ]
+    lines = [f"{label:11} {value:0.3f}  {score_bar(value)}" for label, value in rows]
+    if show_debug_scores:
+        lines.extend(
+            [
+                f"lastfm: {score.lastfm_similarity_score:.3f}",
+                f"tags: {score.tag_similarity_score:.3f}",
+                f"cluster fit: {score.cluster_fit_score:.3f}",
+                f"rediscovery: {score.rediscovery_score:.3f}",
+                f"metadata graph: {score.metadata_graph_score:.3f}",
+                f"diversity penalty: {score.diversity_penalty:.3f}",
+            ]
+        )
+    return Text("\n".join(lines))
+
+
+def score_bar(value: float, *, max_value: float = 1.0, width: int = 10) -> str:
+    if max_value <= 0 or width <= 0:
+        return "[]"
+    normalized = max(0.0, min(value / max_value, 1.0))
+    filled = round(normalized * width)
+    return f"[{'#' * filled}{'-' * (width - filled)}]"
+
+
+def _truncate(value: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if len(value) <= width:
+        return value
+    if width == 1:
+        return "."
+    return value[: width - 1] + "."
+
+
+def _to_text(renderable: Any) -> Text:
+    if isinstance(renderable, Text):
+        return renderable
+    return Text(str(renderable))
 
 
 def _help_text() -> Text:
@@ -370,65 +542,3 @@ def _index_for_artist(rows: list[RecommendationListRow], artist_id: int) -> int:
         if row.artist_id == artist_id:
             return index
     return 0
-
-
-class _InspectableStatic(Static):
-    """Compatibility shim for Textual versions that hide Static content."""
-
-    def __init__(
-        self,
-        content: Any = "",
-        *,
-        expand: bool = False,
-        shrink: bool = False,
-        markup: bool = True,
-        name: str | None = None,
-        id: str | None = None,
-        classes: str | None = None,
-        disabled: bool = False,
-    ) -> None:
-        self.renderable = _to_text(content)
-        super().__init__(
-            self.renderable,
-            expand=expand,
-            shrink=shrink,
-            markup=markup,
-            name=name,
-            id=id,
-            classes=classes,
-            disabled=disabled,
-        )
-
-    def update(self, content: Any = "", *, layout: bool = True) -> None:
-        self.renderable = _to_text(content)
-        super().update(self.renderable, layout=layout)
-
-
-def _to_text(renderable: Any) -> Text:
-    if isinstance(renderable, Text):
-        return renderable
-    return Text(str(renderable))
-
-
-class _ScrollableInspectableStatic(VerticalScroll):
-    """Scrollable container with inspectable text content for tests."""
-
-    def __init__(
-        self,
-        content: Any = "",
-        *,
-        name: str | None = None,
-        id: str | None = None,
-        classes: str | None = None,
-        disabled: bool = False,
-    ) -> None:
-        self.renderable = _to_text(content)
-        super().__init__(name=name, id=id, classes=classes, disabled=disabled)
-
-    def compose(self) -> ComposeResult:
-        yield _InspectableStatic(self.renderable, id="recommendation-list-content")
-
-    def update(self, content: Any = "") -> None:
-        self.renderable = _to_text(content)
-        if self.is_mounted:
-            self.query_one("#recommendation-list-content", Static).update(self.renderable)

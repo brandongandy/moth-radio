@@ -1,5 +1,102 @@
 # Implementation Log
 
+## 2026-06-09: User-facing score normalization
+
+Changed:
+
+- Diagnosed low top recommendation scores as raw utility values rather than
+  calibrated confidence values.
+- Kept persisted `recommendation.final_score` unchanged for inspectability and
+  ranking/debug use.
+- Normalized TUI recommendation list scores per run so the top visible
+  recommendation displays as `1.000`.
+- Added a normalized match score to the TUI score breakdown while preserving
+  raw final/raw/component scores.
+- Normalized exported CSV/JSONL `score` values per run.
+
+Verified:
+
+- `python -m pytest tests/test_tui_data.py::test_store_normalizes_display_scores_without_changing_raw_breakdown tests/test_export.py::test_export_recommendations_normalizes_user_score_per_run -v`
+- `python -m pytest tests/test_tui_data.py tests/test_tui_app.py tests/test_export.py -v`
+- `python -m pytest tests/test_recommend.py -v`
+
+## 2026-06-08: Moth Radio TUI table refactor
+
+Changed:
+
+- Replaced the wrapped recommendation text list with a Textual `DataTable` showing rank, artist, score, tags, and classification/feedback state in one-line rows.
+- Added dedicated selected-recommendation and score-breakdown panel widgets with Helion palette styling.
+- Changed the Textual app title/header from `ScrobbleRecsTui` to `Moth Radio`.
+- Added compact score bars for the main score components while preserving the debug score toggle.
+- Kept existing keyboard navigation, filters, run switching, and feedback actions wired to the persisted local recommendation store.
+- Added focused coverage for DataTable arrow-key navigation updating the selected detail panel.
+- Updated the TUI README wording for the table/detail/score workflow.
+
+Verified:
+
+- `python -m pytest tests/test_tui_app.py` before implementation -> failed because `#recommendations` was still `_ScrollableInspectableStatic` instead of `DataTable`, and the app title was `ScrobbleRecsTui`.
+- `python -m pytest tests/test_tui_app.py` -> 21 passed.
+- `python -m pytest tests/test_tui_data.py` -> 3 passed.
+- `python -m ruff check .` -> All checks passed.
+- `python -m ruff format --check .` -> 49 files already formatted.
+- `python -m mypy src` -> Success, no issues found in 31 source files.
+- `python -m pytest` -> 231 passed.
+
+## 2026-06-08: Diversity rerank progress and scaling
+
+Changed:
+
+- Changed diversity reranking to keep each remaining candidate's best known
+  similarity to the selected set instead of recomputing similarity against
+  every selected artist on every pass.
+- Precomputed candidate tag vectors for the rerank pass.
+- Added incremental `rerank_diversity` progress events so large recommendation
+  runs no longer appear stuck at zero while reranking.
+- Added regression coverage for incremental rerank progress during a larger
+  recommendation selection.
+
+Verified:
+
+- `python -m pytest tests/test_recommend.py::test_generate_recommendations_reports_incremental_rerank_progress -v`
+  before implementation -> failed because rerank progress only reported zero
+  until completion.
+- `python -m pytest tests/test_recommend.py -v` -> 32 passed.
+- `python -m pytest` -> 229 passed.
+- `python -m ruff check .` -> All checks passed.
+- `python -m ruff format --check .` -> initially reported
+  `src\scrobble_recs\models\recommend.py` needed formatting; formatted it with
+  `python -m ruff format src/scrobble_recs/models/recommend.py`.
+- `python -m mypy src` -> Success, no issues found in 31 source files.
+
+## 2026-06-08: Existing database import replacement
+
+Changed:
+
+- Fixed replacement imports into reopened DuckDB files with persisted indexed
+  rows by avoiding reuse of stale `artist_id` and `import_warning.warning_id`
+  values inside the replacement transaction.
+- Kept replacement semantics for import-owned tables: old import warnings,
+  artists, tracks, scrobbles, and enrichment rows are still deleted before the
+  current import is inserted.
+- Added regressions for reopening an existing database before reimporting
+  tracks and for replacing many persisted import warnings without colliding on
+  warning IDs.
+
+Verified:
+
+- `python -m pytest tests/test_import.py::test_import_replaces_many_existing_import_warnings_without_reusing_ids -v`
+  before implementation -> failed with duplicate `warning_id: 1`.
+- `python -m pytest tests/test_import.py::test_import_replaces_previous_tracks_after_reopening_database -v`
+  before implementation -> failed with duplicate `(artist_id, track_key)`.
+- Reproduced the user's traceback against a copied DuckDB database, then reran
+  the same real CSV import against the copy after implementation -> completed
+  with 363,565 scrobbles and 363,618 current import warnings.
+- `python -m pytest tests/test_import.py -v` -> 28 passed.
+- `python -m pytest` -> 228 passed.
+- `python -m ruff check .` -> All checks passed.
+- `python -m ruff format --check .` -> 49 files already formatted.
+- `python -m mypy src` -> Success, no issues found in 31 source files.
+
 ## 2026-06-07: Recommendation quality gate
 
 Changed:

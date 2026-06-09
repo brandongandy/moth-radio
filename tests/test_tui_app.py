@@ -2,6 +2,8 @@ import asyncio
 import json
 from pathlib import Path
 
+from textual.widgets import DataTable
+
 from scrobble_recs.config import load_config
 from scrobble_recs.db import initialize_database
 from scrobble_recs.tui.app import ScrobbleRecsTui
@@ -68,9 +70,38 @@ async def _test_tui_renders_recommendation_list_and_selected_detail(tmp_path: Pa
         app = ScrobbleRecsTui(conn)
         async with app.run_test() as pilot:
             await pilot.pause()
+            table = app.query_one("#recommendations", DataTable)
+            assert table.row_count == 1
+            assert [column.label.plain for column in table.ordered_columns] == [
+                "#",
+                "Artist",
+                "Score",
+                "Tags",
+                "Class",
+            ]
             assert "Bauhaus" in _rendered_plain(app, "#recommendations")
             assert "Similar to post-punk seeds." in _rendered_plain(app, "#detail")
-            assert "final: 0.840" in _rendered_plain(app, "#score-breakdown")
+            assert "Final" in _rendered_plain(app, "#score-breakdown")
+            assert "0.840" in _rendered_plain(app, "#score-breakdown")
+            assert "[" in _rendered_plain(app, "#score-breakdown")
+    finally:
+        conn.close()
+
+
+def test_tui_header_uses_moth_radio_title(tmp_path: Path) -> None:
+    asyncio.run(_test_tui_header_uses_moth_radio_title(tmp_path))
+
+
+async def _test_tui_header_uses_moth_radio_title(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    try:
+        _insert_single_recommendation(conn, artist_id=11, artist="Title Artist")
+
+        app = ScrobbleRecsTui(conn)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.title == "Moth Radio"
     finally:
         conn.close()
 
@@ -110,6 +141,50 @@ async def _test_tui_moves_selection_and_updates_detail(tmp_path: Path) -> None:
             await pilot.pause()
             assert "Second Artist" in _rendered_plain(app, "#detail")
             assert app.selected_artist_id == 21
+    finally:
+        conn.close()
+
+
+def test_tui_arrow_keys_move_selection_and_update_detail(tmp_path: Path) -> None:
+    asyncio.run(_test_tui_arrow_keys_move_selection_and_update_detail(tmp_path))
+
+
+async def _test_tui_arrow_keys_move_selection_and_update_detail(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    try:
+        run_id = "00000000-0000-0000-0000-000000000113"
+        _insert_run(conn, run_id=run_id, mode="balanced")
+        _insert_artist(conn, artist_id=120, name="Arrow First")
+        _insert_artist(conn, artist_id=121, name="Arrow Second")
+        _insert_recommendation(
+            conn,
+            run_id=run_id,
+            artist_id=120,
+            rank=1,
+            final_score=0.9,
+            explanation={"summary": "Arrow first.", "tags": [{"tag": "ambient"}]},
+        )
+        _insert_recommendation(
+            conn,
+            run_id=run_id,
+            artist_id=121,
+            rank=2,
+            final_score=0.8,
+            explanation={"summary": "Arrow second.", "tags": [{"tag": "drone"}]},
+        )
+
+        app = ScrobbleRecsTui(conn)
+        async with app.run_test() as pilot:
+            await pilot.press("down")
+            await pilot.pause()
+            assert app.selected_artist_id == 121
+            assert "Arrow Second" in _rendered_plain(app, "#detail")
+
+            await pilot.press("up")
+            await pilot.pause()
+            assert app.selected_artist_id == 120
+            assert "Arrow First" in _rendered_plain(app, "#detail")
     finally:
         conn.close()
 

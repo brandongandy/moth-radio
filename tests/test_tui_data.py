@@ -94,7 +94,7 @@ def test_store_loads_latest_run_recommendations_with_compact_columns(tmp_path: P
     assert [row.artist for row in rows] == ["Bauhaus"]
     assert rows[0].run_id == latest_run_id
     assert rows[0].rank == 1
-    assert rows[0].score == pytest.approx(0.842)
+    assert rows[0].score == pytest.approx(1.0)
     assert rows[0].primary_tags == ("post-punk",)
     assert rows[0].why_short == "Fits post-punk tags."
     assert rows[0].feedback_state == ""
@@ -214,6 +214,45 @@ def test_store_loads_detail_score_breakdown_and_missing_enrichment_statuses(
     assert detail.score_breakdown.raw_score == pytest.approx(0.61)
     assert detail.score_breakdown.feedback_score == pytest.approx(-0.10)
     assert detail.status_labels == ("partial_similarity", "partial_tags")
+    conn.close()
+
+
+def test_store_normalizes_display_scores_without_changing_raw_breakdown(
+    tmp_path: Path,
+) -> None:
+    conn = initialize_database(load_config(write_config(tmp_path)))
+    run_id = "00000000-0000-0000-0000-000000000005"
+    _insert_run(conn, run_id=run_id, mode="balanced")
+    _insert_artist(conn, artist_id=40, name="Low Top Score")
+    _insert_artist(conn, artist_id=41, name="Lower Score")
+    _insert_recommendation(
+        conn,
+        run_id=run_id,
+        artist_id=40,
+        rank=1,
+        final_score=0.087,
+        knownness=0.10,
+        obviousness=0.10,
+        explanation={"summary": "Top low utility.", "tags": [{"tag": "coldwave"}]},
+    )
+    _insert_recommendation(
+        conn,
+        run_id=run_id,
+        artist_id=41,
+        rank=2,
+        final_score=0.0435,
+        knownness=0.10,
+        obviousness=0.10,
+        explanation={"summary": "Half utility.", "tags": [{"tag": "coldwave"}]},
+    )
+
+    store = TuiRecommendationStore(conn)
+    rows = store.list_recommendations(run_id=run_id)
+    detail = store.get_detail(run_id, artist_id=40)
+
+    assert [row.score for row in rows] == [pytest.approx(1.0), pytest.approx(0.5)]
+    assert detail.score_breakdown.display_score == pytest.approx(1.0)
+    assert detail.score_breakdown.final_score == pytest.approx(0.087)
     conn.close()
 
 

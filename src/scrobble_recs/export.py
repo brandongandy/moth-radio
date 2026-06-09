@@ -51,6 +51,7 @@ def _load_rows(conn: DuckDBPyConnection, run_id: str) -> list[dict[str, object]]
             r.rank,
             a.canonical_name,
             r.final_score,
+            max(r.final_score) OVER () AS max_final_score,
             r.knownness,
             r.obviousness,
             r.rediscovery_score,
@@ -63,7 +64,16 @@ def _load_rows(conn: DuckDBPyConnection, run_id: str) -> list[dict[str, object]]
         [run_id],
     ).fetchall()
     result: list[dict[str, object]] = []
-    for rank, artist, score, knownness, obviousness, rediscovery_score, explanation_json in rows:
+    for (
+        rank,
+        artist,
+        score,
+        max_score,
+        knownness,
+        obviousness,
+        rediscovery_score,
+        explanation_json,
+    ) in rows:
         explanation = json.loads(str(explanation_json))
         tags = explanation.get("tags", [])
         primary_tags = ", ".join(str(tag["tag"]) for tag in tags[:3])
@@ -72,7 +82,7 @@ def _load_rows(conn: DuckDBPyConnection, run_id: str) -> list[dict[str, object]]
             {
                 "rank": int(rank),
                 "artist": artist_name,
-                "score": float(score),
+                "score": _display_score(float(score or 0.0), float(max_score or 0.0)),
                 "primary_tags": primary_tags,
                 "knownness": float(knownness),
                 "obviousness": float(obviousness),
@@ -110,3 +120,9 @@ def _write_jsonl(output_path: Path, rows: list[dict[str, object]]) -> None:
     with output_path.open("w", encoding="utf-8") as file:
         for row in rows:
             file.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def _display_score(final_score: float, max_final_score: float) -> float:
+    if max_final_score <= 0.0:
+        return 0.0
+    return max(0.0, min(final_score / max_final_score, 1.0))

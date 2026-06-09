@@ -145,32 +145,6 @@ to the configured maximum and falls back to a stale successful cache entry when
 one exists. Tests cover this behavior with mocked HTTP; they do not call
 Last.fm.
 
-## How To Contribute
-
-Keep changes local-first, testable, and small enough to inspect. Do not add
-required Spotify dependencies, live API calls in tests, committed API keys, or
-machine-specific local paths.
-
-Run the standard checks before committing:
-
-```bash
-python -m pytest
-python -m ruff check .
-python -m ruff format --check .
-python -m mypy src
-```
-
-Testing guidelines:
-
-- Use deterministic fixtures under `tests/fixtures`.
-- Mock Last.fm, MusicBrainz, and ListenBrainz clients.
-- Use temporary DuckDB files in database tests.
-- Add behavioral tests for new logic; avoid tests that only prove a file or
-  object exists.
-
-When behavior changes, update the relevant docs and `docs/implementation-log.md`
-with what changed and how it was verified.
-
 ## Recommendations
 
 `recommend` generates a persisted artist recommendation run from local DuckDB
@@ -196,6 +170,11 @@ scrobble-recs export --config config.example.json --format jsonl --output recs.j
 ```
 
 `recommend` does not call live APIs. Run `enrich --source lastfm` first to populate the local graph.
+Persisted `recommendation.final_score` values are raw ranking utility scores,
+so their absolute magnitude can be small. User-facing recommendation lists and
+exports normalize the score within each run so the top recommendation displays
+as `1.000` while detailed score breakdowns keep the raw utility values
+inspectable.
 
 ## TUI
 
@@ -206,9 +185,10 @@ scrobble-recs tui --config config.example.json
 ```
 
 The TUI reads local DuckDB recommendation data. It does not call live APIs while
-you browse. Use `recommend` first to create a run, then use the TUI to browse
-ranked artists, inspect explanation details and score breakdowns, switch runs,
-apply basic filters, and record feedback with keybindings.
+you browse. Use `recommend` first to create a run, then use the Moth Radio TUI
+to browse ranked artists in a compact table, inspect the selected artist's
+explanation details and score breakdown, switch runs, apply basic filters, and
+record feedback with keybindings.
 
 Useful keys:
 
@@ -293,3 +273,29 @@ By default the command records the event and reranks that persisted run. Use
 `--no-rerank` to record feedback only. `recommend` consumes feedback as artist
 boosts/suppression, tag boosts/suppression, and lightweight
 similarity-neighborhood adjustments.
+
+## How To Contribute
+
+Keep changes local-first, testable, and small enough to inspect. Do not add
+required Spotify dependencies, live API calls in tests, committed API keys, or
+machine-specific local paths.
+
+Run the standard checks before committing:
+
+```bash
+python -m pytest
+python -m ruff check .
+python -m ruff format --check .
+python -m mypy src
+```
+
+Testing guidelines:
+
+- Use deterministic fixtures under `tests/fixtures`.
+- Mock Last.fm, MusicBrainz, and ListenBrainz clients.
+- Use temporary DuckDB files in database tests.
+- Add behavioral tests for new logic; avoid tests that only prove a file or
+  object exists.
+
+When behavior changes, update the relevant docs and `docs/implementation-log.md`
+with what changed and how it was verified.

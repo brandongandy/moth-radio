@@ -26,7 +26,9 @@
       "api_key": "${LASTFM_API_KEY}",
       "base_url": "https://ws.audioscrobbler.com/2.0/",
       "rate_limit_per_second": 2.0,
-      "cache_ttl_days": 180
+      "cache_ttl_days": 180,
+      "timeout_seconds": 20.0,
+      "stale_cache_on_error": true
     },
     "musicbrainz": {
       "enabled": false,
@@ -41,6 +43,15 @@
       "use_recommendation_api": false
     }
   },
+  "enrichment": {
+    "seed_artist_limit": 250,
+    "candidate_artist_limit": 5000,
+    "similar_artists_per_seed": 100,
+    "top_tags_per_artist": 20,
+    "tag_top_artists_limit": 100,
+    "max_queue_attempts": 3,
+    "queue_batch_size": 1000
+  },
   "recommendation": {
     "default_mode": "balanced",
     "seed_artist_limit": 250,
@@ -48,12 +59,18 @@
     "min_seed_scrobbles": 3,
     "max_knownness_default": 0.65,
     "rediscovery_enabled": true,
+    "run_limit": 500,
     "obviousness": {
       "enabled": true,
       "top_n_per_tag_penalty": 10,
       "top_n_per_tag_hide": 3,
       "tag_top_artists_limit": 100,
       "penalty_weight": 0.25
+    },
+    "knownness": {
+      "enabled": true,
+      "threshold": 0.65,
+      "penalty_weight": 0.40
     },
     "weights": {
       "lastfm_similarity": 0.35,

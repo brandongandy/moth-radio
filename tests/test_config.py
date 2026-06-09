@@ -115,6 +115,7 @@ def test_initialize_database_applies_initial_migration(tmp_path: Path) -> None:
         "artist_listening_fact",
         "artist_similarity_edge",
         "artist_tag",
+        "enrichment_queue",
         "enrichment_work",
         "feedback_event",
         "import_warning",

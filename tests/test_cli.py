@@ -786,3 +786,76 @@ def test_tui_command_launches_textual_app(tmp_path: Path, monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert calls == ["constructed", "ran"]
+
+
+def test_evaluate_command_runs_and_prints_metrics(monkeypatch, tmp_path):
+    from datetime import datetime
+    from scrobble_recs.config import load_config
+    from scrobble_recs.db import initialize_database
+    from scrobble_recs.importers.lastfm_csv import import_lastfm_csv
+    from scrobble_recs.models.evaluate import EvaluationResult
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "test",
+                    "db_path": str(tmp_path / "db.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": "tests/fixtures/tiny_lastfm_export.csv",
+                },
+                "recommendation": {
+                    "seed_artist_limit": 10,
+                    "similar_artists_per_seed": 10,
+                    "min_seed_scrobbles": 2,
+                    "obviousness": {"tag_top_artists_limit": 100},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(config_path)
+    conn = initialize_database(cfg)
+    try:
+        import_lastfm_csv(conn, cfg.input.lastfm_csv)
+    finally:
+        conn.close()
+
+    fake_result = EvaluationResult(
+        train_until="2021-01-02T23:59:59",
+        test_from="2021-01-03T00:00:00",
+        recommendations_generated=5,
+        recall_at_50=0.042,
+        recall_at_100=0.067,
+        ndcg_at_50=0.031,
+        knownness_median=0.08,
+        obviousness_median=0.12,
+        tag_diversity_at_20=0.78,
+        rediscovery_hit_rate=0.05,
+        external_candidate_share=0.83,
+    )
+
+    import scrobble_recs.cli as cli_module
+
+    def fake_evaluate(conn, config, *, train_until, test_from):
+        return fake_result
+
+    monkeypatch.setattr(cli_module, "evaluate_recommendations_from_config", fake_evaluate)
+
+    from typer.testing import CliRunner
+    from scrobble_recs.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["evaluate", "--config", str(config_path), "--split-date", "2021-01-03"],
+    )
+    assert result.exit_code == 0
+    assert "recall@50" in result.stdout
+    assert "0.042" in result.stdout
+    assert "ndcg@50" in result.stdout

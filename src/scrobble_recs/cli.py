@@ -22,6 +22,7 @@ from scrobble_recs.enrichment.lastfm import (
 )
 from scrobble_recs.export import ExportFormat, export_recommendations
 from scrobble_recs.importers.lastfm_csv import ImportStats, get_import_stats, import_lastfm_csv
+from scrobble_recs.models.evaluate import EvaluationResult, evaluate_recommendations
 from scrobble_recs.models.feedback import record_feedback_event, rerank_recommendation_run
 from scrobble_recs.models.profile_builder import build_profile
 from scrobble_recs.models.recommend import (
@@ -288,6 +289,65 @@ def tui_command(
         conn.close()
 
 
+@app.command("evaluate")
+def evaluate_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    split_date: Annotated[
+        str | None,
+        typer.Option("--split-date", help="Date to split train/test (YYYY-MM-DD)."),
+    ] = None,
+    train_until: Annotated[
+        str | None,
+        typer.Option("--train-until", help="End of training period (YYYY-MM-DD or ISO timestamp)."),
+    ] = None,
+    test_from: Annotated[
+        str | None,
+        typer.Option("--test-from", help="Start of test period (YYYY-MM-DD or ISO timestamp)."),
+    ] = None,
+) -> None:
+    """Evaluate recommendation quality using a train/test split."""
+    from datetime import timedelta
+
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        # Resolve split dates.
+        if train_until and test_from:
+            train_dt = _parse_timestamp(train_until)
+            test_dt = _parse_timestamp(test_from)
+        elif split_date:
+            train_dt = _parse_timestamp(split_date).replace(hour=23, minute=59, second=59)
+            test_dt = _parse_timestamp(split_date).replace(hour=0, minute=0, second=0) + timedelta(days=1)
+        else:
+            console.print("Error: provide --split-date or both --train-until and --test-from")
+            raise typer.Exit(code=1)
+
+        console.print("Generating evaluation recommendations from local DuckDB data...")
+        result = evaluate_recommendations_from_config(
+            conn,
+            resolved_config,
+            train_until=train_dt,
+            test_from=test_dt,
+        )
+    finally:
+        conn.close()
+
+    console.print("")
+    console.print("Evaluation")
+    console.print("")
+    console.print(f"train_until: {result.train_until}")
+    console.print(f"test_from: {result.test_from}")
+    console.print("")
+    console.print(f"recall@50: {result.recall_at_50:.3f}")
+    console.print(f"recall@100: {result.recall_at_100:.3f}")
+    console.print(f"ndcg@50: {result.ndcg_at_50:.3f}")
+    console.print(f"tag_diversity@20: {result.tag_diversity_at_20:.3f}")
+    console.print(f"knownness median: {result.knownness_median:.3f}")
+    console.print(f"obviousness median: {result.obviousness_median:.3f}")
+    console.print(f"rediscovery_hit_rate: {result.rediscovery_hit_rate:.3f}")
+    console.print(f"external_candidate_share: {result.external_candidate_share:.3f}")
+
+
 @app.command("feedback")
 def feedback_command(
     config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
@@ -352,6 +412,27 @@ def feedback_command(
             raise typer.Exit(code=1) from exc
     finally:
         conn.close()
+
+
+def _parse_timestamp(value: str) -> datetime:
+    """Parse YYYY-MM-DD or ISO-8601 timestamp string."""
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        raise typer.BadParameter(f"invalid timestamp: {value}")
+
+
+def evaluate_recommendations_from_config(
+    conn: DuckDBPyConnection,
+    config: ScrobbleRecsConfig,
+    *,
+    train_until: datetime,
+    test_from: datetime,
+) -> EvaluationResult:
+    """Thin wrapper for CLI monkeypatching in tests."""
+    return evaluate_recommendations(
+        conn, config, train_until=train_until, test_from=test_from
+    )
 
 
 def _count_query(conn: DuckDBPyConnection, sql: str) -> int:

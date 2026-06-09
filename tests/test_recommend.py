@@ -2290,3 +2290,47 @@ def test_generate_recommendations_positive_feedback_bypasses_fatigue(
     explanation = json.loads(explanation_json)
     assert explanation["fatigue"]["penalty"] == 0.0
     conn.close()
+
+
+def test_recommendation_candidate_migration_creates_table():
+    from pathlib import Path
+    import duckdb
+
+    conn = duckdb.connect(":memory:")
+    migration_path = Path(
+        "src/scrobble_recs/sql/008_recommendation_candidate.sql"
+    )
+    conn.execute(migration_path.read_text(encoding="utf-8"))
+
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
+        ).fetchall()
+    }
+    assert "recommendation_candidate" in tables
+    conn.close()
+
+
+def test_generate_recommendations_persists_candidates(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    try:
+        import_lastfm_csv(conn, Path("tests/fixtures/tiny_lastfm_export.csv"))
+        run_lastfm_enrichment(conn, config, client=RecommendationFakeLastFmClient())
+
+        stats = generate_recommendations(
+            conn,
+            config,
+            limit=3,
+            mode="balanced",
+            as_of=datetime(2026, 6, 4),
+        )
+
+        rows = conn.execute(
+            "SELECT count(*) FROM recommendation_candidate WHERE run_id = CAST(? AS UUID)",
+            [stats.run_id],
+        ).fetchone()
+        assert int(rows[0]) > 0
+    finally:
+        conn.close()

@@ -1,5 +1,25 @@
 # Implementation Log
 
+## 2026-06-09: v0.2 spec gap closure
+
+Added:
+- `KnownnessConfig` and `EnrichmentConfig` Pydantic models with validators
+- `timeout_seconds` and `stale_cache_on_error` fields to `LastFmApiConfig`
+- `run_limit` field to `RecommendationConfig`
+- `evaluate` command with split-date metrics (recall, ndcg, diversity, knownness, etc.)
+- `cache` / `cache-inspect` / `cache-expire` commands for API cache management
+- `enrich-plan` / `enrich-status` / `enrich-retry` commands for queue-based enrichment workflow
+- `enrichment_queue` and `recommendation_candidate` table migrations
+- `profile-tags` command
+- TUI cache status display via `CacheSummary` in `TuiRecommendationStore`
+- `_persist_candidates` in recommend.py to persist candidate metadata
+
+Verified:
+- `python -m pytest` — 261 passed
+- `python -m ruff check .` — All checks passed
+- `python -m ruff format --check .` — 55 files already formatted
+- `python -m mypy src` — Success, no issues found
+
 ## 2026-06-09: User-facing score normalization
 
 Changed:

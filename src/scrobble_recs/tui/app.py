@@ -154,6 +154,12 @@ class ScrobbleRecsTui(App[None]):
 
     def on_mount(self) -> None:
         self._reload_rows()
+        # Show cache status in the status bar.
+        cache = self.store.cache_summary()
+        if cache.total_entries > 0:
+            self.query_one("#status", Static).update(
+                f"Cache: {cache.fresh_entries} fresh / {cache.total_entries} total"
+            )
 
     def action_move_down(self) -> None:
         if not self.rows:

@@ -70,6 +70,13 @@ class RecommendationDetail:
     feedback_history: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class CacheSummary:
+    total_entries: int
+    fresh_entries: int
+    stale_entries: int
+
+
 class TuiRecommendationStore:
     def __init__(self, conn: DuckDBPyConnection) -> None:
         self._conn = conn
@@ -147,6 +154,22 @@ class TuiRecommendationStore:
             for row in rows
         ]
         return [row for row in recommendations if _matches_filters(row, resolved_filters)]
+
+    def cache_summary(self) -> CacheSummary:
+        total_row = self._conn.execute("SELECT count(*) FROM api_cache").fetchone()
+        total = int(total_row[0]) if total_row else 0
+
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        fresh_row = self._conn.execute(
+            "SELECT count(*) FROM api_cache WHERE expires_at > ? AND response_status BETWEEN 200 AND 299",
+            [now],
+        ).fetchone()
+        fresh = int(fresh_row[0]) if fresh_row else 0
+
+        stale = total - fresh
+        return CacheSummary(total_entries=total, fresh_entries=fresh, stale_entries=stale)
 
     def get_detail(self, run_id: str, *, artist_id: int) -> RecommendationDetail:
         row = self._conn.execute(

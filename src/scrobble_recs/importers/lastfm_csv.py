@@ -84,13 +84,15 @@ def import_lastfm_csv(
         try:
             _create_import_stage(conn, staging_csv)
             _create_warning_stage(conn, warning_csv)
+            next_artist_id = _next_id(conn, "artist", "artist_id")
+            next_warning_id = _next_id(conn, "import_warning", "warning_id")
             _replace_import_tables(conn)
             _insert_raw_scrobbles(conn)
             _insert_scrobbles(conn)
-            _insert_artist_mbid_conflict_warnings(conn)
-            _insert_track_mbid_conflict_warnings(conn)
-            _insert_import_warnings(conn)
-            _insert_provisional_artists(conn)
+            _insert_artist_mbid_conflict_warnings(conn, next_warning_id)
+            _insert_track_mbid_conflict_warnings(conn, next_warning_id)
+            _insert_import_warnings(conn, next_warning_id)
+            _insert_provisional_artists(conn, next_artist_id)
             _insert_provisional_tracks(conn)
             _rebuild_artist_listening_facts(conn)
         except Exception:
@@ -509,34 +511,7 @@ def _replace_import_tables(conn: DuckDBPyConnection) -> None:
     )
 
 
-def _insert_import_warnings(conn: DuckDBPyConnection) -> None:
-    next_id = _next_id(conn, "import_warning", "warning_id")
-    conn.execute(
-        """
-        INSERT INTO import_warning (
-            warning_id,
-            import_row_number,
-            warning_code,
-            severity,
-            message,
-            evidence
-        )
-        SELECT
-            ? + row_number() OVER (ORDER BY import_row_number, warning_code, message) - 1
-                AS warning_id,
-            import_row_number,
-            warning_code,
-            severity,
-            message,
-            CAST(evidence AS JSON) AS evidence
-        FROM _scrobble_recs_import_warning_stage
-        ORDER BY import_row_number, warning_code, message
-        """,
-        [next_id],
-    )
-
-
-def _insert_artist_mbid_conflict_warnings(conn: DuckDBPyConnection) -> None:
+def _insert_import_warnings(conn: DuckDBPyConnection, first_warning_id: int) -> None:
     conn.execute(
         """
         INSERT INTO import_warning (
@@ -548,7 +523,42 @@ def _insert_artist_mbid_conflict_warnings(conn: DuckDBPyConnection) -> None:
             evidence
         )
         WITH next_id AS (
-            SELECT coalesce(max(warning_id), 0) AS base_id FROM import_warning
+            SELECT greatest(coalesce(max(warning_id), 0), ?) AS base_id
+            FROM import_warning
+        )
+        SELECT
+            next_id.base_id
+                + row_number() OVER (ORDER BY import_row_number, warning_code, message)
+                AS warning_id,
+            import_row_number,
+            warning_code,
+            severity,
+            message,
+            CAST(evidence AS JSON) AS evidence
+        FROM _scrobble_recs_import_warning_stage, next_id
+        ORDER BY import_row_number, warning_code, message
+        """,
+        [first_warning_id - 1],
+    )
+
+
+def _insert_artist_mbid_conflict_warnings(
+    conn: DuckDBPyConnection,
+    first_warning_id: int,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO import_warning (
+            warning_id,
+            import_row_number,
+            warning_code,
+            severity,
+            message,
+            evidence
+        )
+        WITH next_id AS (
+            SELECT greatest(coalesce(max(warning_id), 0), ?) AS base_id
+            FROM import_warning
         ),
         conflicts AS (
             SELECT
@@ -570,11 +580,15 @@ def _insert_artist_mbid_conflict_warnings(conn: DuckDBPyConnection) -> None:
             'artist_key has multiple supplied artist MBIDs' AS message,
             json_object('artist_key', artist_key, 'artist_mbids', mbids) AS evidence
         FROM conflicts, next_id
-        """
+        """,
+        [first_warning_id - 1],
     )
 
 
-def _insert_track_mbid_conflict_warnings(conn: DuckDBPyConnection) -> None:
+def _insert_track_mbid_conflict_warnings(
+    conn: DuckDBPyConnection,
+    first_warning_id: int,
+) -> None:
     conn.execute(
         """
         INSERT INTO import_warning (
@@ -586,7 +600,8 @@ def _insert_track_mbid_conflict_warnings(conn: DuckDBPyConnection) -> None:
             evidence
         )
         WITH next_id AS (
-            SELECT coalesce(max(warning_id), 0) AS base_id FROM import_warning
+            SELECT greatest(coalesce(max(warning_id), 0), ?) AS base_id
+            FROM import_warning
         ),
         conflicts AS (
             SELECT
@@ -614,12 +629,12 @@ def _insert_track_mbid_conflict_warnings(conn: DuckDBPyConnection) -> None:
                 'track_mbids', mbids
             ) AS evidence
         FROM conflicts, next_id
-        """
+        """,
+        [first_warning_id - 1],
     )
 
 
-def _insert_provisional_artists(conn: DuckDBPyConnection) -> None:
-    next_id = _next_id(conn, "artist", "artist_id")
+def _insert_provisional_artists(conn: DuckDBPyConnection, first_artist_id: int) -> None:
     conn.execute(
         """
         INSERT INTO artist (
@@ -684,7 +699,7 @@ def _insert_provisional_artists(conn: DuckDBPyConnection) -> None:
             SELECT 1 FROM artist existing WHERE existing.artist_key = names.artist_key
         )
         """,
-        [next_id],
+        [first_artist_id],
     )
 
 

@@ -109,6 +109,47 @@ def test_export_recommendations_writes_jsonl(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_export_recommendations_normalizes_user_score_per_run(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    run_id = "00000000-0000-0000-0000-000000000011"
+    _insert_export_row(
+        conn,
+        run_id=run_id,
+        artist_id=511,
+        artist_name="Low Top Score",
+        rank=1,
+        created_at=datetime(2026, 6, 4, 12, 0, 0),
+        final_score=0.087,
+    )
+    _insert_export_row(
+        conn,
+        run_id=run_id,
+        artist_id=512,
+        artist_name="Half Score",
+        rank=2,
+        created_at=datetime(2026, 6, 4, 12, 0, 0),
+        final_score=0.0435,
+        insert_run=False,
+    )
+    output = tmp_path / "recs.jsonl"
+
+    export_recommendations(conn, output, format_name="jsonl", run_id=run_id)
+
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    assert [row["score"] for row in rows] == [pytest.approx(1.0), pytest.approx(0.5)]
+    assert conn.execute(
+        """
+        SELECT final_score
+        FROM recommendation
+        WHERE run_id = ?
+          AND artist_id = 511
+        """,
+        [run_id],
+    ).fetchone() == (pytest.approx(0.087),)
+    conn.close()
+
+
 def test_export_recommendations_rejects_invalid_format_before_run_lookup(
     tmp_path: Path,
 ) -> None:
@@ -185,6 +226,8 @@ def _insert_export_row(
     artist_name: str,
     rank: int,
     created_at: datetime,
+    final_score: float = 0.9,
+    insert_run: bool = True,
 ) -> None:
     conn.execute(
         """
@@ -193,20 +236,21 @@ def _insert_export_row(
         """,
         [artist_id, artist_name, artist_name.casefold()],
     )
-    conn.execute(
-        """
-        INSERT INTO recommendation_run (
-            run_id,
-            created_at,
-            config_hash,
-            mode,
-            seed_summary,
-            scoring_weights
+    if insert_run:
+        conn.execute(
+            """
+            INSERT INTO recommendation_run (
+                run_id,
+                created_at,
+                config_hash,
+                mode,
+                seed_summary,
+                scoring_weights
+            )
+            VALUES (?, ?, 'hash', 'balanced', '{}', '{}')
+            """,
+            [run_id, created_at],
         )
-        VALUES (?, ?, 'hash', 'balanced', '{}', '{}')
-        """,
-        [run_id, created_at],
-    )
     conn.execute(
         """
         INSERT INTO recommendation (
@@ -226,12 +270,14 @@ def _insert_export_row(
             diversity_penalty,
             explanation
         )
-        VALUES (?, ?, ?, 0.9, 0.9, 0.7, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ?)
+        VALUES (?, ?, ?, ?, ?, 0.7, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ?)
         """,
         [
             run_id,
             rank,
             artist_id,
+            final_score,
+            final_score,
             json.dumps(
                 {
                     "summary": f"{artist_name} is similar to seed artists.",

@@ -248,6 +248,7 @@ def generate_recommendations(
         scoring_data,
         limit=limit,
         enabled=config.recommendation.diversity.enabled,
+        progress_callback=progress_callback,
     )
     _report_progress(
         progress_callback,
@@ -726,6 +727,7 @@ def _rerank_for_diversity(
     *,
     limit: int,
     enabled: bool,
+    progress_callback: RecommendationProgressCallback | None = None,
 ) -> list[_CandidateScore]:
     remaining = sorted(scores, key=lambda item: (-item.final_score, item.artist_name.casefold()))
     if not enabled:
@@ -733,6 +735,10 @@ def _rerank_for_diversity(
 
     selected: list[_CandidateScore] = []
     primary_tag_counts: dict[str, int] = {}
+    tag_vectors = {
+        score.artist_id: _candidate_tag_vector(score.artist_id, scoring_data) for score in scores
+    }
+    max_similarity_by_artist = {score.artist_id: 0.0 for score in scores}
     while remaining and len(selected) < limit:
         best_index: int | None = None
         best_score: float | None = None
@@ -740,13 +746,7 @@ def _rerank_for_diversity(
         for index, candidate in enumerate(remaining):
             if _would_break_primary_tag_cap(candidate, selected, primary_tag_counts, mode):
                 continue
-            similarity = max(
-                (
-                    _candidate_similarity(candidate, already_selected, scoring_data)
-                    for already_selected in selected
-                ),
-                default=0.0,
-            )
+            similarity = max_similarity_by_artist[candidate.artist_id]
             diversity_penalty = (1.0 - mode.diversity_lambda) * similarity
             rerank_score = mode.diversity_lambda * candidate.final_score - diversity_penalty
             wins_tie = (
@@ -771,6 +771,23 @@ def _rerank_for_diversity(
             primary_tag_counts[chosen.primary_tag] = (
                 primary_tag_counts.get(chosen.primary_tag, 0) + 1
             )
+        for candidate in remaining:
+            similarity = _candidate_similarity_from_vectors(
+                candidate,
+                chosen,
+                tag_vectors[candidate.artist_id],
+                tag_vectors[chosen.artist_id],
+            )
+            if similarity > max_similarity_by_artist[candidate.artist_id]:
+                max_similarity_by_artist[candidate.artist_id] = similarity
+        _report_progress(
+            progress_callback,
+            phase="rerank_diversity",
+            current=len(selected),
+            total=len(scores),
+            subject=f"{len(selected)} selected",
+            status="processing",
+        )
     return selected
 
 
@@ -792,6 +809,15 @@ def _candidate_similarity(
 ) -> float:
     left_tags = _candidate_tag_vector(left.artist_id, scoring_data)
     right_tags = _candidate_tag_vector(right.artist_id, scoring_data)
+    return _candidate_similarity_from_vectors(left, right, left_tags, right_tags)
+
+
+def _candidate_similarity_from_vectors(
+    left: _CandidateScore,
+    right: _CandidateScore,
+    left_tags: dict[str, float],
+    right_tags: dict[str, float],
+) -> float:
     if not left_tags or not right_tags:
         return (
             0.75 if left.primary_tag is not None and left.primary_tag == right.primary_tag else 0.0

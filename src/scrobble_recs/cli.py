@@ -139,6 +139,42 @@ def build_profile_command(
     console.print(f"genre clusters: {stats.genre_clusters}")
 
 
+@app.command("profile-tags")
+def profile_tags_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+) -> None:
+    """Print the user tag profile."""
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        rows = conn.execute(
+            """
+            SELECT tag, user_weight, artist_count, top_seed_artists
+            FROM tag_profile
+            WHERE source = 'lastfm'
+            ORDER BY user_weight DESC
+            """
+        ).fetchall()
+
+        if not rows:
+            console.print("No tag profile found. Run 'scrobble-recs build-profile' first.")
+            return
+
+        import json as _json
+
+        console.print("Tag Profile")
+        console.print("")
+        for tag, weight, count, top_json in rows:
+            top_artists = _json.loads(top_json) if isinstance(top_json, str) else (top_json or [])
+            top_names = [entry.get("artist", "?") for entry in top_artists[:3]]
+            console.print(
+                f"  {tag}: weight={float(weight):.4f} artists={int(count)} "
+                f"top={', '.join(top_names)}"
+            )
+    finally:
+        conn.close()
+
+
 @app.command("doctor")
 def doctor_command(
     config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],

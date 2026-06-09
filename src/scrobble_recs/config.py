@@ -102,6 +102,8 @@ class LastFmApiConfig(BaseModel):
     rate_limit_per_second: float = 2.0
     cache_ttl_days: int = 180
     max_retries: int = 2
+    timeout_seconds: float = 20.0
+    stale_cache_on_error: bool = True
 
     @field_validator("api_key")
     @classmethod
@@ -128,6 +130,11 @@ class LastFmApiConfig(BaseModel):
         if value < 0:
             raise ValueError("max_retries must be non-negative")
         return value
+
+    @field_validator("timeout_seconds")
+    @classmethod
+    def timeout_must_be_positive(cls, value: float) -> float:
+        return _positive_finite(value, field_name="timeout_seconds")
 
 
 class MusicBrainzApiConfig(BaseModel):
@@ -181,6 +188,36 @@ class ApiConfig(BaseModel):
     listenbrainz: ListenBrainzApiConfig = Field(default_factory=ListenBrainzApiConfig)
 
 
+class EnrichmentConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    seed_artist_limit: int = 250
+    candidate_artist_limit: int = 5000
+    similar_artists_per_seed: int = 100
+    top_tags_per_artist: int = 20
+    tag_top_artists_limit: int = 100
+    max_queue_attempts: int = 3
+    queue_batch_size: int = 1000
+
+    @model_validator(mode="after")
+    def validate_enrichment(self) -> EnrichmentConfig:
+        if self.seed_artist_limit < 1:
+            raise ValueError("seed_artist_limit must be at least 1")
+        if self.candidate_artist_limit < 1:
+            raise ValueError("candidate_artist_limit must be at least 1")
+        if self.similar_artists_per_seed < 1:
+            raise ValueError("similar_artists_per_seed must be at least 1")
+        if self.top_tags_per_artist < 1:
+            raise ValueError("top_tags_per_artist must be at least 1")
+        if self.tag_top_artists_limit < 1:
+            raise ValueError("tag_top_artists_limit must be at least 1")
+        if self.max_queue_attempts < 0:
+            raise ValueError("max_queue_attempts must be non-negative")
+        if self.queue_batch_size < 1:
+            raise ValueError("queue_batch_size must be at least 1")
+        return self
+
+
 class ObviousnessConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -200,6 +237,22 @@ class ObviousnessConfig(BaseModel):
             raise ValueError("tag_top_artists_limit must be at least 1")
         if self.penalty_weight < 0:
             raise ValueError("penalty_weight must be non-negative")
+        return self
+
+
+class KnownnessConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    threshold: float = 0.65
+    penalty_weight: float = 0.40
+
+    @model_validator(mode="after")
+    def validate_knownness(self) -> KnownnessConfig:
+        if not 0.0 <= self.threshold <= 1.0:
+            raise ValueError("knownness threshold must be between 0 and 1")
+        if not 0.0 <= self.penalty_weight <= 1.0:
+            raise ValueError("knownness penalty_weight must be between 0 and 1")
         return self
 
 
@@ -319,7 +372,9 @@ class RecommendationConfig(BaseModel):
     min_seed_scrobbles: int = 3
     max_knownness_default: float = 0.65
     rediscovery_enabled: bool = True
+    run_limit: int = 500
     obviousness: ObviousnessConfig = Field(default_factory=ObviousnessConfig)
+    knownness: KnownnessConfig = Field(default_factory=KnownnessConfig)
     weights: RecommendationWeightsConfig = Field(default_factory=RecommendationWeightsConfig)
     diversity: DiversityConfig = Field(default_factory=DiversityConfig)
     quality_gate: QualityGateConfig = Field(default_factory=QualityGateConfig)
@@ -336,6 +391,8 @@ class RecommendationConfig(BaseModel):
             raise ValueError("min_seed_scrobbles must be at least 1")
         if not 0.0 <= self.max_knownness_default <= 1.0:
             raise ValueError("max_knownness_default must be between 0 and 1")
+        if self.run_limit < 1:
+            raise ValueError("run_limit must be at least 1")
         return self
 
 
@@ -345,6 +402,7 @@ class ScrobbleRecsConfig(BaseModel):
     app: AppConfig
     input: InputConfig
     apis: ApiConfig = Field(default_factory=ApiConfig)
+    enrichment: EnrichmentConfig = Field(default_factory=EnrichmentConfig)
     recommendation: RecommendationConfig = Field(default_factory=RecommendationConfig)
 
 
@@ -378,6 +436,8 @@ def default_config_document() -> dict[str, Any]:
                 "rate_limit_per_second": 2.0,
                 "cache_ttl_days": 180,
                 "max_retries": 2,
+                "timeout_seconds": 20.0,
+                "stale_cache_on_error": True,
             },
             "musicbrainz": {
                 "enabled": False,
@@ -393,6 +453,15 @@ def default_config_document() -> dict[str, Any]:
                 "use_recommendation_api": False,
             },
         },
+        "enrichment": {
+            "seed_artist_limit": 250,
+            "candidate_artist_limit": 5000,
+            "similar_artists_per_seed": 100,
+            "top_tags_per_artist": 20,
+            "tag_top_artists_limit": 100,
+            "max_queue_attempts": 3,
+            "queue_batch_size": 1000,
+        },
         "recommendation": {
             "default_mode": "balanced",
             "seed_artist_limit": 250,
@@ -400,12 +469,18 @@ def default_config_document() -> dict[str, Any]:
             "min_seed_scrobbles": 3,
             "max_knownness_default": 0.65,
             "rediscovery_enabled": True,
+            "run_limit": 500,
             "obviousness": {
                 "enabled": True,
                 "top_n_per_tag_penalty": 10,
                 "top_n_per_tag_hide": 3,
                 "tag_top_artists_limit": 100,
                 "penalty_weight": 0.25,
+            },
+            "knownness": {
+                "enabled": True,
+                "threshold": 0.65,
+                "penalty_weight": 0.40,
             },
             "weights": {
                 "lastfm_similarity": 0.35,

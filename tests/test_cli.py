@@ -906,3 +906,97 @@ def test_cache_stats_command_prints_statistics(monkeypatch, tmp_path):
     assert "42" in result.stdout
     assert "fresh" in result.stdout
     assert "lastfm" in result.stdout
+
+
+def test_enrich_plan_command_prints_summary(monkeypatch, tmp_path):
+    from scrobble_recs.enrichment.queue import EnrichmentQueuePlan
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "test",
+                    "db_path": str(tmp_path / "db.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": "tests/fixtures/tiny_lastfm_export.csv",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fake_plan = EnrichmentQueuePlan(
+        source="lastfm",
+        seed_artists=250,
+        similar_artist_queued=57,
+        similar_artist_cached_fresh=193,
+        artist_tag_queued=589,
+        artist_tag_cached_fresh=311,
+        tag_top_artist_queued=66,
+        tag_top_artist_cached_fresh=14,
+        total_queued=712,
+    )
+
+    import scrobble_recs.cli as cli_module
+
+    monkeypatch.setattr(cli_module, "plan_enrichment", lambda conn, **kwargs: fake_plan)
+
+    from typer.testing import CliRunner
+    from scrobble_recs.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["enrich-plan", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "artist.getSimilar" in result.stdout
+    assert "57" in result.stdout
+    assert "193" in result.stdout
+
+
+def test_enrich_status_command_prints_counts(monkeypatch, tmp_path):
+    from scrobble_recs.enrichment.queue import EnrichmentQueueStatus
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "test",
+                    "db_path": str(tmp_path / "db.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": "tests/fixtures/tiny_lastfm_export.csv",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fake_status = EnrichmentQueueStatus(
+        source="lastfm",
+        total=100,
+        queued=50,
+        running=0,
+        complete=45,
+        failed=3,
+        skipped=2,
+    )
+
+    import scrobble_recs.cli as cli_module
+
+    monkeypatch.setattr(cli_module, "enrichment_queue_status", lambda conn, **kwargs: fake_status)
+
+    from typer.testing import CliRunner
+    from scrobble_recs.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["enrich-status", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "50" in result.stdout
+    assert "45" in result.stdout
+    assert "failed" in result.stdout

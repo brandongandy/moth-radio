@@ -25,6 +25,11 @@ from scrobble_recs.enrichment.lastfm import (
     LastFmEnrichmentStats,
     run_lastfm_enrichment,
 )
+from scrobble_recs.enrichment.queue import (
+    enrichment_queue_status,
+    plan_enrichment,
+    retry_failed_enrichment,
+)
 from scrobble_recs.export import ExportFormat, export_recommendations
 from scrobble_recs.importers.lastfm_csv import ImportStats, get_import_stats, import_lastfm_csv
 from scrobble_recs.models.evaluate import EvaluationResult, evaluate_recommendations
@@ -178,6 +183,97 @@ def enrich_command(
 
     console.print("Last.fm enrichment complete")
     _print_enrichment_stats(stats)
+
+
+@app.command("enrich-plan")
+def enrich_plan_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    source: Annotated[str, typer.Option("--source", help="Enrichment source.")] = "lastfm",
+) -> None:
+    """Plan enrichment work without calling the network."""
+    if source != "lastfm":
+        raise typer.BadParameter("only --source lastfm is supported")
+
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        plan = plan_enrichment(
+            conn,
+            source=source,
+            seed_artist_limit=resolved_config.enrichment.seed_artist_limit,
+            similar_artists_per_seed=resolved_config.enrichment.similar_artists_per_seed,
+            top_tags_per_artist=resolved_config.enrichment.top_tags_per_artist,
+            tag_top_artists_limit=resolved_config.enrichment.tag_top_artists_limit,
+        )
+    finally:
+        conn.close()
+
+    console.print(f"{source.capitalize()} enrichment plan")
+    console.print("")
+    console.print("artist.getSimilar:")
+    console.print(f"  queued: {plan.similar_artist_queued}")
+    console.print(f"  cached fresh: {plan.similar_artist_cached_fresh}")
+    console.print(f"  missing: {plan.similar_artist_queued}")
+    console.print("")
+    console.print("artist.getTopTags:")
+    console.print(f"  queued: {plan.artist_tag_queued}")
+    console.print(f"  cached fresh: {plan.artist_tag_cached_fresh}")
+    console.print(f"  missing: {plan.artist_tag_queued}")
+    console.print("")
+    console.print("tag.getTopArtists:")
+    console.print(f"  queued: {plan.tag_top_artist_queued}")
+    console.print(f"  cached fresh: {plan.tag_top_artist_cached_fresh}")
+    console.print(f"  missing: {plan.tag_top_artist_queued}")
+    console.print("")
+    console.print(f"total queued: {plan.total_queued}")
+
+
+@app.command("enrich-status")
+def enrich_status_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    source: Annotated[str, typer.Option("--source", help="Enrichment source.")] = "lastfm",
+) -> None:
+    """Show enrichment queue status."""
+    if source != "lastfm":
+        raise typer.BadParameter("only --source lastfm is supported")
+
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        status = enrichment_queue_status(conn, source=source)
+    finally:
+        conn.close()
+
+    console.print(f"{source.capitalize()} enrichment queue status")
+    console.print(f"  total: {status.total}")
+    console.print(f"  queued: {status.queued}")
+    console.print(f"  running: {status.running}")
+    console.print(f"  complete: {status.complete}")
+    console.print(f"  failed: {status.failed}")
+    console.print(f"  skipped: {status.skipped}")
+
+
+@app.command("enrich-retry")
+def enrich_retry_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    source: Annotated[str, typer.Option("--source", help="Enrichment source.")] = "lastfm",
+) -> None:
+    """Retry failed enrichment queue entries."""
+    if source != "lastfm":
+        raise typer.BadParameter("only --source lastfm is supported")
+
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        count = retry_failed_enrichment(
+            conn,
+            source=source,
+            max_attempts=resolved_config.enrichment.max_queue_attempts,
+        )
+    finally:
+        conn.close()
+
+    console.print(f"Reset {count} failed queue entries to queued")
 
 
 @app.command("cache")

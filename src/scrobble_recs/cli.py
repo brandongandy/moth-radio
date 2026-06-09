@@ -350,7 +350,9 @@ def cache_stats_command(
 @app.command("cache-inspect")
 def cache_inspect_command(
     config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
-    source: Annotated[str | None, typer.Option("--source", help="Filter by source (e.g. lastfm).")] = None,
+    source: Annotated[
+        str | None, typer.Option("--source", help="Filter by source (e.g. lastfm).")
+    ] = None,
     limit: Annotated[int, typer.Option("--limit", help="Max entries to show.")] = 100,
 ) -> None:
     """Inspect individual cache entries."""
@@ -534,7 +536,9 @@ def evaluate_command(
             test_dt = _parse_timestamp(test_from)
         elif split_date:
             train_dt = _parse_timestamp(split_date).replace(hour=23, minute=59, second=59)
-            test_dt = _parse_timestamp(split_date).replace(hour=0, minute=0, second=0) + timedelta(days=1)
+            test_dt = _parse_timestamp(split_date).replace(hour=0, minute=0, second=0) + timedelta(
+                days=1
+            )
         else:
             console.print("Error: provide --split-date or both --train-until and --test-from")
             raise typer.Exit(code=1)
@@ -635,8 +639,8 @@ def _parse_timestamp(value: str) -> datetime:
     """Parse YYYY-MM-DD or ISO-8601 timestamp string."""
     try:
         return datetime.fromisoformat(value)
-    except ValueError:
-        raise typer.BadParameter(f"invalid timestamp: {value}")
+    except ValueError as err:
+        raise typer.BadParameter(f"invalid timestamp: {value}") from err
 
 
 def evaluate_recommendations_from_config(
@@ -647,9 +651,7 @@ def evaluate_recommendations_from_config(
     test_from: datetime,
 ) -> EvaluationResult:
     """Thin wrapper for CLI monkeypatching in tests."""
-    return evaluate_recommendations(
-        conn, config, train_until=train_until, test_from=test_from
-    )
+    return evaluate_recommendations(conn, config, train_until=train_until, test_from=test_from)
 
 
 def _count_query(conn: DuckDBPyConnection, sql: str) -> int:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from duckdb import DuckDBPyConnection
 
@@ -36,13 +36,14 @@ def stats_cache(
     *,
     now: datetime | None = None,
 ) -> CacheStats:
-    resolved_now = (now or datetime.now(timezone.utc)).replace(tzinfo=None)
+    resolved_now = (now or datetime.now(UTC)).replace(tzinfo=None)
 
     total_row = conn.execute("SELECT count(*) FROM api_cache").fetchone()
     total = int(total_row[0]) if total_row else 0
 
     fresh_row = conn.execute(
-        "SELECT count(*) FROM api_cache WHERE expires_at > ? AND response_status BETWEEN 200 AND 299",
+        """SELECT count(*) FROM api_cache
+           WHERE expires_at > ? AND response_status BETWEEN 200 AND 299""",
         [resolved_now],
     ).fetchone()
     fresh = int(fresh_row[0]) if fresh_row else 0
@@ -62,12 +63,8 @@ def stats_cache(
     by_endpoint = _count_by_column(conn, "endpoint")
     by_status = _count_by_column(conn, "CAST(response_status AS VARCHAR)")
 
-    oldest_row = conn.execute(
-        "SELECT CAST(MIN(fetched_at) AS VARCHAR) FROM api_cache"
-    ).fetchone()
-    newest_row = conn.execute(
-        "SELECT CAST(MAX(fetched_at) AS VARCHAR) FROM api_cache"
-    ).fetchone()
+    oldest_row = conn.execute("SELECT CAST(MIN(fetched_at) AS VARCHAR) FROM api_cache").fetchone()
+    newest_row = conn.execute("SELECT CAST(MAX(fetched_at) AS VARCHAR) FROM api_cache").fetchone()
 
     return CacheStats(
         total_entries=total,
@@ -89,7 +86,7 @@ def inspect_cache(
     limit: int = 1000,
     now: datetime | None = None,
 ) -> list[CacheEntry]:
-    resolved_now = (now or datetime.now(timezone.utc)).replace(tzinfo=None)
+    resolved_now = (now or datetime.now(UTC)).replace(tzinfo=None)
 
     if source:
         rows = conn.execute(
@@ -143,7 +140,7 @@ def expire_cache(
     older_than_days: int = 180,
     now: datetime | None = None,
 ) -> int:
-    resolved_now = (now or datetime.now(timezone.utc)).replace(tzinfo=None)
+    resolved_now = (now or datetime.now(UTC)).replace(tzinfo=None)
     cutoff = resolved_now - timedelta(days=older_than_days)
 
     if source:

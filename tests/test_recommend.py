@@ -2294,12 +2294,11 @@ def test_generate_recommendations_positive_feedback_bypasses_fatigue(
 
 def test_recommendation_candidate_migration_creates_table():
     from pathlib import Path
+
     import duckdb
 
     conn = duckdb.connect(":memory:")
-    migration_path = Path(
-        "src/scrobble_recs/sql/008_recommendation_candidate.sql"
-    )
+    migration_path = Path("src/scrobble_recs/sql/008_recommendation_candidate.sql")
     conn.execute(migration_path.read_text(encoding="utf-8"))
 
     tables = {

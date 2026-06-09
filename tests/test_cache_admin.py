@@ -1,10 +1,8 @@
 from datetime import datetime, timedelta
 
-import pytest
 from duckdb import DuckDBPyConnection
 
 from scrobble_recs.admin.cache_admin import (
-    CacheStats,
     expire_cache,
     inspect_cache,
     stats_cache,
@@ -13,6 +11,7 @@ from scrobble_recs.admin.cache_admin import (
 
 def _make_cache_db() -> DuckDBPyConnection:
     import duckdb
+
     conn = duckdb.connect(":memory:")
     conn.execute(
         """
@@ -41,7 +40,10 @@ def test_cache_stats_counts_by_source_and_status():
 
     conn.execute(
         """
-        INSERT INTO api_cache (cache_key, source, endpoint, request_url, request_params, response_status, response_json, fetched_at, expires_at)
+        INSERT INTO api_cache (
+            cache_key, source, endpoint, request_url, request_params,
+            response_status, response_json, fetched_at, expires_at
+        )
         VALUES
             ('k1', 'lastfm', 'artist.getSimilar', 'http://x', '{}', 200, '{}', ?, ?),
             ('k2', 'lastfm', 'artist.getTopTags', 'http://x', '{}', 200, '{}', ?, ?),
@@ -68,7 +70,10 @@ def test_cache_inspect_returns_entries_for_source():
 
     conn.execute(
         """
-        INSERT INTO api_cache (cache_key, source, endpoint, request_url, request_params, response_status, response_json, fetched_at, expires_at)
+        INSERT INTO api_cache (
+            cache_key, source, endpoint, request_url, request_params,
+            response_status, response_json, fetched_at, expires_at
+        )
         VALUES
             ('k1', 'lastfm', 'artist.getSimilar', 'http://x', '{}', 200, '{"ok":true}', ?, ?),
             ('k2', 'lastfm', 'artist.getTopTags', 'http://x', '{}', 200, '{"ok":true}', ?, ?)
@@ -91,7 +96,10 @@ def test_cache_expire_removes_stale_entries_older_than_days():
 
     conn.execute(
         """
-        INSERT INTO api_cache (cache_key, source, endpoint, request_url, request_params, response_status, response_json, fetched_at, expires_at)
+        INSERT INTO api_cache (
+            cache_key, source, endpoint, request_url, request_params,
+            response_status, response_json, fetched_at, expires_at
+        )
         VALUES
             ('keep', 'lastfm', 'artist.getSimilar', 'http://x', '{}', 200, '{}', ?, ?),
             ('expire', 'lastfm', 'artist.getSimilar', 'http://x', '{}', 200, '{}', ?, ?)
@@ -114,9 +122,14 @@ def test_cache_expire_keeps_error_entries_by_default():
 
     conn.execute(
         """
-        INSERT INTO api_cache (cache_key, source, endpoint, request_url, request_params, response_status, response_json, fetched_at, expires_at, error_message)
+        INSERT INTO api_cache (
+            cache_key, source, endpoint, request_url, request_params,
+            response_status, response_json, fetched_at, expires_at,
+            error_message
+        )
         VALUES
-            ('err', 'lastfm', 'artist.getSimilar', 'http://x', '{}', 500, NULL, ?, ?, 'server error')
+            ('err', 'lastfm', 'artist.getSimilar', 'http://x', '{}',
+             500, NULL, ?, ?, 'server error')
         """,
         [old, old],
     )

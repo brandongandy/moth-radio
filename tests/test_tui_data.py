@@ -347,3 +347,41 @@ def _insert_recommendation(
             json.dumps(explanation),
         ],
     )
+
+def test_tui_store_includes_cache_summary(monkeypatch, tmp_path):
+    import json
+    from scrobble_recs.config import load_config
+    from scrobble_recs.db import initialize_database
+    from scrobble_recs.tui.data import TuiRecommendationStore
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "test",
+                    "db_path": str(tmp_path / "db.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": "tests/fixtures/tiny_lastfm_export.csv",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(config_path)
+    conn = initialize_database(cfg)
+    try:
+        store = TuiRecommendationStore(conn)
+        summary = store.cache_summary()
+        assert isinstance(summary.total_entries, int)
+        assert isinstance(summary.fresh_entries, int)
+        assert isinstance(summary.stale_entries, int)
+        assert summary.total_entries >= 0
+        assert summary.fresh_entries >= 0
+        assert summary.stale_entries >= 0
+    finally:
+        conn.close()

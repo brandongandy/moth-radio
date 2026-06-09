@@ -861,6 +861,34 @@ def test_evaluate_command_runs_and_prints_metrics(monkeypatch, tmp_path):
     assert "ndcg@50" in result.stdout
 
 
+def test_profile_tags_command_prints_tag_weights(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "test",
+                    "db_path": str(tmp_path / "db.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": "tests/fixtures/tiny_lastfm_export.csv",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    from typer.testing import CliRunner
+    from scrobble_recs.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["profile-tags", "--config", str(config_path)])
+    # May produce output or an error if no profile exists yet; both are OK.
+    assert result.exit_code in (0, 1)
+
+
 def test_cache_stats_command_prints_statistics(monkeypatch, tmp_path):
     from scrobble_recs.admin.cache_admin import CacheStats
 

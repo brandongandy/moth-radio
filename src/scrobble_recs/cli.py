@@ -11,6 +11,11 @@ from rich.console import Console
 from rich.markup import escape
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn
 
+from scrobble_recs.admin.cache_admin import (
+    expire_cache,
+    inspect_cache,
+    stats_cache,
+)
 from scrobble_recs.admin.doctor import DiagnosticCheck, run_doctor
 from scrobble_recs.admin.init import initialize_project
 from scrobble_recs.config import ScrobbleRecsConfig, load_config
@@ -173,6 +178,86 @@ def enrich_command(
 
     console.print("Last.fm enrichment complete")
     _print_enrichment_stats(stats)
+
+
+@app.command("cache")
+def cache_stats_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+) -> None:
+    """Print API cache statistics."""
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        stats = stats_cache(conn)
+    finally:
+        conn.close()
+
+    console.print("API Cache Statistics")
+    console.print(f"  total entries: {stats.total_entries}")
+    console.print(f"  fresh (2xx, not expired): {stats.fresh_entries}")
+    console.print(f"  stale (expired): {stats.stale_entries}")
+    console.print(f"  errors (non-2xx): {stats.error_entries}")
+    if stats.oldest_fetched_at:
+        console.print(f"  oldest fetched: {stats.oldest_fetched_at}")
+    if stats.newest_fetched_at:
+        console.print(f"  newest fetched: {stats.newest_fetched_at}")
+    if stats.by_source:
+        console.print("  by source:")
+        for source, count in stats.by_source.items():
+            console.print(f"    {source}: {count}")
+    if stats.by_endpoint:
+        console.print("  by endpoint:")
+        for endpoint, count in stats.by_endpoint.items():
+            console.print(f"    {endpoint}: {count}")
+    if stats.by_status:
+        console.print("  by status:")
+        for status, count in stats.by_status.items():
+            console.print(f"    {status}: {count}")
+
+
+@app.command("cache-inspect")
+def cache_inspect_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    source: Annotated[str | None, typer.Option("--source", help="Filter by source (e.g. lastfm).")] = None,
+    limit: Annotated[int, typer.Option("--limit", help="Max entries to show.")] = 100,
+) -> None:
+    """Inspect individual cache entries."""
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        entries = inspect_cache(conn, source=source, limit=limit)
+    finally:
+        conn.close()
+
+    console.print(f"Cache entries ({len(entries)}):")
+    for entry in entries:
+        freshness = "fresh" if entry.is_fresh else "stale"
+        status = entry.response_status or "err"
+        console.print(
+            f"  [{freshness}] {entry.source}:{entry.endpoint} "
+            f"status={status} fetched={entry.fetched_at} "
+            f"expires={entry.expires_at}"
+        )
+
+
+@app.command("cache-expire")
+def cache_expire_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    source: Annotated[str | None, typer.Option("--source", help="Filter by source.")] = None,
+    older_than_days: Annotated[
+        int,
+        typer.Option("--older-than-days", help="Remove entries older than this many days."),
+    ] = 180,
+) -> None:
+    """Expire stale cache entries."""
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        removed = expire_cache(conn, source=source, older_than_days=older_than_days)
+    finally:
+        conn.close()
+
+    console.print(f"Removed {removed} stale cache entries")
 
 
 @app.command("resolve")

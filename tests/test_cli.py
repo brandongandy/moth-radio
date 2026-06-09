@@ -859,3 +859,50 @@ def test_evaluate_command_runs_and_prints_metrics(monkeypatch, tmp_path):
     assert "recall@50" in result.stdout
     assert "0.042" in result.stdout
     assert "ndcg@50" in result.stdout
+
+
+def test_cache_stats_command_prints_statistics(monkeypatch, tmp_path):
+    from scrobble_recs.admin.cache_admin import CacheStats
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "test",
+                    "db_path": str(tmp_path / "db.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": "tests/fixtures/tiny_lastfm_export.csv",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fake_stats = CacheStats(
+        total_entries=42,
+        fresh_entries=30,
+        stale_entries=10,
+        error_entries=2,
+        by_source={"lastfm": 42},
+        by_endpoint={"artist.getSimilar": 20, "artist.getTopTags": 15, "tag.getTopArtists": 7},
+        by_status={"200": 40, "429": 2},
+        oldest_fetched_at="2026-06-01T00:00:00",
+        newest_fetched_at="2026-06-09T12:00:00",
+    )
+
+    import scrobble_recs.cli as cli_module
+    monkeypatch.setattr(cli_module, "stats_cache", lambda conn: fake_stats)
+
+    from typer.testing import CliRunner
+    from scrobble_recs.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["cache", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "42" in result.stdout
+    assert "fresh" in result.stdout
+    assert "lastfm" in result.stdout

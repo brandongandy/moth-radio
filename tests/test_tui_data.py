@@ -348,8 +348,10 @@ def _insert_recommendation(
         ],
     )
 
+
 def test_tui_store_includes_cache_summary(monkeypatch, tmp_path):
     import json
+
     from scrobble_recs.config import load_config
     from scrobble_recs.db import initialize_database
     from scrobble_recs.tui.data import TuiRecommendationStore

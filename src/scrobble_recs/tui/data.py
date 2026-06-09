@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import UTC
 from typing import Any
 
 from duckdb import DuckDBPyConnection
@@ -159,11 +160,12 @@ class TuiRecommendationStore:
         total_row = self._conn.execute("SELECT count(*) FROM api_cache").fetchone()
         total = int(total_row[0]) if total_row else 0
 
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(UTC).replace(tzinfo=None)
         fresh_row = self._conn.execute(
-            "SELECT count(*) FROM api_cache WHERE expires_at > ? AND response_status BETWEEN 200 AND 299",
+            """SELECT count(*) FROM api_cache
+               WHERE expires_at > ? AND response_status BETWEEN 200 AND 299""",
             [now],
         ).fetchone()
         fresh = int(fresh_row[0]) if fresh_row else 0

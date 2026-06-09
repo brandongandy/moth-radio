@@ -1,7 +1,6 @@
 from pathlib import Path
 
 from scrobble_recs.enrichment.queue import (
-    EnrichmentQueuePlan,
     enrichment_queue_status,
     plan_enrichment,
     retry_failed_enrichment,
@@ -38,7 +37,8 @@ def test_enrichment_queue_migration_creates_table():
     columns = {
         row[0]
         for row in conn.execute(
-            "SELECT column_name FROM information_schema.columns WHERE table_name = 'enrichment_queue'"
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_name = 'enrichment_queue'"""
         ).fetchall()
     }
     assert "queue_id" in columns
@@ -59,7 +59,8 @@ def test_enrichment_queue_insert_and_query():
 
     conn.execute(
         """
-        INSERT INTO enrichment_queue (queue_id, source, endpoint, entity_type, entity_id, priority, status)
+        INSERT INTO enrichment_queue
+            (queue_id, source, endpoint, entity_type, entity_id, priority, status)
         VALUES (uuid(), 'lastfm', 'artist.getSimilar', 'artist', 1, 1.0, 'queued')
         """
     )
@@ -109,7 +110,7 @@ def test_enrichment_plan_skips_already_cached_when_work_complete():
         import_lastfm_csv(conn, Path("tests/fixtures/tiny_lastfm_export.csv"))
 
         # First plan populates queue.
-        plan1 = plan_enrichment(conn, source="lastfm", seed_artist_limit=5)
+        plan_enrichment(conn, source="lastfm", seed_artist_limit=5)
 
         # Simulate completed work: mark all as complete.
         conn.execute(

@@ -789,7 +789,6 @@ def test_tui_command_launches_textual_app(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_evaluate_command_runs_and_prints_metrics(monkeypatch, tmp_path):
-    from datetime import datetime
     from scrobble_recs.config import load_config
     from scrobble_recs.db import initialize_database
     from scrobble_recs.importers.lastfm_csv import import_lastfm_csv
@@ -848,6 +847,7 @@ def test_evaluate_command_runs_and_prints_metrics(monkeypatch, tmp_path):
     monkeypatch.setattr(cli_module, "evaluate_recommendations_from_config", fake_evaluate)
 
     from typer.testing import CliRunner
+
     from scrobble_recs.cli import app
 
     runner = CliRunner()
@@ -881,6 +881,7 @@ def test_profile_tags_command_prints_tag_weights(monkeypatch, tmp_path):
     )
 
     from typer.testing import CliRunner
+
     from scrobble_recs.cli import app
 
     runner = CliRunner()
@@ -923,9 +924,11 @@ def test_cache_stats_command_prints_statistics(monkeypatch, tmp_path):
     )
 
     import scrobble_recs.cli as cli_module
+
     monkeypatch.setattr(cli_module, "stats_cache", lambda conn: fake_stats)
 
     from typer.testing import CliRunner
+
     from scrobble_recs.cli import app
 
     runner = CliRunner()
@@ -974,6 +977,7 @@ def test_enrich_plan_command_prints_summary(monkeypatch, tmp_path):
     monkeypatch.setattr(cli_module, "plan_enrichment", lambda conn, **kwargs: fake_plan)
 
     from typer.testing import CliRunner
+
     from scrobble_recs.cli import app
 
     runner = CliRunner()
@@ -1020,6 +1024,7 @@ def test_enrich_status_command_prints_counts(monkeypatch, tmp_path):
     monkeypatch.setattr(cli_module, "enrichment_queue_status", lambda conn, **kwargs: fake_status)
 
     from typer.testing import CliRunner
+
     from scrobble_recs.cli import app
 
     runner = CliRunner()

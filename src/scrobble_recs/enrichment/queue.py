@@ -66,17 +66,25 @@ def plan_enrichment(
         subject_key = str(seed.artist_id)
 
         # artist.getSimilar
-        if _enrichment_work_exists(conn, source, _SIMILAR_ENDPOINT, subject_key, similar_artists_per_seed):
+        if _enrichment_work_exists(
+            conn, source, _SIMILAR_ENDPOINT, subject_key, similar_artists_per_seed
+        ):
             similar_cached += 1
         elif not _queue_entry_exists(conn, source, _SIMILAR_ENDPOINT, "artist", seed.artist_id):
-            _insert_queue_entry(conn, source, _SIMILAR_ENDPOINT, "artist", seed.artist_id, priority=1.0)
+            _insert_queue_entry(
+                conn, source, _SIMILAR_ENDPOINT, "artist", seed.artist_id, priority=1.0
+            )
             similar_queued += 1
 
         # artist.getTopTags
-        if _enrichment_work_exists(conn, source, _ARTIST_TAGS_ENDPOINT, subject_key, top_tags_per_artist):
+        if _enrichment_work_exists(
+            conn, source, _ARTIST_TAGS_ENDPOINT, subject_key, top_tags_per_artist
+        ):
             tag_cached += 1
         elif not _queue_entry_exists(conn, source, _ARTIST_TAGS_ENDPOINT, "artist", seed.artist_id):
-            _insert_queue_entry(conn, source, _ARTIST_TAGS_ENDPOINT, "artist", seed.artist_id, priority=0.80)
+            _insert_queue_entry(
+                conn, source, _ARTIST_TAGS_ENDPOINT, "artist", seed.artist_id, priority=0.80
+            )
             tag_queued += 1
 
     # tag.getTopArtists — queue high-affinity tags from tag_profile
@@ -92,10 +100,14 @@ def plan_enrichment(
 
     for (tag_name,) in tag_rows:
         subject_key = str(tag_name)
-        if _enrichment_work_exists(conn, source, _TAG_TOP_ARTISTS_ENDPOINT, subject_key, tag_top_artists_limit):
+        if _enrichment_work_exists(
+            conn, source, _TAG_TOP_ARTISTS_ENDPOINT, subject_key, tag_top_artists_limit
+        ):
             tag_top_cached += 1
         elif not _queue_entry_exists_by_tag(conn, source, _TAG_TOP_ARTISTS_ENDPOINT, tag_name):
-            _insert_queue_entry_by_tag(conn, source, _TAG_TOP_ARTISTS_ENDPOINT, tag_name, priority=0.60)
+            _insert_queue_entry_by_tag(
+                conn, source, _TAG_TOP_ARTISTS_ENDPOINT, tag_name, priority=0.60
+            )
             tag_top_queued += 1
 
     return EnrichmentQueuePlan(
@@ -146,12 +158,12 @@ def retry_failed_enrichment(
     source: str = _SOURCE,
     max_attempts: int = 3,
 ) -> int:
-    before = int(
-        conn.execute(
-            "SELECT count(*) FROM enrichment_queue WHERE source = ? AND status = 'failed' AND attempts < ?",
-            [source, max_attempts],
-        ).fetchone()[0]
-    )
+    before_row = conn.execute(
+        """SELECT count(*) FROM enrichment_queue
+           WHERE source = ? AND status = 'failed' AND attempts < ?""",
+        [source, max_attempts],
+    ).fetchone()
+    before = int(before_row[0]) if before_row else 0
     conn.execute(
         """
         UPDATE enrichment_queue
@@ -219,7 +231,8 @@ def _insert_queue_entry(
 ) -> None:
     conn.execute(
         """
-        INSERT INTO enrichment_queue (queue_id, source, endpoint, entity_type, entity_id, priority, status)
+        INSERT INTO enrichment_queue
+            (queue_id, source, endpoint, entity_type, entity_id, priority, status)
         VALUES (?, ?, ?, ?, ?, ?, 'queued')
         """,
         [str(uuid4()), source, endpoint, entity_type, entity_id, priority],

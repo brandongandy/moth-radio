@@ -122,6 +122,7 @@ def test_initialize_database_applies_initial_migration(tmp_path: Path) -> None:
         "profile_cluster",
         "raw_scrobble",
         "recommendation",
+        "recommendation_candidate",
         "recommendation_run",
         "scrobble",
         "tag_profile",

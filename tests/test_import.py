@@ -233,10 +233,11 @@ def test_import_replaces_many_existing_import_warnings_without_reusing_ids(
     conn.close()
 
 
-def test_import_warns_on_utc_time_mismatch_without_dropping_row(tmp_path: Path) -> None:
+def test_import_ignores_utc_time_column(tmp_path: Path) -> None:
+    """utc_time is ignored; only uts drives the timestamp."""
     csv_path = write_csv(
-        tmp_path / "timestamp_mismatch.csv",
-        ["1704067200,2024-01-02 00:00:00,The Cure,mbid-cure,Disintegration,,Pictures of You,"],
+        tmp_path / "ignored_utc_time.csv",
+        ["1704067200,garbage-not-a-date,The Cure,mbid-cure,Disintegration,,Pictures of You,"],
     )
     config = load_config(write_config(tmp_path, csv_path))
     conn = initialize_database(config)
@@ -244,23 +245,7 @@ def test_import_warns_on_utc_time_mismatch_without_dropping_row(tmp_path: Path) 
     stats = import_lastfm_csv(conn, csv_path)
 
     assert stats.scrobbles == 1
-    assert stats.import_warnings == 1
-    warning_rows = conn.execute(
-        """
-        SELECT import_row_number, warning_code, severity, message, CAST(evidence AS VARCHAR)
-        FROM import_warning
-        ORDER BY warning_id
-        """
-    ).fetchall()
-    assert warning_rows == [
-        (
-            1,
-            "timestamp_mismatch",
-            "warning",
-            "utc_time does not match uts",
-            '{"uts":1704067200,"utc_time":"2024-01-02 00:00:00","played_at":"2024-01-01 00:00:00"}',
-        )
-    ]
+    assert stats.import_warnings == 0
 
     conn.close()
 
@@ -640,10 +625,9 @@ def test_import_orders_artist_mbid_conflict_warnings_before_staged_warnings(
         """
     ).fetchall()
 
-    assert stats.import_warnings == 2
+    assert stats.import_warnings == 1
     assert warning_rows == [
         (1, 1, "artist_mbid_conflict"),
-        (2, 2, "timestamp_mismatch"),
     ]
 
     conn.close()

@@ -207,13 +207,6 @@ def _write_validated_rows(
 
             played_at = _parse_uts(cleaned["uts"], row_index)
             uts = int(cleaned["uts"])
-            _warn_on_utc_time_mismatch(
-                warning_writer,
-                import_row_number=row_index - 1,
-                uts=uts,
-                utc_time=cleaned["utc_time"],
-                played_at=played_at,
-            )
             artist_key = normalize_key(cleaned["artist"])
             album_key = normalize_key(cleaned["album"])
             track_key = normalize_key(cleaned["track"])
@@ -296,43 +289,6 @@ def _is_near_duplicate(
     )
     previous_scrobbles.append((uts, row_number))
     return is_duplicate
-
-
-def _warn_on_utc_time_mismatch(
-    warning_writer: csv.DictWriter[str],
-    *,
-    import_row_number: int,
-    uts: int,
-    utc_time: str,
-    played_at: datetime,
-) -> None:
-    if utc_time == "":
-        return
-
-    try:
-        parsed_utc_time = datetime.strptime(utc_time, "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        _write_warning(
-            warning_writer,
-            import_row_number=import_row_number,
-            warning_code="invalid_utc_time",
-            message="utc_time is not formatted as YYYY-MM-DD HH:MM:SS",
-            evidence={"uts": uts, "utc_time": utc_time},
-        )
-        return
-
-    if parsed_utc_time != played_at:
-        _write_warning(
-            warning_writer,
-            import_row_number=import_row_number,
-            warning_code="timestamp_mismatch",
-            message="utc_time does not match uts",
-            evidence={
-                "uts": uts,
-                "utc_time": utc_time,
-                "played_at": played_at.isoformat(sep=" "),
-            },
-        )
 
 
 def _write_warning(

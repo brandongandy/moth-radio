@@ -158,7 +158,10 @@ def _persist_tag_profile(
     conn: DuckDBPyConnection,
     tag_profile: list[_TagProfileEntry],
 ) -> None:
-    conn.execute("DELETE FROM tag_profile WHERE source = ?", [_PROFILE_SOURCE])
+    if not tag_profile:
+        conn.execute("DELETE FROM tag_profile WHERE source = ?", [_PROFILE_SOURCE])
+        return
+
     for entry in tag_profile:
         conn.execute(
             """
@@ -171,6 +174,11 @@ def _persist_tag_profile(
                 updated_at
             )
             VALUES (?, ?, ?, ?, ?, current_timestamp)
+            ON CONFLICT (source, tag) DO UPDATE SET
+                user_weight = excluded.user_weight,
+                artist_count = excluded.artist_count,
+                top_seed_artists = excluded.top_seed_artists,
+                updated_at = excluded.updated_at
             """,
             [
                 entry.tag,
@@ -180,6 +188,14 @@ def _persist_tag_profile(
                 json.dumps(_top_seed_artist_payload(entry.contributions), sort_keys=True),
             ],
         )
+    conn.execute(
+        """
+        DELETE FROM tag_profile
+        WHERE source = ?
+          AND tag NOT IN (SELECT unnest(?))
+        """,
+        [_PROFILE_SOURCE, [entry.tag for entry in tag_profile]],
+    )
 
 
 def _build_genre_clusters(
@@ -202,7 +218,10 @@ def _persist_genre_clusters(
     conn: DuckDBPyConnection,
     clusters: list[dict[str, object]],
 ) -> None:
-    conn.execute("DELETE FROM profile_cluster WHERE source = ?", [_PROFILE_SOURCE])
+    if not clusters:
+        conn.execute("DELETE FROM profile_cluster WHERE source = ?", [_PROFILE_SOURCE])
+        return
+
     for cluster in clusters:
         conn.execute(
             """
@@ -216,6 +235,13 @@ def _persist_genre_clusters(
                 updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, current_timestamp)
+            ON CONFLICT (cluster_key) DO UPDATE SET
+                cluster_name = excluded.cluster_name,
+                source = excluded.source,
+                tag_weights = excluded.tag_weights,
+                seed_artists = excluded.seed_artists,
+                artist_count = excluded.artist_count,
+                updated_at = excluded.updated_at
             """,
             [
                 cluster["cluster_key"],
@@ -226,6 +252,14 @@ def _persist_genre_clusters(
                 cluster["artist_count"],
             ],
         )
+    conn.execute(
+        """
+        DELETE FROM profile_cluster
+        WHERE source = ?
+          AND cluster_key NOT IN (SELECT unnest(?))
+        """,
+        [_PROFILE_SOURCE, [cluster["cluster_key"] for cluster in clusters]],
+    )
 
 
 def _top_seed_artist_payload(

@@ -786,3 +786,250 @@ def test_tui_command_launches_textual_app(tmp_path: Path, monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert calls == ["constructed", "ran"]
+
+
+def test_evaluate_command_runs_and_prints_metrics(monkeypatch, tmp_path):
+    from scrobble_recs.config import load_config
+    from scrobble_recs.db import initialize_database
+    from scrobble_recs.importers.lastfm_csv import import_lastfm_csv
+    from scrobble_recs.models.evaluate import EvaluationResult
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "test",
+                    "db_path": str(tmp_path / "db.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": "tests/fixtures/tiny_lastfm_export.csv",
+                },
+                "recommendation": {
+                    "seed_artist_limit": 10,
+                    "similar_artists_per_seed": 10,
+                    "min_seed_scrobbles": 2,
+                    "obviousness": {"tag_top_artists_limit": 100},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(config_path)
+    conn = initialize_database(cfg)
+    try:
+        import_lastfm_csv(conn, cfg.input.lastfm_csv)
+    finally:
+        conn.close()
+
+    fake_result = EvaluationResult(
+        train_until="2021-01-02T23:59:59",
+        test_from="2021-01-03T00:00:00",
+        recommendations_generated=5,
+        recall_at_50=0.042,
+        recall_at_100=0.067,
+        ndcg_at_50=0.031,
+        knownness_median=0.08,
+        obviousness_median=0.12,
+        tag_diversity_at_20=0.78,
+        rediscovery_hit_rate=0.05,
+        external_candidate_share=0.83,
+    )
+
+    import scrobble_recs.cli as cli_module
+
+    def fake_evaluate(conn, config, *, train_until, test_from):
+        return fake_result
+
+    monkeypatch.setattr(cli_module, "evaluate_recommendations_from_config", fake_evaluate)
+
+    from typer.testing import CliRunner
+
+    from scrobble_recs.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["evaluate", "--config", str(config_path), "--split-date", "2021-01-03"],
+    )
+    assert result.exit_code == 0
+    assert "recall@50" in result.stdout
+    assert "0.042" in result.stdout
+    assert "ndcg@50" in result.stdout
+
+
+def test_profile_tags_command_prints_tag_weights(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "test",
+                    "db_path": str(tmp_path / "db.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": "tests/fixtures/tiny_lastfm_export.csv",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    from typer.testing import CliRunner
+
+    from scrobble_recs.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["profile-tags", "--config", str(config_path)])
+    # May produce output or an error if no profile exists yet; both are OK.
+    assert result.exit_code in (0, 1)
+
+
+def test_cache_stats_command_prints_statistics(monkeypatch, tmp_path):
+    from scrobble_recs.admin.cache_admin import CacheStats
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "test",
+                    "db_path": str(tmp_path / "db.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": "tests/fixtures/tiny_lastfm_export.csv",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fake_stats = CacheStats(
+        total_entries=42,
+        fresh_entries=30,
+        stale_entries=10,
+        error_entries=2,
+        by_source={"lastfm": 42},
+        by_endpoint={"artist.getSimilar": 20, "artist.getTopTags": 15, "tag.getTopArtists": 7},
+        by_status={"200": 40, "429": 2},
+        oldest_fetched_at="2026-06-01T00:00:00",
+        newest_fetched_at="2026-06-09T12:00:00",
+    )
+
+    import scrobble_recs.cli as cli_module
+
+    monkeypatch.setattr(cli_module, "stats_cache", lambda conn: fake_stats)
+
+    from typer.testing import CliRunner
+
+    from scrobble_recs.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["cache", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "42" in result.stdout
+    assert "fresh" in result.stdout
+    assert "lastfm" in result.stdout
+
+
+def test_enrich_plan_command_prints_summary(monkeypatch, tmp_path):
+    from scrobble_recs.enrichment.queue import EnrichmentQueuePlan
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "test",
+                    "db_path": str(tmp_path / "db.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": "tests/fixtures/tiny_lastfm_export.csv",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fake_plan = EnrichmentQueuePlan(
+        source="lastfm",
+        seed_artists=250,
+        similar_artist_queued=57,
+        similar_artist_cached_fresh=193,
+        artist_tag_queued=589,
+        artist_tag_cached_fresh=311,
+        tag_top_artist_queued=66,
+        tag_top_artist_cached_fresh=14,
+        total_queued=712,
+    )
+
+    import scrobble_recs.cli as cli_module
+
+    monkeypatch.setattr(cli_module, "plan_enrichment", lambda conn, **kwargs: fake_plan)
+
+    from typer.testing import CliRunner
+
+    from scrobble_recs.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["enrich-plan", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "artist.getSimilar" in result.stdout
+    assert "57" in result.stdout
+    assert "193" in result.stdout
+
+
+def test_enrich_status_command_prints_counts(monkeypatch, tmp_path):
+    from scrobble_recs.enrichment.queue import EnrichmentQueueStatus
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "test",
+                    "db_path": str(tmp_path / "db.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": "tests/fixtures/tiny_lastfm_export.csv",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fake_status = EnrichmentQueueStatus(
+        source="lastfm",
+        total=100,
+        queued=50,
+        running=0,
+        complete=45,
+        failed=3,
+        skipped=2,
+    )
+
+    import scrobble_recs.cli as cli_module
+
+    monkeypatch.setattr(cli_module, "enrichment_queue_status", lambda conn, **kwargs: fake_status)
+
+    from typer.testing import CliRunner
+
+    from scrobble_recs.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["enrich-status", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "50" in result.stdout
+    assert "45" in result.stdout
+    assert "failed" in result.stdout

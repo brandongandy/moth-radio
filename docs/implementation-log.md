@@ -1,5 +1,81 @@
 # Implementation Log
 
+## 2026-06-12: Stable artist identity for feedback
+
+Changed:
+
+- Investigated repeated recommendations in the live database from `config.json`
+  (`C:/Dev/tool/mothradio/data/scrobbles.duckdb`).
+- Found that Stephen Lynch's current recommendation row used artist ID `135413`
+  with `feedback_score = 0.0`, while older feedback rows often pointed at
+  artist IDs that no longer joined to the current `artist` table after local
+  data rebuilds.
+- Added stable artist identity fields to newly recorded feedback context:
+  `artist_key`, `artist_name`, `lastfm_name`, and `musicbrainz_artist_mbid`.
+- Updated feedback profile loading so feedback with a stale numeric artist ID
+  can resolve to current artist rows through those stable identity fields.
+- Restored the rediscovery exception in the obvious-candidate hard-hide rule,
+  matching the existing recommender behavior and tests.
+
+Verified:
+
+- `python -m pytest tests/test_feedback.py -v` -> 13 passed.
+- `python -m pytest tests/test_feedback.py tests/test_recommend.py -v` -> 47 passed.
+- `python -m ruff check src/scrobble_recs/models/feedback.py src/scrobble_recs/models/recommend.py tests/test_feedback.py tests/test_recommend.py` -> All checks passed.
+- `python -m pytest` -> 236 passed.
+- `python -m ruff check .` -> All checks passed.
+- `python -m ruff format --check .` -> 49 files already formatted.
+- `python -m mypy src` -> Success, no issues found in 31 source files.
+
+## 2026-06-10: Progress display, rerank reporting, and feedback strength fixes
+
+Changed:
+
+- Added `progress.refresh()` after each `Progress.update()` call in the
+  recommend CLI callback so Rich renders incremental progress immediately
+  instead of batching updates into a single frame during fast loops.
+- Changed diversity reranker progress total from `len(scores)` (the candidate
+  pool size) to `limit` (the target selection count) so the progress bar shows
+  meaningful completion toward the user-requested count rather than appearing
+  stuck at a small fraction.
+- Increased `feedback_model` scoring weight from 0.10 to 0.20 so feedback
+  adjustments have a stronger influence on the raw recommendation score.
+- Strengthened suppression feedback constants:
+  - `reject`: -0.25 → -0.50
+  - `already_know`: -0.20 → -0.40
+  - `too_obvious`: -0.20 → -0.35
+  - `wrong_genre`: -0.20 → -0.40
+  - `less_like_this`: -0.15 → -0.50
+  - TAG `less_like_this`: -0.10 → -0.30
+  - TAG `wrong_genre`: -0.20 → -0.35
+- Added two tests verifying that `hide_artist` and `less_like_this` feedback
+  from previous recommendation runs is consumed by new runs (cross-run
+  persistence).
+
+Verified:
+
+- `python -m pytest` -> 235 passed.
+- `python -m ruff check .` -> All checks passed.
+
+## 2026-06-09: Incremental score-candidate progress
+
+Changed:
+
+- Added incremental progress reporting to `_score_candidates` so large
+  recommendation runs no longer appear stuck at zero after "Load candidates".
+- Reports progress every `total_candidates // 20` candidates (minimum 1).
+- Removed duplicate score-candidate progress reporting from
+  `generate_recommendations`; the phase lifecycle is now owned by the scoring
+  function.
+
+Verified:
+
+- `python -m pytest tests/test_recommend.py -v` -> 32 passed.
+- `python -m pytest` -> 233 passed.
+- `python -m ruff check .` -> All checks passed.
+- `python -m ruff format --check .` -> 49 files already formatted.
+- `python -m mypy src` -> Success, no issues found in 31 source files.
+
 ## 2026-06-09: User-facing score normalization
 
 Changed:

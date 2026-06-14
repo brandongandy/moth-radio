@@ -181,7 +181,10 @@ def test_record_feedback_event_validates_action_and_persists_json_context(
         10,
         "more_like_this",
         1.0,
-        '{"source":"review","tags":["coldwave","gothic rock"],"weight":2}',
+        (
+            '{"artist_key":"bauhaus","artist_name":"Bauhaus","lastfm_name":"Bauhaus",'
+            '"source":"review","tags":["coldwave","gothic rock"],"weight":2}'
+        ),
         "good lead",
         datetime(2026, 6, 4, 12, 0, 0),
     )
@@ -246,6 +249,43 @@ def test_load_feedback_profile_derives_artist_tag_and_seed_adjustments(
     assert profile.artist_adjustments[21] == pytest.approx(-1.0)
     assert profile.tag_adjustments["post-punk"] == pytest.approx(0.10)
     assert profile.tag_adjustments["coldwave"] == pytest.approx(0.25)
+    conn.close()
+
+
+def test_load_feedback_profile_resolves_stale_artist_id_from_context_identity(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_artist(conn, artist_id=102, name="Stephen Lynch")
+    _insert_run(conn, run_id="00000000-0000-0000-0000-000000000102")
+    conn.execute(
+        """
+        INSERT INTO feedback_event (
+            feedback_id,
+            run_id,
+            artist_id,
+            action,
+            value,
+            context,
+            note
+        )
+        VALUES (
+            '00000000-0000-0000-0000-000000000202',
+            '00000000-0000-0000-0000-000000000102',
+            101,
+            'hide_artist',
+            1.0,
+            '{"artist_key":"stephen-lynch","artist_name":"Stephen Lynch","tags":["comedy"]}',
+            NULL
+        )
+        """
+    )
+
+    profile = load_feedback_profile(conn)
+
+    assert 102 in profile.hidden_artist_ids
+    assert profile.artist_adjustments[102] == pytest.approx(-1.0)
     conn.close()
 
 

@@ -208,14 +208,6 @@ def generate_recommendations(
         subject=f"{len(scoring_data.candidates)} candidates",
         status="completed",
     )
-    _report_progress(
-        progress_callback,
-        phase="score_candidates",
-        current=0,
-        total=len(scoring_data.candidates),
-        subject="candidate artists",
-        status="processing",
-    )
     scores = _score_candidates(
         config,
         mode_settings,
@@ -225,20 +217,13 @@ def generate_recommendations(
         scoring_data,
         feedback_profile,
         fatigue_by_artist,
-    )
-    _report_progress(
-        progress_callback,
-        phase="score_candidates",
-        current=len(scoring_data.candidates),
-        total=len(scoring_data.candidates),
-        subject=f"{len(scores)} positive scores",
-        status="completed",
+        progress_callback=progress_callback,
     )
     _report_progress(
         progress_callback,
         phase="rerank_diversity",
         current=0,
-        total=len(scores),
+        total=limit,
         subject="ranked candidates",
         status="processing",
     )
@@ -254,7 +239,7 @@ def generate_recommendations(
         progress_callback,
         phase="rerank_diversity",
         current=len(ranked_without_explanations),
-        total=len(scores),
+        total=limit,
         subject=f"{len(ranked_without_explanations)} selected",
         status="completed",
     )
@@ -603,12 +588,26 @@ def _score_candidates(
     scoring_data: _ScoringData,
     feedback_profile: FeedbackProfile,
     fatigue_by_artist: dict[int, _FatiguePenalty],
+    *,
+    progress_callback: RecommendationProgressCallback | None = None,
 ) -> list[_CandidateScore]:
     seed_weight_by_id = {seed.artist_id: seed.seed_weight for seed in seeds}
     total_seed_weight = sum(seed_weight_by_id.values()) or 1.0
     scores: list[_CandidateScore] = []
     obviousness_enabled = config.recommendation.obviousness.enabled
+    total_candidates = len(scoring_data.candidates)
+    processed = 0
+    report_interval = max(1, total_candidates // 20)
+    _report_progress(
+        progress_callback,
+        phase="score_candidates",
+        current=0,
+        total=total_candidates,
+        subject="candidate artists",
+        status="processing",
+    )
     for artist_id in scoring_data.candidates:
+        processed += 1
         if artist_id in seed_ids:
             continue
         if artist_id in feedback_profile.hidden_artist_ids:
@@ -717,6 +716,23 @@ def _score_candidates(
                 explanation={},
             )
         )
+        if processed % report_interval == 0:
+            _report_progress(
+                progress_callback,
+                phase="score_candidates",
+                current=processed,
+                total=total_candidates,
+                subject=f"{len(scores)} positive so far",
+                status="processing",
+            )
+    _report_progress(
+        progress_callback,
+        phase="score_candidates",
+        current=total_candidates,
+        total=total_candidates,
+        subject=f"{len(scores)} positive scores",
+        status="completed",
+    )
     return scores
 
 
@@ -784,7 +800,7 @@ def _rerank_for_diversity(
             progress_callback,
             phase="rerank_diversity",
             current=len(selected),
-            total=len(scores),
+            total=limit,
             subject=f"{len(selected)} selected",
             status="processing",
         )

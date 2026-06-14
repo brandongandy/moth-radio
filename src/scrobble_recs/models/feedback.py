@@ -48,12 +48,12 @@ ALLOWED_FEEDBACK_ACTIONS: frozenset[str] = frozenset(
 
 DIRECT_ARTIST_ADJUSTMENTS: dict[str, float] = {
     "save": 0.20,
-    "reject": -0.25,
-    "already_know": -0.20,
-    "too_obvious": -0.20,
-    "wrong_genre": -0.20,
+    "reject": -0.50,
+    "already_know": -0.40,
+    "too_obvious": -0.35,
+    "wrong_genre": -0.40,
     "more_like_this": 0.15,
-    "less_like_this": -0.15,
+    "less_like_this": -0.50,
     "hide_artist": -1.00,
     "rediscovery_good": 0.10,
     "rediscovery_bad": -0.10,
@@ -61,8 +61,8 @@ DIRECT_ARTIST_ADJUSTMENTS: dict[str, float] = {
 
 TAG_ADJUSTMENTS: dict[str, float] = {
     "more_like_this": 0.10,
-    "less_like_this": -0.10,
-    "wrong_genre": -0.20,
+    "less_like_this": -0.30,
+    "wrong_genre": -0.35,
     "hide_tag": -1.00,
     "boost_tag": 0.15,
     "too_obvious": -0.05,
@@ -114,7 +114,12 @@ def record_feedback_event(
         raise ValueError(f"unsupported feedback action {action!r}")
 
     resolved_feedback_id = feedback_id or str(uuid4())
-    resolved_context = _normalized_context(context or {})
+    resolved_context = _normalized_context(
+        {
+            **_artist_identity_context(conn, artist_id),
+            **(context or {}),
+        }
+    )
     params: list[object] = [
         resolved_feedback_id,
         run_id,
@@ -179,7 +184,13 @@ def load_feedback_profile(conn: DuckDBPyConnection) -> FeedbackProfile:
         action = str(action_raw)
         value = 1.0 if value_raw is None else float(value_raw)
         context = _parse_context(context_raw)
-        _apply_artist_feedback(profile, artist_id=artist_id, action=action, value=value)
+        for resolved_artist_id in _feedback_artist_ids(conn, artist_id, context):
+            _apply_artist_feedback(
+                profile,
+                artist_id=resolved_artist_id,
+                action=action,
+                value=value,
+            )
         for tag in _context_tags(context):
             _add_float(
                 profile.tag_adjustments,
@@ -266,7 +277,69 @@ def _normalized_context(context: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(context)
     if "tags" in normalized:
         normalized["tags"] = _context_tags(normalized)
+    for key in ("artist_key", "artist_name", "lastfm_name", "musicbrainz_artist_mbid"):
+        value = normalized.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            normalized[key] = text
+        else:
+            normalized.pop(key, None)
     return normalized
+
+
+def _artist_identity_context(conn: DuckDBPyConnection, artist_id: int) -> dict[str, str]:
+    row = conn.execute(
+        """
+        SELECT artist_key, canonical_name, lastfm_name, musicbrainz_artist_mbid
+        FROM artist
+        WHERE artist_id = ?
+        """,
+        [artist_id],
+    ).fetchone()
+    if row is None:
+        return {}
+    context: dict[str, str] = {}
+    for key, raw in zip(
+        ("artist_key", "artist_name", "lastfm_name", "musicbrainz_artist_mbid"),
+        row,
+        strict=True,
+    ):
+        if raw is None:
+            continue
+        value = str(raw).strip()
+        if value:
+            context[key] = value
+    return context
+
+
+def _feedback_artist_ids(
+    conn: DuckDBPyConnection,
+    artist_id: int,
+    context: dict[str, Any],
+) -> set[int]:
+    resolved = {artist_id}
+    artist_key = str(context.get("artist_key", "")).strip()
+    artist_name = str(context.get("artist_name", "")).strip()
+    lastfm_name = str(context.get("lastfm_name", "")).strip()
+    mbid = str(context.get("musicbrainz_artist_mbid", "")).strip()
+    if not any((artist_key, artist_name, lastfm_name, mbid)):
+        return resolved
+
+    matches = conn.execute(
+        """
+        SELECT artist_id
+        FROM artist
+        WHERE (? <> '' AND artist_key = ?)
+           OR (? <> '' AND musicbrainz_artist_mbid = ?)
+           OR (? <> '' AND canonical_name = ?)
+           OR (? <> '' AND lastfm_name = ?)
+        """,
+        [artist_key, artist_key, mbid, mbid, artist_name, artist_name, lastfm_name, lastfm_name],
+    ).fetchall()
+    resolved.update(int(row[0]) for row in matches)
+    return resolved
 
 
 def _parse_context(raw: object) -> dict[str, Any]:

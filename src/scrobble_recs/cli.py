@@ -455,6 +455,7 @@ def _generate_recommendations_with_progress(
                 total=event.total,
                 description=_format_recommendation_progress_description(event),
             )
+            progress.refresh()
 
         return generate_recommendations(
             conn,

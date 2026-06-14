@@ -208,6 +208,8 @@ def generate_recommendations(
         subject=f"{len(scoring_data.candidates)} candidates",
         status="completed",
     )
+    run_id = str(uuid4())
+    _persist_candidates(conn, run_id, scoring_data)
     scores = _score_candidates(
         config,
         mode_settings,
@@ -272,7 +274,6 @@ def generate_recommendations(
         status="completed",
     )
 
-    run_id = str(uuid4())
     _report_progress(
         progress_callback,
         phase="persist_run",
@@ -1193,6 +1194,34 @@ def _seed_region_counts(
             if region not in configured_regions:
                 counts[region] = counts.get(region, 0) + 1
     return counts
+
+
+def _persist_candidates(
+    conn: DuckDBPyConnection,
+    run_id: str,
+    scoring_data: _ScoringData,
+) -> None:
+    """Persist candidate artists for the current recommendation run."""
+    for artist_id in scoring_data.candidates:
+        sources = scoring_data.similarity_by_target.get(artist_id, [])
+        tags = scoring_data.tag_ranks_by_artist.get(artist_id, [])
+        conn.execute(
+            """
+            INSERT INTO recommendation_candidate
+                (run_id, artist_id, candidate_sources, max_source_score,
+                 appeared_from_seed_count, appeared_from_tag_count)
+            VALUES (CAST(? AS UUID), ?, ?::JSON, ?, ?, ?)
+            ON CONFLICT (run_id, artist_id) DO NOTHING
+            """,
+            [
+                run_id,
+                artist_id,
+                json.dumps([int(s[0]) for s in sources]),
+                float(max((s[1] for s in sources), default=0.0)),
+                len(sources),
+                len(tags),
+            ],
+        )
 
 
 def _persist_run(

@@ -115,12 +115,14 @@ def test_initialize_database_applies_initial_migration(tmp_path: Path) -> None:
         "artist_listening_fact",
         "artist_similarity_edge",
         "artist_tag",
+        "enrichment_queue",
         "enrichment_work",
         "feedback_event",
         "import_warning",
         "profile_cluster",
         "raw_scrobble",
         "recommendation",
+        "recommendation_candidate",
         "recommendation_run",
         "scrobble",
         "tag_profile",
@@ -498,3 +500,78 @@ def test_recommendation_quality_gate_defaults_are_loaded(tmp_path: Path) -> None
     assert "soundtrack" in config.recommendation.tag_profile.weak_tags
     assert "spoken word" in config.recommendation.tag_profile.weak_tags
     assert config.recommendation.tag_profile.weak_tag_penalty == pytest.approx(0.25)
+
+
+def test_knownness_config_defaults():
+    from scrobble_recs.config import KnownnessConfig
+
+    cfg = KnownnessConfig()
+    assert cfg.enabled is True
+    assert cfg.threshold == 0.65
+    assert cfg.penalty_weight == 0.40
+
+
+def test_knownness_config_rejects_threshold_out_of_range():
+    from scrobble_recs.config import KnownnessConfig
+
+    with pytest.raises(ValidationError):
+        KnownnessConfig(threshold=1.5)
+    with pytest.raises(ValidationError):
+        KnownnessConfig(threshold=-0.1)
+
+
+def test_enrichment_config_defaults():
+    from scrobble_recs.config import EnrichmentConfig
+
+    cfg = EnrichmentConfig()
+    assert cfg.seed_artist_limit == 250
+    assert cfg.candidate_artist_limit == 5000
+    assert cfg.max_queue_attempts == 3
+
+
+def test_lastfm_config_includes_timeout_and_stale_cache():
+    from scrobble_recs.config import LastFmApiConfig
+
+    cfg = LastFmApiConfig(api_key="key")
+    assert cfg.timeout_seconds == 20.0
+    assert cfg.stale_cache_on_error is True
+
+
+def test_recommendation_config_includes_run_limit_and_knownness():
+    from scrobble_recs.config import RecommendationConfig
+
+    cfg = RecommendationConfig()
+    assert cfg.run_limit == 500
+    assert cfg.knownness.enabled is True
+    assert cfg.knownness.threshold == 0.65
+
+
+def test_full_config_loads_enrichment_and_knownness_sections(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "app": {
+                    "name": "test",
+                    "db_path": str(tmp_path / "db.duckdb"),
+                    "cache_dir": str(tmp_path / "cache"),
+                    "log_path": str(tmp_path / "app.log"),
+                },
+                "input": {
+                    "lastfm_csv": "tests/fixtures/tiny_lastfm_export.csv",
+                },
+                "enrichment": {
+                    "seed_artist_limit": 100,
+                },
+                "recommendation": {
+                    "knownness": {
+                        "threshold": 0.50,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = load_config(config_path)
+    assert cfg.enrichment.seed_artist_limit == 100
+    assert cfg.recommendation.knownness.threshold == 0.50

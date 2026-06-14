@@ -27,6 +27,24 @@ Verified:
 - `python -m ruff format --check .` -> 49 files already formatted.
 - `python -m mypy src` -> Success, no issues found in 31 source files.
 
+## 2026-06-12: Reopened profile rebuild upserts
+
+Changed:
+
+- Fixed `build-profile` failures against reopened DuckDB files by upserting
+  existing `tag_profile` and `profile_cluster` rows before deleting obsolete
+  profile keys.
+- Added regression coverage for building a profile, closing the database,
+  reopening it, and rebuilding the same persisted profile rows.
+
+Verified:
+
+- `python -m pytest tests/test_profile.py::test_build_profile_replaces_existing_tag_profile_rows -q`
+- `python -m pytest tests/test_profile.py -q`
+- `python -m ruff check src/scrobble_recs/models/profile_builder.py tests/test_profile.py`
+- Ran `build_profile` against a copy of `C:/Dev/tool/mothradio/data/scrobbles.duckdb`
+  with the patched worktree code: `BuildProfileStats(artists_updated=18346, tag_weights=521, genre_clusters=521)`.
+
 ## 2026-06-10: Progress display, rerank reporting, and feedback strength fixes
 
 Changed:
@@ -75,6 +93,26 @@ Verified:
 - `python -m ruff check .` -> All checks passed.
 - `python -m ruff format --check .` -> 49 files already formatted.
 - `python -m mypy src` -> Success, no issues found in 31 source files.
+
+## 2026-06-09: v0.2 spec gap closure
+
+Added:
+- `KnownnessConfig` and `EnrichmentConfig` Pydantic models with validators
+- `timeout_seconds` and `stale_cache_on_error` fields to `LastFmApiConfig`
+- `run_limit` field to `RecommendationConfig`
+- `evaluate` command with split-date metrics (recall, ndcg, diversity, knownness, etc.)
+- `cache` / `cache-inspect` / `cache-expire` commands for API cache management
+- `enrich-plan` / `enrich-status` / `enrich-retry` commands for queue-based enrichment workflow
+- `enrichment_queue` and `recommendation_candidate` table migrations
+- `profile-tags` command
+- TUI cache status display via `CacheSummary` in `TuiRecommendationStore`
+- `_persist_candidates` in recommend.py to persist candidate metadata
+
+Verified:
+- `python -m pytest` — 261 passed
+- `python -m ruff check .` — All checks passed
+- `python -m ruff format --check .` — 55 files already formatted
+- `python -m mypy src` — Success, no issues found
 
 ## 2026-06-09: User-facing score normalization
 

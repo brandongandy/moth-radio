@@ -11,6 +11,11 @@ from rich.console import Console
 from rich.markup import escape
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn
 
+from scrobble_recs.admin.cache_admin import (
+    expire_cache,
+    inspect_cache,
+    stats_cache,
+)
 from scrobble_recs.admin.doctor import DiagnosticCheck, run_doctor
 from scrobble_recs.admin.init import initialize_project
 from scrobble_recs.config import ScrobbleRecsConfig, load_config
@@ -20,8 +25,14 @@ from scrobble_recs.enrichment.lastfm import (
     LastFmEnrichmentStats,
     run_lastfm_enrichment,
 )
+from scrobble_recs.enrichment.queue import (
+    enrichment_queue_status,
+    plan_enrichment,
+    retry_failed_enrichment,
+)
 from scrobble_recs.export import ExportFormat, export_recommendations
 from scrobble_recs.importers.lastfm_csv import ImportStats, get_import_stats, import_lastfm_csv
+from scrobble_recs.models.evaluate import EvaluationResult, evaluate_recommendations
 from scrobble_recs.models.feedback import record_feedback_event, rerank_recommendation_run
 from scrobble_recs.models.profile_builder import build_profile
 from scrobble_recs.models.recommend import (
@@ -128,6 +139,42 @@ def build_profile_command(
     console.print(f"genre clusters: {stats.genre_clusters}")
 
 
+@app.command("profile-tags")
+def profile_tags_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+) -> None:
+    """Print the user tag profile."""
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        rows = conn.execute(
+            """
+            SELECT tag, user_weight, artist_count, top_seed_artists
+            FROM tag_profile
+            WHERE source = 'lastfm'
+            ORDER BY user_weight DESC
+            """
+        ).fetchall()
+
+        if not rows:
+            console.print("No tag profile found. Run 'scrobble-recs build-profile' first.")
+            return
+
+        import json as _json
+
+        console.print("Tag Profile")
+        console.print("")
+        for tag, weight, count, top_json in rows:
+            top_artists = _json.loads(top_json) if isinstance(top_json, str) else (top_json or [])
+            top_names = [entry.get("artist", "?") for entry in top_artists[:3]]
+            console.print(
+                f"  {tag}: weight={float(weight):.4f} artists={int(count)} "
+                f"top={', '.join(top_names)}"
+            )
+    finally:
+        conn.close()
+
+
 @app.command("doctor")
 def doctor_command(
     config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
@@ -172,6 +219,179 @@ def enrich_command(
 
     console.print("Last.fm enrichment complete")
     _print_enrichment_stats(stats)
+
+
+@app.command("enrich-plan")
+def enrich_plan_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    source: Annotated[str, typer.Option("--source", help="Enrichment source.")] = "lastfm",
+) -> None:
+    """Plan enrichment work without calling the network."""
+    if source != "lastfm":
+        raise typer.BadParameter("only --source lastfm is supported")
+
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        plan = plan_enrichment(
+            conn,
+            source=source,
+            seed_artist_limit=resolved_config.enrichment.seed_artist_limit,
+            similar_artists_per_seed=resolved_config.enrichment.similar_artists_per_seed,
+            top_tags_per_artist=resolved_config.enrichment.top_tags_per_artist,
+            tag_top_artists_limit=resolved_config.enrichment.tag_top_artists_limit,
+        )
+    finally:
+        conn.close()
+
+    console.print(f"{source.capitalize()} enrichment plan")
+    console.print("")
+    console.print("artist.getSimilar:")
+    console.print(f"  queued: {plan.similar_artist_queued}")
+    console.print(f"  cached fresh: {plan.similar_artist_cached_fresh}")
+    console.print(f"  missing: {plan.similar_artist_queued}")
+    console.print("")
+    console.print("artist.getTopTags:")
+    console.print(f"  queued: {plan.artist_tag_queued}")
+    console.print(f"  cached fresh: {plan.artist_tag_cached_fresh}")
+    console.print(f"  missing: {plan.artist_tag_queued}")
+    console.print("")
+    console.print("tag.getTopArtists:")
+    console.print(f"  queued: {plan.tag_top_artist_queued}")
+    console.print(f"  cached fresh: {plan.tag_top_artist_cached_fresh}")
+    console.print(f"  missing: {plan.tag_top_artist_queued}")
+    console.print("")
+    console.print(f"total queued: {plan.total_queued}")
+
+
+@app.command("enrich-status")
+def enrich_status_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    source: Annotated[str, typer.Option("--source", help="Enrichment source.")] = "lastfm",
+) -> None:
+    """Show enrichment queue status."""
+    if source != "lastfm":
+        raise typer.BadParameter("only --source lastfm is supported")
+
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        status = enrichment_queue_status(conn, source=source)
+    finally:
+        conn.close()
+
+    console.print(f"{source.capitalize()} enrichment queue status")
+    console.print(f"  total: {status.total}")
+    console.print(f"  queued: {status.queued}")
+    console.print(f"  running: {status.running}")
+    console.print(f"  complete: {status.complete}")
+    console.print(f"  failed: {status.failed}")
+    console.print(f"  skipped: {status.skipped}")
+
+
+@app.command("enrich-retry")
+def enrich_retry_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    source: Annotated[str, typer.Option("--source", help="Enrichment source.")] = "lastfm",
+) -> None:
+    """Retry failed enrichment queue entries."""
+    if source != "lastfm":
+        raise typer.BadParameter("only --source lastfm is supported")
+
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        count = retry_failed_enrichment(
+            conn,
+            source=source,
+            max_attempts=resolved_config.enrichment.max_queue_attempts,
+        )
+    finally:
+        conn.close()
+
+    console.print(f"Reset {count} failed queue entries to queued")
+
+
+@app.command("cache")
+def cache_stats_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+) -> None:
+    """Print API cache statistics."""
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        stats = stats_cache(conn)
+    finally:
+        conn.close()
+
+    console.print("API Cache Statistics")
+    console.print(f"  total entries: {stats.total_entries}")
+    console.print(f"  fresh (2xx, not expired): {stats.fresh_entries}")
+    console.print(f"  stale (expired): {stats.stale_entries}")
+    console.print(f"  errors (non-2xx): {stats.error_entries}")
+    if stats.oldest_fetched_at:
+        console.print(f"  oldest fetched: {stats.oldest_fetched_at}")
+    if stats.newest_fetched_at:
+        console.print(f"  newest fetched: {stats.newest_fetched_at}")
+    if stats.by_source:
+        console.print("  by source:")
+        for source, count in stats.by_source.items():
+            console.print(f"    {source}: {count}")
+    if stats.by_endpoint:
+        console.print("  by endpoint:")
+        for endpoint, count in stats.by_endpoint.items():
+            console.print(f"    {endpoint}: {count}")
+    if stats.by_status:
+        console.print("  by status:")
+        for status, count in stats.by_status.items():
+            console.print(f"    {status}: {count}")
+
+
+@app.command("cache-inspect")
+def cache_inspect_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    source: Annotated[
+        str | None, typer.Option("--source", help="Filter by source (e.g. lastfm).")
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", help="Max entries to show.")] = 100,
+) -> None:
+    """Inspect individual cache entries."""
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        entries = inspect_cache(conn, source=source, limit=limit)
+    finally:
+        conn.close()
+
+    console.print(f"Cache entries ({len(entries)}):")
+    for entry in entries:
+        freshness = "fresh" if entry.is_fresh else "stale"
+        status = entry.response_status or "err"
+        console.print(
+            f"  [{freshness}] {entry.source}:{entry.endpoint} "
+            f"status={status} fetched={entry.fetched_at} "
+            f"expires={entry.expires_at}"
+        )
+
+
+@app.command("cache-expire")
+def cache_expire_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    source: Annotated[str | None, typer.Option("--source", help="Filter by source.")] = None,
+    older_than_days: Annotated[
+        int,
+        typer.Option("--older-than-days", help="Remove entries older than this many days."),
+    ] = 180,
+) -> None:
+    """Expire stale cache entries."""
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        removed = expire_cache(conn, source=source, older_than_days=older_than_days)
+    finally:
+        conn.close()
+
+    console.print(f"Removed {removed} stale cache entries")
 
 
 @app.command("resolve")
@@ -288,6 +508,67 @@ def tui_command(
         conn.close()
 
 
+@app.command("evaluate")
+def evaluate_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    split_date: Annotated[
+        str | None,
+        typer.Option("--split-date", help="Date to split train/test (YYYY-MM-DD)."),
+    ] = None,
+    train_until: Annotated[
+        str | None,
+        typer.Option("--train-until", help="End of training period (YYYY-MM-DD or ISO timestamp)."),
+    ] = None,
+    test_from: Annotated[
+        str | None,
+        typer.Option("--test-from", help="Start of test period (YYYY-MM-DD or ISO timestamp)."),
+    ] = None,
+) -> None:
+    """Evaluate recommendation quality using a train/test split."""
+    from datetime import timedelta
+
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        # Resolve split dates.
+        if train_until and test_from:
+            train_dt = _parse_timestamp(train_until)
+            test_dt = _parse_timestamp(test_from)
+        elif split_date:
+            train_dt = _parse_timestamp(split_date).replace(hour=23, minute=59, second=59)
+            test_dt = _parse_timestamp(split_date).replace(hour=0, minute=0, second=0) + timedelta(
+                days=1
+            )
+        else:
+            console.print("Error: provide --split-date or both --train-until and --test-from")
+            raise typer.Exit(code=1)
+
+        console.print("Generating evaluation recommendations from local DuckDB data...")
+        result = evaluate_recommendations_from_config(
+            conn,
+            resolved_config,
+            train_until=train_dt,
+            test_from=test_dt,
+        )
+    finally:
+        conn.close()
+
+    console.print("")
+    console.print("Evaluation")
+    console.print("")
+    console.print(f"train_until: {result.train_until}")
+    console.print(f"test_from: {result.test_from}")
+    console.print("")
+    console.print(f"recall@50: {result.recall_at_50:.3f}")
+    console.print(f"recall@100: {result.recall_at_100:.3f}")
+    console.print(f"ndcg@50: {result.ndcg_at_50:.3f}")
+    console.print(f"tag_diversity@20: {result.tag_diversity_at_20:.3f}")
+    console.print(f"knownness median: {result.knownness_median:.3f}")
+    console.print(f"obviousness median: {result.obviousness_median:.3f}")
+    console.print(f"rediscovery_hit_rate: {result.rediscovery_hit_rate:.3f}")
+    console.print(f"external_candidate_share: {result.external_candidate_share:.3f}")
+
+
 @app.command("feedback")
 def feedback_command(
     config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
@@ -352,6 +633,25 @@ def feedback_command(
             raise typer.Exit(code=1) from exc
     finally:
         conn.close()
+
+
+def _parse_timestamp(value: str) -> datetime:
+    """Parse YYYY-MM-DD or ISO-8601 timestamp string."""
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as err:
+        raise typer.BadParameter(f"invalid timestamp: {value}") from err
+
+
+def evaluate_recommendations_from_config(
+    conn: DuckDBPyConnection,
+    config: ScrobbleRecsConfig,
+    *,
+    train_until: datetime,
+    test_from: datetime,
+) -> EvaluationResult:
+    """Thin wrapper for CLI monkeypatching in tests."""
+    return evaluate_recommendations(conn, config, train_until=train_until, test_from=test_from)
 
 
 def _count_query(conn: DuckDBPyConnection, sql: str) -> int:

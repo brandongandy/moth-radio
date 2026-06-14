@@ -47,6 +47,12 @@ Edit `config.example.json` or create your own config file with paths for:
 - `app.cache_dir`: local cache storage.
 - `app.log_path`: the command log file.
 - `input.lastfm_csv`: your Last.fm CSV export.
+- `apis.lastfm.api_key`: your Last.fm API key (use `${LASTFM_API_KEY}` for env interpolation).
+- `apis.lastfm.timeout_seconds`: HTTP timeout for API calls (default 20).
+- `apis.lastfm.stale_cache_on_error`: serve stale cache on transient failures (default true).
+- `enrichment.seed_artist_limit`: max seed artists for enrichment planning (default 250).
+- `recommendation.run_limit`: max recommendations per run (default 500).
+- `recommendation.knownness.threshold`: knownness suppression threshold (default 0.65).
 
 Create a local config and DuckDB database:
 
@@ -114,6 +120,16 @@ scrobble-recs build-profile --config config.example.json
 The command prints a startup line and shows a terminal spinner while local
 profile tables are recomputed.
 
+Inspect your computed tag profile after building it:
+
+```bash
+scrobble-recs profile-tags --config config.example.json
+```
+
+`profile-tags` prints each tag's user weight, artist count, and top seed
+artists, ordered by descending affinity. Broad, generic tags are damped so
+specific taste signals aren't drowned out.
+
 MusicBrainz resolution is intentionally separate from local profile and
 recommendation work:
 
@@ -144,6 +160,37 @@ When Last.fm returns a transient `429` or `5xx` response, the client retries up
 to the configured maximum and falls back to a stale successful cache entry when
 one exists. Tests cover this behavior with mocked HTTP; they do not call
 Last.fm.
+
+### Enrichment Queue
+
+For large libraries, plan enrichment work without calling the network, then run
+it in controlled batches:
+
+```bash
+scrobble-recs enrich-plan --config config.example.json --source lastfm
+scrobble-recs enrich-status --config config.example.json --source lastfm
+scrobble-recs enrich-retry --config config.example.json --source lastfm
+```
+
+`enrich-plan` analyzes your seed artists and tag profile, then populates the
+enrichment queue. It prints a summary of what needs fetching vs what is already
+cached. `enrich-status` shows queue counts by status. `enrich-retry` resets
+failed queue entries so they can be retried.
+
+### API Cache Management
+
+Inspect and manage the local API response cache:
+
+```bash
+scrobble-recs cache --config config.example.json
+scrobble-recs cache-inspect --config config.example.json --source lastfm
+scrobble-recs cache-expire --config config.example.json --older-than-days 180
+```
+
+`cache` prints aggregate statistics (total, fresh, stale, error counts by
+source and endpoint). `cache-inspect` lists individual entries with freshness
+status. `cache-expire` removes stale successful responses older than the
+configured threshold.
 
 ## Recommendations
 
@@ -208,7 +255,22 @@ Useful keys:
 - `h`: hide the selected artist across local recommendations.
 
 Feedback is stored locally and reranks the current persisted run without live API
-calls.
+calls. The status bar shows the local API cache freshness at startup.
+
+## Evaluation
+
+Evaluate recommendation quality against historical listening data using a
+train/test split:
+
+```bash
+scrobble-recs evaluate --config config.example.json --split-date 2023-01-01
+scrobble-recs evaluate --config config.example.json --train-until 2022-12-31 --test-from 2023-01-01
+```
+
+`evaluate` builds a profile from the training period, generates
+recommendations, and measures recall, NDCG, tag diversity, knownness,
+obviousness, rediscovery hit rate, and external candidate share against the
+test period. It does not call live APIs.
 
 ## Recommendation Algorithm
 

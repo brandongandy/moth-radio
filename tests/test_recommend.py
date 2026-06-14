@@ -329,11 +329,13 @@ def test_generate_recommendations_reports_phase_progress(tmp_path: Path) -> None
         ("load_candidates", 0, 1, "local graph", "processing"),
         ("load_candidates", 1, 1, "3 candidates", "completed"),
         ("score_candidates", 0, 3, "candidate artists", "processing"),
+        ("score_candidates", 1, 3, "1 positive so far", "processing"),
+        ("score_candidates", 2, 3, "2 positive so far", "processing"),
         ("score_candidates", 3, 3, "2 positive scores", "completed"),
-        ("rerank_diversity", 0, 2, "ranked candidates", "processing"),
-        ("rerank_diversity", 1, 2, "1 selected", "processing"),
-        ("rerank_diversity", 2, 2, "2 selected", "processing"),
-        ("rerank_diversity", 2, 2, "2 selected", "completed"),
+        ("rerank_diversity", 0, 3, "ranked candidates", "processing"),
+        ("rerank_diversity", 1, 3, "1 selected", "processing"),
+        ("rerank_diversity", 2, 3, "2 selected", "processing"),
+        ("rerank_diversity", 2, 3, "2 selected", "completed"),
         ("build_explanations", 0, 2, "recommendations", "processing"),
         ("build_explanations", 2, 2, "recommendations", "completed"),
         ("persist_run", 0, 2, "recommendation rows", "processing"),
@@ -2289,4 +2291,137 @@ def test_generate_recommendations_positive_feedback_bypasses_fatigue(
     ).fetchone()
     explanation = json.loads(explanation_json)
     assert explanation["fatigue"]["penalty"] == 0.0
+    conn.close()
+
+
+def test_generate_recommendations_respects_hide_artist_across_runs(
+    tmp_path: Path,
+) -> None:
+    """Hidden artists from any run must be excluded from new recommendation runs."""
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=600,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=600, tag="post-punk", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=600,
+        candidate_id=601,
+        candidate_name="Hidden Artist",
+        tag="post-punk",
+        tag_rank=30,
+        similarity=0.85,
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=600,
+        candidate_id=602,
+        candidate_name="Visible Artist",
+        tag="post-punk",
+        tag_rank=31,
+        similarity=0.83,
+    )
+    # Record hide_artist from a previous run (different run_id)
+    _insert_run_for_feedback(conn, run_id="00000000-0000-0000-0000-000000000600")
+    record_feedback_event(
+        conn,
+        run_id="00000000-0000-0000-0000-000000000600",
+        artist_id=601,
+        action="hide_artist",
+        feedback_id="00000000-0000-0000-0000-000000000601",
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=5,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    names = _recommendation_names(conn, stats.run_id)
+    assert "Hidden Artist" not in names
+    assert "Visible Artist" in names
+    conn.close()
+
+
+def test_generate_recommendations_less_like_this_suppresses_across_runs(
+    tmp_path: Path,
+) -> None:
+    """less_like_this from any run must meaningfully suppress the artist in new runs."""
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=610,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=610, tag="post-punk", weight=100.0)
+    # Two similar candidates — one suppressed
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=610,
+        candidate_id=611,
+        candidate_name="Suppressed Artist",
+        tag="post-punk",
+        tag_rank=30,
+        similarity=0.85,
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=610,
+        candidate_id=612,
+        candidate_name="Unsullied Artist",
+        tag="post-punk",
+        tag_rank=31,
+        similarity=0.84,
+    )
+    # Record less_like_this with relevant tags so tag penalty also applies
+    _insert_run_for_feedback(conn, run_id="00000000-0000-0000-0000-000000000610")
+    record_feedback_event(
+        conn,
+        run_id="00000000-0000-0000-0000-000000000610",
+        artist_id=611,
+        action="less_like_this",
+        context={"tags": ["post-punk"]},
+        feedback_id="00000000-0000-0000-0000-000000000611",
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=2,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    names = _recommendation_names(conn, stats.run_id)
+    # The unsullied artist should rank ABOVE the suppressed one
+    # (both still appear since limit=2 and only 2 candidates)
+    assert names[0] == "Unsullied Artist"
+    assert names[1] == "Suppressed Artist"
+
+    # Verify the suppressed artist has a negative feedback score component
+    (feedback_score,) = conn.execute(
+        """
+        SELECT feedback_score
+        FROM recommendation
+        WHERE run_id = ? AND artist_id = 611
+        """,
+        [stats.run_id],
+    ).fetchone()
+    assert feedback_score < -0.3  # Should be substantially negative now
     conn.close()

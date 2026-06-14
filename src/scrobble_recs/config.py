@@ -211,7 +211,7 @@ class RecommendationWeightsConfig(BaseModel):
     personal_cluster_fit: float = 0.15
     rediscovery: float = 0.10
     metadata_graph: float = 0.05
-    feedback_model: float = 0.10
+    feedback_model: float = 0.20
 
 
 class DiversityConfig(BaseModel):

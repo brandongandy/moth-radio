@@ -177,6 +177,46 @@ def test_build_profile_persists_tag_profile_and_genre_clusters(tmp_path: Path) -
         conn.close()
 
 
+def test_build_profile_replaces_existing_tag_profile_rows(tmp_path: Path) -> None:
+    from scrobble_recs.models.profile_builder import build_profile
+
+    config = load_config(_config_path(tmp_path))
+    conn = initialize_database(config)
+    try:
+        _insert_profile_artist(
+            conn,
+            artist_id=15,
+            name="Alternative Anchor",
+            play_count=100,
+            lifetime_weight=0.0,
+            recent_weight=0.0,
+            knownness=0.0,
+            rediscovery_score=0.0,
+            last_played_at="2026-05-01",
+        )
+        _insert_artist_tag(conn, artist_id=15, tag="Alternative Rock", weight=0.90)
+
+        first_stats = build_profile(conn, config, as_of=datetime(2026, 6, 5, 12, 0, 0))
+        assert first_stats.tag_weights == 1
+    finally:
+        conn.close()
+
+    conn = initialize_database(config)
+    try:
+        second_stats = build_profile(conn, config, as_of=datetime(2026, 6, 5, 12, 0, 0))
+
+        assert second_stats.tag_weights == 1
+        assert conn.execute(
+            """
+            SELECT tag, source, count(*)
+            FROM tag_profile
+            GROUP BY tag, source
+            """
+        ).fetchall() == [("alternative rock", "lastfm", 1)]
+    finally:
+        conn.close()
+
+
 def test_build_profile_persists_clusters_for_slug_colliding_tags(tmp_path: Path) -> None:
     from scrobble_recs.models.profile_builder import build_profile
 

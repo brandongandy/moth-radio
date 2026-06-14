@@ -1,5 +1,23 @@
 # Implementation Log
 
+## 2026-06-12: Reopened profile rebuild upserts
+
+Changed:
+
+- Fixed `build-profile` failures against reopened DuckDB files by upserting
+  existing `tag_profile` and `profile_cluster` rows before deleting obsolete
+  profile keys.
+- Added regression coverage for building a profile, closing the database,
+  reopening it, and rebuilding the same persisted profile rows.
+
+Verified:
+
+- `python -m pytest tests/test_profile.py::test_build_profile_replaces_existing_tag_profile_rows -q`
+- `python -m pytest tests/test_profile.py -q`
+- `python -m ruff check src/scrobble_recs/models/profile_builder.py tests/test_profile.py`
+- Ran `build_profile` against a copy of `C:/Dev/tool/mothradio/data/scrobbles.duckdb`
+  with the patched worktree code: `BuildProfileStats(artists_updated=18346, tag_weights=521, genre_clusters=521)`.
+
 ## 2026-06-09: v0.2 spec gap closure
 
 Added:

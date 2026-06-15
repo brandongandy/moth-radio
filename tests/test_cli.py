@@ -538,7 +538,7 @@ def test_export_command_writes_requested_format(tmp_path: Path, monkeypatch) -> 
     output = tmp_path / "recs.csv"
     calls: list[tuple[Path, str, str | None]] = []
 
-    def fake_export(conn, output_path, *, format_name, run_id=None):
+    def fake_export(conn, output_path, *, format_name, run_id=None, include_candidates=False):
         calls.append((output_path, format_name, run_id))
         output_path.write_text("rank,artist\n", encoding="utf-8")
         return 3
@@ -570,7 +570,7 @@ def test_export_command_prints_export_value_error(tmp_path: Path, monkeypatch) -
     config_path = write_config(tmp_path)
     output = tmp_path / "recs.csv"
 
-    def fake_export(conn, output_path, *, format_name, run_id=None):
+    def fake_export(conn, output_path, *, format_name, run_id=None, include_candidates=False):
         raise ValueError("no recommendation runs exist")
 
     monkeypatch.setattr("scrobble_recs.cli.export_recommendations", fake_export)

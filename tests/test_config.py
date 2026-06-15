@@ -112,6 +112,7 @@ def test_initialize_database_applies_initial_migration(tmp_path: Path) -> None:
     assert tables == {
         "api_cache",
         "artist",
+        "artist_identity_resolution",
         "artist_listening_fact",
         "artist_similarity_edge",
         "artist_tag",

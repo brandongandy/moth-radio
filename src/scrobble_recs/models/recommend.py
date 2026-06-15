@@ -561,7 +561,6 @@ def _load_scoring_data(
         ).fetchall()
     }
 
-
     identity_warnings_by_artist: dict[int, list[str]] = {}
     for artist_id, warnings_json in conn.execute(
         "SELECT artist_id, coalesce(identity_warnings, '[]') FROM artist"
@@ -784,9 +783,7 @@ def _score_candidates(
             final_score -= trial_penalty
 
         identity_conf = scoring_data.identity_confidence_by_artist.get(artist_id, 0.50)
-        identity_warnings = tuple(
-            scoring_data.identity_warnings_by_artist.get(artist_id, [])
-        )
+        identity_warnings = tuple(scoring_data.identity_warnings_by_artist.get(artist_id, []))
         confidence_multiplier = 0.5 + 0.5 * identity_conf
         final_score *= confidence_multiplier
 
@@ -1266,9 +1263,7 @@ def _explanation(
         tag_rows,
         key=lambda row: (-tag_profile.get(row[0], 0.0), row[1], row[0]),
     )
-    matching_tags = [
-        tag for tag, _rank in ordered_tag_rows if tag_profile.get(tag, 0.0) > 0
-    ]
+    matching_tags = [tag for tag, _rank in ordered_tag_rows if tag_profile.get(tag, 0.0) > 0]
     top_seed_names = [seed_name for _sid, seed_name, _sim, _c in seed_rows[:5]]
     top_seed_scores = [similarity for _sid, _name, similarity, _c in seed_rows[:5]]
 
@@ -1512,9 +1507,7 @@ def _persist_run(
                 candidate_only_offset += 1
             else:
                 effective_rank = rank
-            identity = artist_identity.get(
-                score.artist_id, (score.artist_name, "", 0.50, "[]")
-            )
+            identity = artist_identity.get(score.artist_id, (score.artist_name, "", 0.50, "[]"))
             mbid_val = identity[1]
             lastfm_url_val = f"https://www.last.fm/music/{quote(score.artist_name, safe='')}"
             musicbrainz_url_val = f"https://musicbrainz.org/artist/{mbid_val}" if mbid_val else ""

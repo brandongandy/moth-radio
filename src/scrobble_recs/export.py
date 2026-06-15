@@ -117,7 +117,7 @@ def _load_rows(
                 "candidate_artist_name": str(candidate_name or artist or ""),
                 "canonical_artist_name": str(canonical_name or artist or ""),
                 "musicbrainz_artist_mbid": str(mbid or ""),
-                "identity_confidence": float(identity_conf or 0.50),
+                "identity_confidence": float(identity_conf) if identity_conf is not None else 0.50,
                 "identity_warnings": str(identity_warns or "[]"),
                 "top_seed_artists": ", ".join(
                     str(s) for s in explanation.get("top_seed_artists", [])

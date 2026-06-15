@@ -244,11 +244,8 @@ class TuiRecommendationStore:
 
         explanation = _parse_json(row[14])
         max_final = float(row[3] or 0.0)
-        identity_warnings_raw = _parse_json(row[23])
-        if isinstance(identity_warnings_raw, list):
-            identity_warning_tuple = tuple(str(w) for w in identity_warnings_raw)
-        else:
-            identity_warning_tuple = ()
+        identity_warnings_raw = _parse_json_list(row[23])
+        identity_warning_tuple = tuple(str(w) for w in identity_warnings_raw)
         score_breakdown = ScoreBreakdown(
             display_score=_display_score(float(row[2] or 0.0), max_final),
             final_score=float(row[2] or 0.0),
@@ -337,11 +334,8 @@ def _list_row(
     identity_warnings: str = "[]",
     trial_penalty: float = 0.0,
 ) -> RecommendationListRow:
-    parsed_warnings = _parse_json(identity_warnings)
-    if isinstance(parsed_warnings, list):
-        warning_tuple = tuple(str(w) for w in parsed_warnings)
-    else:
-        warning_tuple = ()
+    parsed_warnings = _parse_json_list(identity_warnings)
+    warning_tuple = tuple(str(w) for w in parsed_warnings)
     return RecommendationListRow(
         run_id=run_id,
         artist_id=artist_id,
@@ -382,6 +376,18 @@ def _parse_json(value: object) -> dict[str, Any]:
         return value
     parsed = json.loads(str(value))
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _parse_json_list(value: object) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    try:
+        parsed = json.loads(str(value))
+        return list(parsed) if isinstance(parsed, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
 
 
 def _tag_names(explanation: dict[str, Any]) -> tuple[str, ...]:

@@ -7,11 +7,13 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from math import log, sqrt
 from typing import Literal, TypeAlias
+from urllib.parse import quote
 from uuid import uuid4
 
 from duckdb import DuckDBPyConnection
 
 from scrobble_recs.config import RecommendationWeightsConfig, ScrobbleRecsConfig
+from scrobble_recs.export import _display_score
 from scrobble_recs.models.feedback import (
     FeedbackProfile,
     apply_feedback_to_tag_profile,
@@ -249,19 +251,32 @@ def generate_recommendations(
         enabled=config.recommendation.diversity.enabled,
         progress_callback=progress_callback,
     )
+    max_final = max((s.final_score for s in ranked_without_explanations), default=0.0)
+    banded = [
+        replace(
+            score,
+            normalized_score=_display_score(score.final_score, max_final),
+            score_band=_classify_score_band(
+                normalized=_display_score(score.final_score, max_final),
+                raw=score.raw_score,
+                evidence_count=score.evidence_source_count,
+            ),
+        )
+        for score in ranked_without_explanations
+    ]
     _report_progress(
         progress_callback,
         phase="rerank_diversity",
-        current=len(ranked_without_explanations),
+        current=len(banded),
         total=limit,
-        subject=f"{len(ranked_without_explanations)} selected",
+        subject=f"{len(banded)} selected",
         status="completed",
     )
     _report_progress(
         progress_callback,
         phase="build_explanations",
         current=0,
-        total=len(ranked_without_explanations),
+        total=len(banded),
         subject="recommendations",
         status="processing",
     )
@@ -275,13 +290,13 @@ def generate_recommendations(
                 tag_profile=effective_tag_profile,
             ),
         )
-        for score in ranked_without_explanations
+        for score in banded
     ]
     _report_progress(
         progress_callback,
         phase="build_explanations",
         current=len(ranked),
-        total=len(ranked_without_explanations),
+        total=len(banded),
         subject="recommendations",
         status="completed",
     )
@@ -607,6 +622,7 @@ def _score_candidates(
     seed_weight_by_id = {seed.artist_id: seed.seed_weight for seed in seeds}
     total_seed_weight = sum(seed_weight_by_id.values()) or 1.0
     scores: list[_CandidateScore] = []
+    candidate_only_scores: list[_CandidateScore] = []
     obviousness_enabled = config.recommendation.obviousness.enabled
     total_candidates = len(scoring_data.candidates)
     processed = 0
@@ -695,6 +711,9 @@ def _score_candidates(
             rediscovery * mode.rediscovery_multiplier,
             feedback.score,
         )
+        evidence_count = sum(
+            1 for val in (lastfm_score, tag_score, feedback.score, rediscovery) if val > 0.0
+        )
         knownness_penalty = 0.40 * max(0.0, knownness - mode.max_knownness)
         obviousness_penalty = (
             mode.obviousness_penalty_weight * obviousness if obviousness_enabled else 0.0
@@ -705,6 +724,40 @@ def _score_candidates(
         )
         final_score = raw_score - knownness_penalty - obviousness_penalty - fatigue.penalty
         if final_score <= 0:
+            candidate_only = _CandidateScore(
+                artist_id=artist_id,
+                artist_name=artist_name,
+                final_score=0.0,
+                raw_score=raw_score,
+                lastfm_similarity_score=lastfm_score,
+                tag_similarity_score=tag_score,
+                feedback_score=feedback.score,
+                feedback_contributions=feedback.contributions,
+                feedback_effects=feedback.effects,
+                rediscovery_score=rediscovery,
+                knownness=knownness,
+                obviousness=obviousness,
+                knownness_penalty=knownness_penalty,
+                obviousness_penalty=obviousness_penalty,
+                diversity_penalty=0.0,
+                primary_tag=_primary_tag(artist_id, tag_profile, scoring_data),
+                quality_gate=quality_gate,
+                fatigue=fatigue,
+                explanation={},
+                score_band="candidate_only",
+                normalized_score=0.0,
+                evidence_source_count=evidence_count,
+                trial_penalty=0.0,
+                local_scrobble_count=0,
+                listened_day_count=0,
+                first_listened_at=None,
+                last_listened_at=None,
+                years_since_last_listen=0.0,
+                rediscovery_eligible=False,
+                identity_confidence=0.50,
+                identity_warnings=(),
+            )
+            candidate_only_scores.append(candidate_only)
             continue
         scores.append(
             _CandidateScore(
@@ -727,6 +780,7 @@ def _score_candidates(
                 quality_gate=quality_gate,
                 fatigue=fatigue,
                 explanation={},
+                evidence_source_count=evidence_count,
             )
         )
         if processed % report_interval == 0:
@@ -743,10 +797,11 @@ def _score_candidates(
         phase="score_candidates",
         current=total_candidates,
         total=total_candidates,
-        subject=f"{len(scores)} positive scores",
+        subject=f"{len(scores)} positive scores, {len(candidate_only_scores)} candidate_only",
         status="completed",
     )
-    return scores
+    candidate_only_scores.sort(key=lambda s: s.raw_score, reverse=True)
+    return scores + candidate_only_scores[: min(len(scores) * 2, 500)]
 
 
 def _rerank_for_diversity(
@@ -1306,6 +1361,9 @@ def _persist_run(
             ],
         )
         for rank, score in enumerate(ranked, start=1):
+            effective_rank = (
+                999999 if getattr(score, "score_band", "") == "candidate_only" else rank
+            )
             conn.execute(
                 """
                 INSERT INTO recommendation (
@@ -1323,13 +1381,34 @@ def _persist_run(
                     knownness,
                     obviousness,
                     diversity_penalty,
-                    explanation
+                    explanation,
+                    score_band,
+                    evidence_source_count,
+                    local_scrobble_count,
+                    listened_day_count,
+                    first_listened_at,
+                    last_listened_at,
+                    years_since_last_listen,
+                    rediscovery_eligible,
+                    trial_penalty,
+                    candidate_artist_name,
+                    canonical_artist_name,
+                    musicbrainz_artist_mbid,
+                    lastfm_url,
+                    musicbrainz_url,
+                    identity_confidence,
+                    identity_warnings
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?
+                )
                 """,
                 [
                     run_id,
-                    rank,
+                    effective_rank,
                     score.artist_id,
                     score.final_score,
                     score.raw_score,
@@ -1343,6 +1422,22 @@ def _persist_run(
                     score.obviousness,
                     score.diversity_penalty,
                     json.dumps(score.explanation),
+                    score.score_band,
+                    score.evidence_source_count,
+                    0,
+                    0,
+                    None,
+                    None,
+                    0.0,
+                    False,
+                    0.0,
+                    score.artist_name,
+                    score.artist_name,
+                    "",
+                    f"https://www.last.fm/music/{quote(score.artist_name)}",
+                    "",
+                    0.50,
+                    "[]",
                 ],
             )
         conn.execute("COMMIT")

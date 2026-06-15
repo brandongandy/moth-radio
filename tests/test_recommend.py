@@ -347,7 +347,7 @@ def test_generate_recommendations_reports_phase_progress(tmp_path: Path) -> None
         ("score_candidates", 0, 3, "candidate artists", "processing"),
         ("score_candidates", 1, 3, "1 positive so far", "processing"),
         ("score_candidates", 2, 3, "2 positive so far", "processing"),
-        ("score_candidates", 3, 3, "2 positive scores", "completed"),
+        ("score_candidates", 3, 3, "2 positive scores, 0 candidate_only", "completed"),
         ("rerank_diversity", 0, 3, "ranked candidates", "processing"),
         ("rerank_diversity", 1, 3, "1 selected", "processing"),
         ("rerank_diversity", 2, 3, "2 selected", "processing"),

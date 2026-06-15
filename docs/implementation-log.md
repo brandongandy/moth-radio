@@ -1,5 +1,26 @@
 # Implementation Log
 
+## 2026-06-15: Recommendation quality base hardening
+
+Changed:
+
+- Added score band classification (strong/plausible/weak/candidate_only) with export gating (`--include-candidates`).
+- Added trial penalty for single-scrobble/single-day old artists (0.35/0.20 penalty tiers).
+- Added rediscovery eligibility (3+ scrobbles, 2+ active days, or positive feedback).
+- Added identity confidence heuristics using imported MBIDs and Last.fm enrichment data.
+- Implemented MusicBrainz resolve command with cache-first API client (`apis/musicbrainz.py`).
+- Enhanced export with 30+ diagnostic fields and richer human-readable explanations.
+- Updated TUI with score bands, identity confidence, trial penalty, and extended detail view.
+- Added 4 new SQL migrations (009-012) for score bands, listening diagnostics, identity fields, and resolution table.
+- Added `--include-candidates` export flag for zero-score candidate inspection.
+
+Verified:
+
+- `python -m pytest` -> 296 passed.
+- `python -m ruff check .` -> All checks passed.
+- `python -m ruff format --check .` -> 57 files already formatted.
+- `python -m mypy src` -> Success, no issues found in 35 source files.
+
 ## 2026-06-12: Stable artist identity for feedback
 
 Changed:

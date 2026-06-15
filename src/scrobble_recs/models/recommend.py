@@ -1248,11 +1248,61 @@ def _explanation(
         tag_rows,
         key=lambda row: (-tag_profile.get(row[0], 0.0), row[1], row[0]),
     )
+    matching_tags = [
+        tag for tag, _rank in ordered_tag_rows if tag_profile.get(tag, 0.0) > 0
+    ]
+    top_seed_names = [seed_name for _sid, seed_name, _sim, _c in seed_rows[:5]]
+    top_seed_scores = [similarity for _sid, _name, similarity, _c in seed_rows[:5]]
+
+    evidence_sources: list[str] = []
+    if score.lastfm_similarity_score > 0:
+        evidence_sources.append("last.fm similarity")
+    if score.tag_similarity_score > 0:
+        evidence_sources.append("tag similarity")
+    if score.feedback_score > 0:
+        evidence_sources.append("feedback")
+    if score.rediscovery_score > 0:
+        evidence_sources.append("rediscovery")
+
+    caution_parts: list[str] = []
+    if score.trial_penalty > 0:
+        caution_parts.append(f"trial listen penalty ({score.trial_penalty:.2f})")
+    if score.knownness_penalty > 0:
+        caution_parts.append(f"already known ({score.knownness_penalty:.2f})")
+    if score.obviousness_penalty > 0:
+        caution_parts.append(f"obvious ({score.obviousness_penalty:.2f})")
+    if score.fatigue.penalty > 0:
+        caution_parts.append(f"recently recommended ({score.fatigue.penalty:.2f})")
+    identity_warnings_list = list(score.identity_warnings)
+    if identity_warnings_list:
+        caution_parts.append("identity unresolved")
+
+    evidence_str = ", ".join(evidence_sources) if evidence_sources else "none"
+    caution_str = "; ".join(caution_parts) if caution_parts else "none"
+
+    summary = (
+        f"Matched tags: {len(matching_tags)}."
+        f" Nearest seeds: {len(seed_rows)}."
+        f" Evidence: {evidence_str}."
+        f" Caution: {caution_str}."
+    )
+
     return {
-        "summary": (
-            f"{score.artist_name} is similar to high-weight seed artists"
-            " and fits tags from the local listening profile."
-        ),
+        "summary": summary,
+        "top_seed_artists": top_seed_names,
+        "top_seed_edge_scores": top_seed_scores,
+        "matching_tags": matching_tags[:5],
+        "tag_fit_score": score.tag_similarity_score,
+        "lastfm_similarity_score": score.lastfm_similarity_score,
+        "rediscovery_score": score.rediscovery_score,
+        "feedback_score": score.feedback_score,
+        "knownness_penalty": score.knownness_penalty,
+        "obviousness_penalty": score.obviousness_penalty,
+        "fatigue_penalty": score.fatigue.penalty,
+        "trial_penalty": score.trial_penalty,
+        "identity_confidence": score.identity_confidence,
+        "identity_warnings": identity_warnings_list,
+        "candidate_sources": top_seed_names,
         "quality_gate": {
             "passed": score.quality_gate.passed,
             "reasons": list(score.quality_gate.reasons),
@@ -1301,6 +1351,8 @@ def _explanation(
             "is_new": score.knownness == 0.0,
             "is_rediscovery": score.rediscovery_score > 0.0,
             "is_obvious": score.obviousness >= 0.75,
+            "score_band": score.score_band,
+            "rediscovery_eligible": score.rediscovery_eligible,
         },
     }
 

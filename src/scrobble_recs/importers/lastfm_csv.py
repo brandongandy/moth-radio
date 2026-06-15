@@ -11,6 +11,7 @@ from typing import Any
 from duckdb import DuckDBPyConnection
 
 from scrobble_recs.config import EXPECTED_CSV_COLUMNS
+from scrobble_recs.models.recommend import compute_identity_confidence
 from scrobble_recs.normalize.strings import normalize_key
 from scrobble_recs.normalize.timestamps import parse_uts
 
@@ -813,29 +814,12 @@ def _update_identity_confidence(conn: DuckDBPyConnection) -> None:
         """
     ).fetchall()
     for artist_id, canonical_name, mbid, resolution_status in rows:
-        name = str(canonical_name)
-        mbid_val = str(mbid) if mbid else None
-        status = str(resolution_status) if resolution_status else "provisional_name"
-
-        confidence = 0.50
-        warnings: list[str] = []
-
-        if mbid_val and status == "provisional_mbid":
-            confidence += 0.30
-        confidence += 0.10
-
-        name_parts = name.strip().split()
-        if len(name_parts) <= 1 and not mbid_val:
-            confidence -= 0.30
-            warnings.append("generic_short_name_no_mbid")
-        if status == "provisional_mbid_conflict":
-            confidence -= 0.20
-            warnings.append("multiple_possible_local_matches")
-        if not mbid_val:
-            warnings.append("missing_musicbrainz_mbid")
-
-        identity_confidence = max(0.0, min(1.0, confidence))
+        conf, warnings = compute_identity_confidence(
+            artist_name=str(canonical_name),
+            mbid=str(mbid) if mbid else None,
+            resolution_status=str(resolution_status) if resolution_status else "provisional_name",
+        )
         conn.execute(
             "UPDATE artist SET identity_confidence = ?, identity_warnings = ? WHERE artist_id = ?",
-            [identity_confidence, json.dumps(warnings), int(artist_id)],
+            [conf, json.dumps(warnings), int(artist_id)],
         )

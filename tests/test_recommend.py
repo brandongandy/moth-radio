@@ -11,7 +11,7 @@ from scrobble_recs.db import initialize_database
 from scrobble_recs.enrichment.lastfm import run_lastfm_enrichment
 from scrobble_recs.importers.lastfm_csv import import_lastfm_csv
 from scrobble_recs.models.feedback import record_feedback_event
-from scrobble_recs.models.recommend import generate_recommendations
+from scrobble_recs.models.recommend import _classify_score_band, generate_recommendations
 
 
 def write_config(tmp_path: Path) -> Path:
@@ -2484,3 +2484,33 @@ def test_generate_recommendations_persists_candidates(tmp_path: Path) -> None:
         assert int(rows[0]) > 0
     finally:
         conn.close()
+
+
+class TestScoreBand:
+    def test_strong_band(self) -> None:
+        result = _classify_score_band(normalized=0.55, raw=0.3, evidence_count=3)
+        assert result == "strong"
+
+    def test_plausible_band(self) -> None:
+        result = _classify_score_band(normalized=0.12, raw=0.1, evidence_count=1)
+        assert result == "plausible"
+
+    def test_plausible_needs_evidence(self) -> None:
+        result = _classify_score_band(normalized=0.12, raw=0.1, evidence_count=0)
+        assert result == "weak"
+
+    def test_weak_band(self) -> None:
+        result = _classify_score_band(normalized=0.05, raw=0.05, evidence_count=1)
+        assert result == "weak"
+
+    def test_candidate_only_zero_raw(self) -> None:
+        result = _classify_score_band(normalized=0.8, raw=0.0, evidence_count=3)
+        assert result == "candidate_only"
+
+    def test_candidate_only_zero_normalized(self) -> None:
+        result = _classify_score_band(normalized=0.0, raw=0.3, evidence_count=3)
+        assert result == "candidate_only"
+
+    def test_strong_needs_two_sources(self) -> None:
+        result = _classify_score_band(normalized=0.55, raw=0.3, evidence_count=1)
+        assert result == "plausible"

@@ -73,6 +73,18 @@ class _CandidateScore:
     quality_gate: _QualityGateDecision
     fatigue: _FatiguePenalty
     explanation: dict[str, object]
+    score_band: str = "candidate_only"
+    normalized_score: float = 0.0
+    evidence_source_count: int = 0
+    trial_penalty: float = 0.0
+    local_scrobble_count: int = 0
+    listened_day_count: int = 0
+    first_listened_at: datetime | None = None
+    last_listened_at: datetime | None = None
+    years_since_last_listen: float = 0.0
+    rediscovery_eligible: bool = False
+    identity_confidence: float = 0.50
+    identity_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1355,6 +1367,16 @@ def _rank_affinity(rank: int) -> float:
 
 def _rank_penalty(rank: int) -> float:
     return _rank_affinity(rank)
+
+
+def _classify_score_band(*, normalized: float, raw: float, evidence_count: int) -> str:
+    if raw <= 0.0 or normalized <= 0.0:
+        return "candidate_only"
+    if normalized >= 0.50 and evidence_count >= 2:
+        return "strong"
+    if normalized >= 0.10 and evidence_count >= 1:
+        return "plausible"
+    return "weak"
 
 
 def _config_hash(config: ScrobbleRecsConfig) -> str:

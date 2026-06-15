@@ -138,6 +138,22 @@ def test_recommendation_migration_creates_run_and_result_tables(tmp_path: Path) 
             "diversity_penalty": "DOUBLE",
             "explanation": "JSON",
             "created_at": "TIMESTAMP",
+            "score_band": "VARCHAR",
+            "evidence_source_count": "INTEGER",
+            "local_scrobble_count": "INTEGER",
+            "listened_day_count": "INTEGER",
+            "first_listened_at": "TIMESTAMP",
+            "last_listened_at": "TIMESTAMP",
+            "years_since_last_listen": "DOUBLE",
+            "rediscovery_eligible": "BOOLEAN",
+            "trial_penalty": "DOUBLE",
+            "candidate_artist_name": "VARCHAR",
+            "canonical_artist_name": "VARCHAR",
+            "musicbrainz_artist_mbid": "VARCHAR",
+            "lastfm_url": "VARCHAR",
+            "musicbrainz_url": "VARCHAR",
+            "identity_confidence": "DOUBLE",
+            "identity_warnings": "VARCHAR",
         }
 
         conn.execute(

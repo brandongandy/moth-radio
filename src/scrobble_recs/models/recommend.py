@@ -99,6 +99,7 @@ class _ScoringData:
     tag_ranks_by_artist: dict[int, list[tuple[str, int]]]
     listening_by_artist: dict[int, tuple[float, float, int, int, datetime | None, datetime | None]]
     identity_confidence_by_artist: dict[int, float]
+    identity_warnings_by_artist: dict[int, list[str]]
 
 
 @dataclass(frozen=True)
@@ -560,6 +561,19 @@ def _load_scoring_data(
         ).fetchall()
     }
 
+
+    identity_warnings_by_artist: dict[int, list[str]] = {}
+    for artist_id, warnings_json in conn.execute(
+        "SELECT artist_id, coalesce(identity_warnings, '[]') FROM artist"
+    ).fetchall():
+        try:
+            parsed = json.loads(str(warnings_json))
+            identity_warnings_by_artist[int(artist_id)] = (
+                list(parsed) if isinstance(parsed, list) else []
+            )
+        except (json.JSONDecodeError, TypeError):
+            identity_warnings_by_artist[int(artist_id)] = []
+
     artist_names = {
         int(artist_id): str(canonical_name)
         for artist_id, canonical_name in conn.execute(
@@ -579,6 +593,7 @@ def _load_scoring_data(
         tag_ranks_by_artist=tag_ranks_by_artist,
         listening_by_artist=listening_by_artist,
         identity_confidence_by_artist=identity_by_artist,
+        identity_warnings_by_artist=identity_warnings_by_artist,
     )
 
 
@@ -769,6 +784,9 @@ def _score_candidates(
             final_score -= trial_penalty
 
         identity_conf = scoring_data.identity_confidence_by_artist.get(artist_id, 0.50)
+        identity_warnings = tuple(
+            scoring_data.identity_warnings_by_artist.get(artist_id, [])
+        )
         confidence_multiplier = 0.5 + 0.5 * identity_conf
         final_score *= confidence_multiplier
 
@@ -804,7 +822,7 @@ def _score_candidates(
                 years_since_last_listen=years_since_last_listen,
                 rediscovery_eligible=rediscovery_eligible,
                 identity_confidence=identity_conf,
-                identity_warnings=(),
+                identity_warnings=identity_warnings,
             )
             candidate_only_scores.append(candidate_only)
             continue
@@ -838,7 +856,7 @@ def _score_candidates(
                 years_since_last_listen=years_since_last_listen,
                 rediscovery_eligible=rediscovery_eligible,
                 identity_confidence=identity_conf,
-                identity_warnings=(),
+                identity_warnings=identity_warnings,
             )
         )
         if processed % report_interval == 0:
@@ -1302,7 +1320,7 @@ def _explanation(
         "trial_penalty": score.trial_penalty,
         "identity_confidence": score.identity_confidence,
         "identity_warnings": identity_warnings_list,
-        "candidate_sources": top_seed_names,
+        "candidate_sources": evidence_sources,
         "quality_gate": {
             "passed": score.quality_gate.passed,
             "reasons": list(score.quality_gate.reasons),

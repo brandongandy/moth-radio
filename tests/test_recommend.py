@@ -11,7 +11,12 @@ from scrobble_recs.db import initialize_database
 from scrobble_recs.enrichment.lastfm import run_lastfm_enrichment
 from scrobble_recs.importers.lastfm_csv import import_lastfm_csv
 from scrobble_recs.models.feedback import record_feedback_event
-from scrobble_recs.models.recommend import _classify_score_band, generate_recommendations
+from scrobble_recs.models.recommend import (
+    _classify_score_band,
+    _compute_trial_penalty,
+    _is_rediscovery_eligible,
+    generate_recommendations,
+)
 
 
 def write_config(tmp_path: Path) -> Path:
@@ -2068,10 +2073,10 @@ def test_generate_recommendations_allows_rediscovery_with_tag_match(tmp_path: Pa
     conn.execute(
         """
         INSERT INTO artist_listening_fact (
-            artist_id, play_count, track_count, active_months,
+            artist_id, play_count, track_count, active_months, active_days,
             first_played_at, last_played_at
         )
-        VALUES (511, 1, 3, 2, '2018-01-01', '2023-01-01')
+        VALUES (511, 1, 3, 2, 3, '2018-01-01', '2023-01-01')
         """
     )
     conn.execute(
@@ -2514,3 +2519,45 @@ class TestScoreBand:
     def test_strong_needs_two_sources(self) -> None:
         result = _classify_score_band(normalized=0.55, raw=0.3, evidence_count=1)
         assert result == "plausible"
+
+
+class TestTrialPenalty:
+    def test_single_scrobble_single_day_old(self) -> None:
+        result = _compute_trial_penalty(play_count=1, active_days=1, years_since_last_listen=3.0)
+        assert result == pytest.approx(0.35)
+
+    def test_two_scrobbles_single_day_old(self) -> None:
+        result = _compute_trial_penalty(play_count=2, active_days=1, years_since_last_listen=3.0)
+        assert result == pytest.approx(0.20)
+
+    def test_single_scrobble_recent_no_penalty(self) -> None:
+        result = _compute_trial_penalty(play_count=1, active_days=1, years_since_last_listen=1.0)
+        assert result == 0.0
+
+    def test_multi_scrobble_no_penalty(self) -> None:
+        result = _compute_trial_penalty(play_count=3, active_days=1, years_since_last_listen=3.0)
+        assert result == 0.0
+
+    def test_single_scrobble_multi_day_no_penalty(self) -> None:
+        result = _compute_trial_penalty(play_count=1, active_days=2, years_since_last_listen=3.0)
+        assert result == 0.0
+
+    def test_five_scrobbles_no_penalty(self) -> None:
+        result = _compute_trial_penalty(play_count=5, active_days=3, years_since_last_listen=5.0)
+        assert result == 0.0
+
+
+class TestRediscoveryEligible:
+    def test_eligible_by_play_count(self) -> None:
+        assert _is_rediscovery_eligible(play_count=3, active_days=1, has_positive_feedback=False)
+
+    def test_eligible_by_active_days(self) -> None:
+        assert _is_rediscovery_eligible(play_count=1, active_days=2, has_positive_feedback=False)
+
+    def test_eligible_by_feedback(self) -> None:
+        assert _is_rediscovery_eligible(play_count=1, active_days=1, has_positive_feedback=True)
+
+    def test_not_eligible_single_scrobble_single_day(self) -> None:
+        assert not _is_rediscovery_eligible(
+            play_count=1, active_days=1, has_positive_feedback=False
+        )

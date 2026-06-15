@@ -97,7 +97,8 @@ class _ScoringData:
     feedback_similarity_by_target: dict[int, list[tuple[int, float]]]
     direct_tags_by_artist: dict[int, dict[str, float]]
     tag_ranks_by_artist: dict[int, list[tuple[str, int]]]
-    listening_by_artist: dict[int, tuple[float, float]]
+    listening_by_artist: dict[int, tuple[float, float, int, int, datetime | None, datetime | None]]
+    identity_confidence_by_artist: dict[int, float]
 
 
 @dataclass(frozen=True)
@@ -233,6 +234,7 @@ def generate_recommendations(
         scoring_data,
         feedback_profile,
         fatigue_by_artist,
+        as_of=resolved_as_of,
         progress_callback=progress_callback,
     )
     _report_progress(
@@ -526,16 +528,35 @@ def _load_scoring_data(
         candidates.add(artist)
         tag_ranks_by_artist.setdefault(artist, []).append((_normalize_tag_key(tag), int(tag_rank)))
 
+    listening_rows = conn.execute(
+        """
+        SELECT
+            artist_id,
+            coalesce(knownness, 0.0),
+            coalesce(rediscovery_score, 0.0),
+            coalesce(play_count, 0),
+            coalesce(active_days, 0),
+            first_played_at,
+            last_played_at
+        FROM artist_listening_fact
+        """
+    ).fetchall()
     listening_by_artist = {
-        int(artist_id): (float(knownness), float(rediscovery_score))
-        for artist_id, knownness, rediscovery_score in conn.execute(
-            """
-            SELECT
-                artist_id,
-                coalesce(knownness, 0.0),
-                coalesce(rediscovery_score, 0.0)
-            FROM artist_listening_fact
-            """
+        int(row[0]): (
+            float(row[1]),
+            float(row[2]),
+            int(row[3] or 0),
+            int(row[4] or 0),
+            row[5],
+            row[6],
+        )
+        for row in listening_rows
+    }
+
+    identity_by_artist = {
+        int(artist_id): float(conf or 0.50)
+        for artist_id, conf in conn.execute(
+            "SELECT artist_id, coalesce(identity_confidence, 0.50) FROM artist"
         ).fetchall()
     }
 
@@ -557,6 +578,7 @@ def _load_scoring_data(
         direct_tags_by_artist=direct_tags_by_artist,
         tag_ranks_by_artist=tag_ranks_by_artist,
         listening_by_artist=listening_by_artist,
+        identity_confidence_by_artist=identity_by_artist,
     )
 
 
@@ -617,6 +639,7 @@ def _score_candidates(
     feedback_profile: FeedbackProfile,
     fatigue_by_artist: dict[int, _FatiguePenalty],
     *,
+    as_of: datetime | None = None,
     progress_callback: RecommendationProgressCallback | None = None,
 ) -> list[_CandidateScore]:
     seed_weight_by_id = {seed.artist_id: seed.seed_weight for seed in seeds}
@@ -644,7 +667,10 @@ def _score_candidates(
         artist_name = scoring_data.artist_names.get(artist_id)
         if artist_name is None:
             continue
-        knownness, rediscovery = scoring_data.listening_by_artist.get(artist_id, (0.0, 0.0))
+        listening = scoring_data.listening_by_artist.get(artist_id, (0.0, 0.0, 0, 0, None, None))
+        knownness, rediscovery, local_play_count, local_active_days, first_played, last_played = (
+            listening
+        )
         candidate_tags = _candidate_tag_vector(artist_id, scoring_data)
         feedback_neighborhood_score = _feedback_neighborhood_score(
             artist_id,
@@ -664,6 +690,22 @@ def _score_candidates(
         )
         if artist_id in feedback_profile.known_artist_ids:
             knownness = max(knownness, 1.0)
+        years_since_last_listen = 0.0
+        if as_of is not None and last_played is not None:
+            years_since_last_listen = max(0.0, (as_of - last_played).days / 365.25)
+        has_positive_feedback = artist_id in feedback_profile.boosted_seed_artist_ids
+        trial_penalty = _compute_trial_penalty(
+            play_count=local_play_count,
+            active_days=local_active_days,
+            years_since_last_listen=years_since_last_listen,
+        )
+        rediscovery_eligible = _is_rediscovery_eligible(
+            play_count=local_play_count,
+            active_days=local_active_days,
+            has_positive_feedback=has_positive_feedback,
+        )
+        if mode.name == "rediscovery" and rediscovery > 0.0 and not rediscovery_eligible:
+            continue
         lastfm_score = _lastfm_similarity_score(
             artist_id,
             seed_weight_by_id,
@@ -723,6 +765,8 @@ def _score_candidates(
             _FatiguePenalty(prior_run_appearances=0, latest_run_rank=None, penalty=0.0),
         )
         final_score = raw_score - knownness_penalty - obviousness_penalty - fatigue.penalty
+        if mode.name == "balanced":
+            final_score -= trial_penalty
         if final_score <= 0:
             candidate_only = _CandidateScore(
                 artist_id=artist_id,
@@ -747,13 +791,13 @@ def _score_candidates(
                 score_band="candidate_only",
                 normalized_score=0.0,
                 evidence_source_count=evidence_count,
-                trial_penalty=0.0,
-                local_scrobble_count=0,
-                listened_day_count=0,
-                first_listened_at=None,
-                last_listened_at=None,
-                years_since_last_listen=0.0,
-                rediscovery_eligible=False,
+                trial_penalty=trial_penalty,
+                local_scrobble_count=local_play_count,
+                listened_day_count=local_active_days,
+                first_listened_at=first_played,
+                last_listened_at=last_played,
+                years_since_last_listen=years_since_last_listen,
+                rediscovery_eligible=rediscovery_eligible,
                 identity_confidence=0.50,
                 identity_warnings=(),
             )
@@ -781,6 +825,13 @@ def _score_candidates(
                 fatigue=fatigue,
                 explanation={},
                 evidence_source_count=evidence_count,
+                trial_penalty=trial_penalty,
+                local_scrobble_count=local_play_count,
+                listened_day_count=local_active_days,
+                first_listened_at=first_played,
+                last_listened_at=last_played,
+                years_since_last_listen=years_since_last_listen,
+                rediscovery_eligible=rediscovery_eligible,
             )
         )
         if processed % report_interval == 0:
@@ -1427,13 +1478,13 @@ def _persist_run(
                     json.dumps(score.explanation),
                     score.score_band,
                     score.evidence_source_count,
-                    0,
-                    0,
-                    None,
-                    None,
-                    0.0,
-                    False,
-                    0.0,
+                    score.local_scrobble_count,
+                    score.listened_day_count,
+                    score.first_listened_at,
+                    score.last_listened_at,
+                    score.years_since_last_listen,
+                    score.rediscovery_eligible,
+                    score.trial_penalty,
                     score.artist_name,
                     score.artist_name,
                     "",
@@ -1475,6 +1526,24 @@ def _classify_score_band(*, normalized: float, raw: float, evidence_count: int) 
     if normalized >= 0.10 and evidence_count >= 1:
         return "plausible"
     return "weak"
+
+
+def _compute_trial_penalty(
+    *, play_count: int, active_days: int, years_since_last_listen: float
+) -> float:
+    if years_since_last_listen < 2.0:
+        return 0.0
+    if play_count == 1 and active_days <= 1:
+        return 0.35
+    if play_count == 2 and active_days <= 1:
+        return 0.20
+    return 0.0
+
+
+def _is_rediscovery_eligible(
+    *, play_count: int, active_days: int, has_positive_feedback: bool
+) -> bool:
+    return play_count >= 3 or active_days >= 2 or has_positive_feedback
 
 
 def _config_hash(config: ScrobbleRecsConfig) -> str:

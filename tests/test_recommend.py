@@ -15,6 +15,7 @@ from scrobble_recs.models.recommend import (
     _classify_score_band,
     _compute_trial_penalty,
     _is_rediscovery_eligible,
+    compute_identity_confidence,
     generate_recommendations,
 )
 
@@ -1196,7 +1197,7 @@ def test_generate_recommendations_keeps_saved_current_candidate_with_outgoing_ed
 
     assert _recommendation_names(conn, stats.run_id)[:2] == [
         "Saved Candidate With Edges",
-        "Higher Similarity Neutral",
+        "Saved Candidate Neighbor",
     ]
     row = conn.execute(
         """
@@ -2565,3 +2566,41 @@ class TestRediscoveryEligible:
         assert not _is_rediscovery_eligible(
             play_count=1, active_days=1, has_positive_feedback=False
         )
+
+
+class TestIdentityConfidence:
+    def test_full_confidence_with_mbid(self) -> None:
+        conf, warnings = compute_identity_confidence(
+            artist_name="Radiohead",
+            mbid="a74b1b7f-71a5-4011-9441-d0b5e4122711",
+            resolution_status="provisional_mbid",
+        )
+        assert conf == pytest.approx(0.90)
+        assert warnings == []
+
+    def test_missing_mbid_warning(self) -> None:
+        conf, warnings = compute_identity_confidence(
+            artist_name="The Beatles",
+            mbid=None,
+            resolution_status="provisional_name",
+        )
+        assert conf == pytest.approx(0.60)
+        assert "missing_musicbrainz_mbid" in warnings
+
+    def test_short_generic_name_penalty(self) -> None:
+        conf, warnings = compute_identity_confidence(
+            artist_name="Bauhaus",
+            mbid=None,
+            resolution_status="provisional_name",
+        )
+        assert conf == pytest.approx(0.30)
+        assert "generic_short_name_no_mbid" in warnings
+
+    def test_mbid_conflict_penalty(self) -> None:
+        conf, warnings = compute_identity_confidence(
+            artist_name="Some Artist Name",
+            mbid=None,
+            resolution_status="provisional_mbid_conflict",
+        )
+        assert conf == pytest.approx(0.40)
+        assert "multiple_possible_local_matches" in warnings

@@ -767,6 +767,11 @@ def _score_candidates(
         final_score = raw_score - knownness_penalty - obviousness_penalty - fatigue.penalty
         if mode.name == "balanced":
             final_score -= trial_penalty
+
+        identity_conf = scoring_data.identity_confidence_by_artist.get(artist_id, 0.50)
+        confidence_multiplier = 0.5 + 0.5 * identity_conf
+        final_score *= confidence_multiplier
+
         if final_score <= 0:
             candidate_only = _CandidateScore(
                 artist_id=artist_id,
@@ -798,7 +803,7 @@ def _score_candidates(
                 last_listened_at=last_played,
                 years_since_last_listen=years_since_last_listen,
                 rediscovery_eligible=rediscovery_eligible,
-                identity_confidence=0.50,
+                identity_confidence=identity_conf,
                 identity_warnings=(),
             )
             candidate_only_scores.append(candidate_only)
@@ -832,6 +837,8 @@ def _score_candidates(
                 last_listened_at=last_played,
                 years_since_last_listen=years_since_last_listen,
                 rediscovery_eligible=rediscovery_eligible,
+                identity_confidence=identity_conf,
+                identity_warnings=(),
             )
         )
         if processed % report_interval == 0:
@@ -1412,12 +1419,35 @@ def _persist_run(
             ],
         )
         candidate_only_offset = 999900
+        artist_identity = {
+            int(aid): (
+                str(canonical_name or ""),
+                str(mbid or ""),
+                float(conf or 0.50),
+                str(warnings or "[]"),
+            )
+            for aid, canonical_name, mbid, conf, warnings in conn.execute(
+                """
+                SELECT artist_id, canonical_name,
+                       coalesce(musicbrainz_artist_mbid, ''),
+                       coalesce(identity_confidence, 0.50),
+                       coalesce(identity_warnings, '[]')
+                FROM artist
+                """
+            ).fetchall()
+        }
         for rank, score in enumerate(ranked, start=1):
             if getattr(score, "score_band", "") == "candidate_only":
                 effective_rank = candidate_only_offset
                 candidate_only_offset += 1
             else:
                 effective_rank = rank
+            identity = artist_identity.get(
+                score.artist_id, (score.artist_name, "", 0.50, "[]")
+            )
+            mbid_val = identity[1]
+            lastfm_url_val = f"https://www.last.fm/music/{quote(score.artist_name, safe='')}"
+            musicbrainz_url_val = f"https://musicbrainz.org/artist/{mbid_val}" if mbid_val else ""
             conn.execute(
                 """
                 INSERT INTO recommendation (
@@ -1486,12 +1516,12 @@ def _persist_run(
                     score.rediscovery_eligible,
                     score.trial_penalty,
                     score.artist_name,
-                    score.artist_name,
-                    "",
-                    f"https://www.last.fm/music/{quote(score.artist_name)}",
-                    "",
-                    0.50,
-                    "[]",
+                    identity[0],
+                    identity[1],
+                    lastfm_url_val,
+                    musicbrainz_url_val,
+                    identity[2],
+                    identity[3],
                 ],
             )
         conn.execute("COMMIT")
@@ -1549,3 +1579,35 @@ def _is_rediscovery_eligible(
 def _config_hash(config: ScrobbleRecsConfig) -> str:
     payload = config.recommendation.model_dump_json(by_alias=True)
     return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def compute_identity_confidence(
+    *,
+    artist_name: str,
+    mbid: str | None,
+    resolution_status: str,
+    lastfm_enrichment_mbid: str | None = None,
+    lastfm_url_from_enrichment: str | None = None,
+    canonical_name_match: bool = True,
+) -> tuple[float, list[str]]:
+    confidence = 0.50
+    warnings: list[str] = []
+
+    if mbid and resolution_status == "provisional_mbid":
+        confidence += 0.30
+    if lastfm_enrichment_mbid or lastfm_url_from_enrichment:
+        confidence += 0.15
+    if canonical_name_match:
+        confidence += 0.10
+
+    name_parts = artist_name.strip().split()
+    if len(name_parts) <= 1 and not mbid:
+        confidence -= 0.30
+        warnings.append("generic_short_name_no_mbid")
+    if resolution_status == "provisional_mbid_conflict":
+        confidence -= 0.20
+        warnings.append("multiple_possible_local_matches")
+    if not mbid:
+        warnings.append("missing_musicbrainz_mbid")
+
+    return (max(0.0, min(1.0, confidence)), sorted(warnings))

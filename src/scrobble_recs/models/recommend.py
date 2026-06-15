@@ -1360,10 +1360,13 @@ def _persist_run(
                 "offline lastfm/tag first recommender",
             ],
         )
+        candidate_only_offset = 999900
         for rank, score in enumerate(ranked, start=1):
-            effective_rank = (
-                999999 if getattr(score, "score_band", "") == "candidate_only" else rank
-            )
+            if getattr(score, "score_band", "") == "candidate_only":
+                effective_rank = candidate_only_offset
+                candidate_only_offset += 1
+            else:
+                effective_rank = rank
             conn.execute(
                 """
                 INSERT INTO recommendation (

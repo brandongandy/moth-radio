@@ -37,6 +37,10 @@ class RecommendationListRow:
     why_short: str
     feedback_state: str
     classification: str
+    score_band: str = ""
+    identity_confidence: float = 0.50
+    identity_warnings: tuple[str, ...] = ()
+    trial_penalty: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -53,6 +57,12 @@ class ScoreBreakdown:
     knownness: float
     obviousness: float
     diversity_penalty: float
+    score_band: str = ""
+    normalized_score: float = 0.0
+    evidence_source_count: int = 0
+    trial_penalty: float = 0.0
+    identity_confidence: float = 0.50
+    identity_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -69,6 +79,15 @@ class RecommendationDetail:
     score_breakdown: ScoreBreakdown
     status_labels: tuple[str, ...]
     feedback_history: tuple[str, ...]
+    score_band: str = ""
+    identity_confidence: float = 0.50
+    identity_warnings: tuple[str, ...] = ()
+    local_scrobble_count: int = 0
+    listened_day_count: int = 0
+    years_since_last_listen: float = 0.0
+    rediscovery_eligible: bool = False
+    trial_penalty: float = 0.0
+    top_seed_artists: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -132,7 +151,11 @@ class TuiRecommendationStore:
                 r.knownness,
                 r.obviousness,
                 r.feedback_score,
-                r.explanation
+                r.explanation,
+                r.score_band,
+                r.identity_confidence,
+                r.identity_warnings,
+                r.trial_penalty
             FROM recommendation r
             JOIN artist a ON a.artist_id = r.artist_id
             WHERE r.run_id = ?
@@ -151,6 +174,10 @@ class TuiRecommendationStore:
                 obviousness=float(row[7] or 0.0),
                 feedback_score=float(row[8] or 0.0),
                 explanation=_parse_json(row[9]),
+                score_band=str(row[10] or ""),
+                identity_confidence=float(row[11] or 0.50),
+                identity_warnings=str(row[12] or "[]"),
+                trial_penalty=float(row[13] or 0.0),
             )
             for row in rows
         ]
@@ -195,7 +222,16 @@ class TuiRecommendationStore:
                 r.knownness,
                 r.obviousness,
                 r.diversity_penalty,
-                r.explanation
+                r.explanation,
+                r.score_band,
+                r.evidence_source_count,
+                r.local_scrobble_count,
+                r.listened_day_count,
+                r.years_since_last_listen,
+                r.rediscovery_eligible,
+                r.trial_penalty,
+                r.identity_confidence,
+                r.identity_warnings
             FROM recommendation r
             JOIN artist a ON a.artist_id = r.artist_id
             WHERE r.run_id = ?
@@ -207,8 +243,14 @@ class TuiRecommendationStore:
             raise ValueError(f"recommendation {artist_id} does not exist in run {run_id}")
 
         explanation = _parse_json(row[14])
+        max_final = float(row[3] or 0.0)
+        identity_warnings_raw = _parse_json(row[23])
+        if isinstance(identity_warnings_raw, list):
+            identity_warning_tuple = tuple(str(w) for w in identity_warnings_raw)
+        else:
+            identity_warning_tuple = ()
         score_breakdown = ScoreBreakdown(
-            display_score=_display_score(float(row[2] or 0.0), float(row[3] or 0.0)),
+            display_score=_display_score(float(row[2] or 0.0), max_final),
             final_score=float(row[2] or 0.0),
             raw_score=float(row[4] or 0.0),
             lastfm_similarity_score=float(row[5] or 0.0),
@@ -220,7 +262,16 @@ class TuiRecommendationStore:
             knownness=float(row[11] or 0.0),
             obviousness=float(row[12] or 0.0),
             diversity_penalty=float(row[13] or 0.0),
+            score_band=str(row[15] or ""),
+            normalized_score=_display_score(float(row[2] or 0.0), max_final),
+            evidence_source_count=int(row[16] or 0),
+            trial_penalty=float(row[21] or 0.0),
+            identity_confidence=float(row[22] or 0.50),
+            identity_warnings=identity_warning_tuple,
         )
+        top_seed = explanation.get("top_seed_artists", [])
+        if not isinstance(top_seed, list):
+            top_seed = []
         return RecommendationDetail(
             run_id=run_id,
             artist_id=artist_id,
@@ -234,6 +285,15 @@ class TuiRecommendationStore:
             score_breakdown=score_breakdown,
             status_labels=_status_labels(explanation, score_breakdown),
             feedback_history=self.feedback_history(run_id, artist_id),
+            score_band=str(row[15] or ""),
+            identity_confidence=float(row[22] or 0.50),
+            identity_warnings=identity_warning_tuple,
+            local_scrobble_count=int(row[17] or 0),
+            listened_day_count=int(row[18] or 0),
+            years_since_last_listen=float(row[19] or 0.0),
+            rediscovery_eligible=bool(row[20]),
+            trial_penalty=float(row[21] or 0.0),
+            top_seed_artists=tuple(str(s) for s in top_seed),
         )
 
     def feedback_history(self, run_id: str, artist_id: int) -> tuple[str, ...]:
@@ -272,7 +332,16 @@ def _list_row(
     obviousness: float,
     feedback_score: float,
     explanation: dict[str, Any],
+    score_band: str = "",
+    identity_confidence: float = 0.50,
+    identity_warnings: str = "[]",
+    trial_penalty: float = 0.0,
 ) -> RecommendationListRow:
+    parsed_warnings = _parse_json(identity_warnings)
+    if isinstance(parsed_warnings, list):
+        warning_tuple = tuple(str(w) for w in parsed_warnings)
+    else:
+        warning_tuple = ()
     return RecommendationListRow(
         run_id=run_id,
         artist_id=artist_id,
@@ -284,7 +353,11 @@ def _list_row(
         obviousness=obviousness,
         why_short=str(explanation.get("summary", "")),
         feedback_state=_feedback_state(feedback_score),
-        classification=_classification_label(explanation),
+        classification=_classification_label(explanation, score_band=score_band),
+        score_band=score_band,
+        identity_confidence=identity_confidence,
+        identity_warnings=warning_tuple,
+        trial_penalty=trial_penalty,
     )
 
 
@@ -358,6 +431,12 @@ def _status_labels(
         labels.append("partial_similarity")
     if not _tag_names(explanation) or score_breakdown.tag_similarity_score == 0.0:
         labels.append("partial_tags")
+    for w in score_breakdown.identity_warnings:
+        labels.append(f"id:{w}")
+    if score_breakdown.score_band == "weak":
+        labels.append("band:weak")
+    elif score_breakdown.score_band == "candidate_only":
+        labels.append("band:candidate_only")
     return tuple(labels) or ("complete",)
 
 
@@ -375,7 +454,11 @@ def _display_score(final_score: float, max_final_score: float) -> float:
     return max(0.0, min(final_score / max_final_score, 1.0))
 
 
-def _classification_label(explanation: dict[str, Any]) -> str:
+def _classification_label(explanation: dict[str, Any], *, score_band: str = "") -> str:
+    if score_band == "candidate_only":
+        return "cand"
+    if score_band == "weak":
+        return "weak"
     classification = _bool_map(explanation.get("classification", {}))
     if classification.get("is_rediscovery"):
         return "redis"

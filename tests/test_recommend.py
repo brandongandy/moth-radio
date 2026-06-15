@@ -316,6 +316,8 @@ def test_generate_recommendations_persists_ranked_run_with_explanations(
         "is_new": True,
         "is_rediscovery": False,
         "is_obvious": False,
+        "score_band": "strong",
+        "rediscovery_eligible": False,
     }
     assert explanation["seed_artists"][0]["artist"] == "The Cure"
     assert explanation["tags"][0]["tag"] == "post-punk"

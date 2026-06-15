@@ -91,7 +91,7 @@ def test_export_recommendations_writes_csv(tmp_path: Path) -> None:
     assert rows[0]["rank"] == "1"
     assert rows[0]["artist"] == "Bauhaus"
     assert rows[0]["primary_tags"] == "gothic rock"
-    assert rows[0]["why"].startswith("Bauhaus is similar")
+    assert rows[0]["why"].startswith("Matched tags: 1.")
     conn.close()
 
 

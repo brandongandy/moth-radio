@@ -710,10 +710,11 @@ def test_generate_recommendations_keeps_obvious_rediscovery_candidate(
             play_count,
             track_count,
             active_months,
+            active_days,
             first_played_at,
             last_played_at
         )
-        VALUES (111, 1, 1, 1, '2018-01-01', '2019-01-01')
+        VALUES (111, 1, 1, 1, 1, '2018-01-01', '2019-01-01')
         """
     )
 
@@ -768,10 +769,11 @@ def test_generate_recommendations_skips_rediscovery_candidate_selected_as_seed(
             play_count,
             track_count,
             active_months,
+            active_days,
             first_played_at,
             last_played_at
         )
-        VALUES (113, 5, 3, 2, '2018-01-01', '2019-01-01')
+        VALUES (113, 5, 3, 2, 2, '2018-01-01', '2019-01-01')
         """
     )
 
@@ -1866,6 +1868,7 @@ def _insert_scoring_artist(
             play_count,
             track_count,
             active_months,
+            active_days,
             first_played_at,
             last_played_at,
             lifetime_weight,
@@ -1873,10 +1876,11 @@ def _insert_scoring_artist(
             knownness,
             rediscovery_score
         )
-        VALUES (?, ?, 10, 10, '2024-01-01', '2026-05-01', ?, ?, ?, ?)
+        VALUES (?, ?, 10, 10, ?, '2024-01-01', '2026-05-01', ?, ?, ?, ?)
         """,
         [
             artist_id,
+            play_count,
             play_count,
             lifetime_weight,
             recent_weight,

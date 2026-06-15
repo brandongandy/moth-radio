@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 
 import typer
 from duckdb import DuckDBPyConnection
@@ -18,6 +18,8 @@ from scrobble_recs.admin.cache_admin import (
 )
 from scrobble_recs.admin.doctor import DiagnosticCheck, run_doctor
 from scrobble_recs.admin.init import initialize_project
+from scrobble_recs.apis.cache import ApiCache
+from scrobble_recs.apis.rate_limit import RateLimiter
 from scrobble_recs.config import ScrobbleRecsConfig, load_config
 from scrobble_recs.db import initialize_database
 from scrobble_recs.enrichment.lastfm import (
@@ -406,27 +408,229 @@ def resolve_command(
         raise typer.BadParameter("only --source musicbrainz is supported")
 
     resolved_config = load_config(config)
-    conn = initialize_database(resolved_config)
-    try:
-        unresolved_artists = _count_query(
-            conn,
-            """
-            SELECT count(*)
-            FROM artist
-            WHERE resolution_status IS NULL
-               OR resolution_status LIKE 'provisional%'
-               OR resolution_status = 'unresolved'
-            """,
-        )
-    finally:
-        conn.close()
-
-    console.print(f"unresolved artists: {unresolved_artists}")
     if not resolved_config.apis.musicbrainz.enabled:
         console.print("MusicBrainz resolution is disabled")
         return
-    console.print("MusicBrainz resolution is not implemented in this version")
-    raise typer.Exit(code=1)
+
+    conn = initialize_database(resolved_config)
+    try:
+        unresolved = conn.execute(
+            """
+            SELECT artist_id, canonical_name, artist_key, identity_confidence
+            FROM artist
+            WHERE coalesce(identity_confidence, 0.0) < 0.80
+              AND (resolution_status IS NULL
+                   OR resolution_status = 'unresolved'
+                   OR resolution_status LIKE 'provisional%')
+            ORDER BY artist_id
+            """
+        ).fetchall()
+
+        console.print(f"unresolved artists: {len(unresolved)}")
+        if not unresolved:
+            return
+
+        resolve_stats = _run_musicbrainz_resolution(conn, resolved_config, unresolved)
+    finally:
+        conn.close()
+
+    console.print(f"resolved: {resolve_stats['resolved']}")
+    console.print(f"ambiguous: {resolve_stats['ambiguous']}")
+    console.print(f"not_found: {resolve_stats['not_found']}")
+    console.print(f"skipped: {resolve_stats['skipped']}")
+    console.print(f"errors: {resolve_stats['errors']}")
+
+
+def _run_musicbrainz_resolution(
+    conn: DuckDBPyConnection,
+    config: ScrobbleRecsConfig,
+    unresolved: list[Any],
+) -> dict[str, int]:
+    from scrobble_recs.apis.musicbrainz import MusicBrainzClient
+
+    stats = {"resolved": 0, "ambiguous": 0, "not_found": 0, "skipped": 0, "errors": 0}
+    cache = ApiCache(conn)
+    client = MusicBrainzClient(
+        config=config.apis.musicbrainz,
+        cache=cache,
+        rate_limiter=RateLimiter(config.apis.musicbrainz.rate_limit_per_second),
+    )
+
+    try:
+        for idx, row in enumerate(unresolved, start=1):
+            artist_id = int(row[0])
+            canonical_name = str(row[1] or "")
+            artist_key = str(row[2] or "")
+            identity_confidence = float(row[3] or 0.0)
+
+            search_name = canonical_name or artist_key
+            if not search_name:
+                stats["skipped"] += 1
+                continue
+
+            try:
+                matches = client.search_artist(search_name, limit=5)
+            except Exception:
+                stats["errors"] += 1
+                if idx % 10 == 0:
+                    console.print(f"  progress: {idx}/{len(unresolved)}")
+                continue
+
+            if not matches:
+                _store_resolution(
+                    conn,
+                    artist_id=artist_id,
+                    source="musicbrainz",
+                    status="not_found",
+                    search_name=search_name,
+                    confidence=0.0,
+                )
+                _update_artist_resolution(
+                    conn,
+                    artist_id=artist_id,
+                    status="unresolved",
+                    confidence=identity_confidence,
+                )
+                stats["not_found"] += 1
+            elif len(matches) == 1 or (len(matches) > 1 and matches[0].score >= 90.0):
+                best = matches[0]
+                confidence = min(best.score / 100.0, 1.0)
+                _store_resolution(
+                    conn,
+                    artist_id=artist_id,
+                    source="musicbrainz",
+                    status="resolved",
+                    search_name=search_name,
+                    external_id=best.mbid,
+                    canonical_name=best.name,
+                    disambiguation=best.disambiguation,
+                    country=best.country,
+                    type=best.type,
+                    confidence=confidence,
+                )
+                _update_artist_resolution(
+                    conn,
+                    artist_id=artist_id,
+                    status="resolved_musicbrainz",
+                    confidence=confidence,
+                    mbid=best.mbid,
+                    name=best.name,
+                    disambiguation=best.disambiguation,
+                    country=best.country,
+                )
+                stats["resolved"] += 1
+            else:
+                best = matches[0]
+                confidence = min(best.score / 100.0, 1.0)
+                _store_resolution(
+                    conn,
+                    artist_id=artist_id,
+                    source="musicbrainz",
+                    status="ambiguous",
+                    search_name=search_name,
+                    external_id=best.mbid,
+                    canonical_name=best.name,
+                    disambiguation=best.disambiguation,
+                    country=best.country,
+                    type=best.type,
+                    confidence=confidence,
+                )
+                _update_artist_resolution(
+                    conn,
+                    artist_id=artist_id,
+                    status="ambiguous_musicbrainz",
+                    confidence=confidence,
+                )
+                stats["ambiguous"] += 1
+
+            if idx % 10 == 0:
+                console.print(f"  progress: {idx}/{len(unresolved)}")
+    finally:
+        client.close()
+
+    return stats
+
+
+def _store_resolution(
+    conn: DuckDBPyConnection,
+    *,
+    artist_id: int,
+    source: str,
+    status: str,
+    search_name: str,
+    external_id: str | None = None,
+    canonical_name: str | None = None,
+    disambiguation: str | None = None,
+    country: str | None = None,
+    type: str | None = None,
+    confidence: float = 0.0,
+) -> None:
+    from datetime import datetime as _dt
+
+    conn.execute(
+        """
+        INSERT INTO artist_identity_resolution (
+            artist_id, source, external_id, canonical_name,
+            disambiguation, country_or_area, type, confidence, status, resolved_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (artist_id, source) DO UPDATE SET
+            external_id = excluded.external_id,
+            canonical_name = excluded.canonical_name,
+            disambiguation = excluded.disambiguation,
+            country_or_area = excluded.country_or_area,
+            type = excluded.type,
+            confidence = excluded.confidence,
+            status = excluded.status,
+            resolved_at = excluded.resolved_at
+        """,
+        [
+            artist_id,
+            source,
+            external_id,
+            canonical_name,
+            disambiguation,
+            country,
+            type,
+            confidence,
+            status,
+            _dt.utcnow(),
+        ],
+    )
+
+
+def _update_artist_resolution(
+    conn: DuckDBPyConnection,
+    *,
+    artist_id: int,
+    status: str,
+    confidence: float,
+    mbid: str | None = None,
+    name: str | None = None,
+    disambiguation: str | None = None,
+    country: str | None = None,
+) -> None:
+    updates = ["resolution_status = ?", "identity_confidence = ?", "updated_at = current_timestamp"]
+    params: list[object] = [status, confidence]
+
+    if mbid is not None:
+        updates.append("musicbrainz_artist_mbid = ?")
+        params.append(mbid)
+    if name is not None:
+        updates.append("canonical_name = ?")
+        params.append(name)
+    if disambiguation is not None:
+        updates.append("disambiguation = ?")
+        params.append(disambiguation)
+    if country is not None:
+        updates.append("country = ?")
+        params.append(country)
+
+    params.append(artist_id)
+    conn.execute(
+        f"UPDATE artist SET {', '.join(updates)} WHERE artist_id = ?",
+        params,
+    )
 
 
 @app.command("recommend")

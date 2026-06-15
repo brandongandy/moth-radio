@@ -52,6 +52,7 @@ def run_doctor(
         _api_cache_check(conn, resolved_now),
         _import_stats_check(conn),
         _import_warnings_check(conn),
+        _musicbrainz_resolution_check(conn),
     ]
     return DoctorResult(checks=tuple(checks))
 
@@ -152,4 +153,49 @@ def _import_warnings_check(conn: DuckDBPyConnection) -> DiagnosticCheck:
         "import_warnings",
         DiagnosticStatus.WARN,
         f"warnings={warning_count}",
+    )
+
+
+def _musicbrainz_resolution_check(conn: DuckDBPyConnection) -> DiagnosticCheck:
+    try:
+        rows = conn.execute(
+            """
+            SELECT status, count(*)
+            FROM artist_identity_resolution
+            WHERE source = 'musicbrainz'
+            GROUP BY status
+            ORDER BY status
+            """
+        ).fetchall()
+    except Exception:
+        return DiagnosticCheck(
+            "musicbrainz_resolution",
+            DiagnosticStatus.OK,
+            "no resolution data",
+        )
+
+    if not rows:
+        return DiagnosticCheck(
+            "musicbrainz_resolution",
+            DiagnosticStatus.OK,
+            "no resolution data",
+        )
+
+    counts = {str(status): int(count) for status, count in rows}
+    resolved = counts.get("resolved", 0)
+    ambiguous = counts.get("ambiguous", 0)
+    not_found = counts.get("not_found", 0)
+    total = sum(counts.values())
+
+    if not_found > 0:
+        return DiagnosticCheck(
+            "musicbrainz_resolution",
+            DiagnosticStatus.WARN,
+            f"total={total}; resolved={resolved}; ambiguous={ambiguous}; not_found={not_found}",
+        )
+
+    return DiagnosticCheck(
+        "musicbrainz_resolution",
+        DiagnosticStatus.OK,
+        f"total={total}; resolved={resolved}; ambiguous={ambiguous}; not_found={not_found}",
     )

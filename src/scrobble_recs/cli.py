@@ -472,6 +472,10 @@ def export_command(
         typer.Option("--format", help="Export format: csv or jsonl."),
     ] = "csv",
     run_id: Annotated[str | None, typer.Option("--run-id", help="Recommendation run UUID.")] = None,
+    include_candidates: Annotated[
+        bool,
+        typer.Option("--include-candidates", help="Include candidate_only (zero-score) rows."),
+    ] = False,
 ) -> None:
     if format_name not in {"csv", "jsonl"}:
         raise typer.BadParameter("format must be csv or jsonl")
@@ -486,6 +490,7 @@ def export_command(
                 output,
                 format_name=resolved_format,
                 run_id=run_id,
+                include_candidates=include_candidates,
             )
         except ValueError as exc:
             console.print(f"Error: {exc}")

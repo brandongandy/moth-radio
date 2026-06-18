@@ -7,11 +7,13 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from math import log, sqrt
 from typing import Literal, TypeAlias
+from urllib.parse import quote
 from uuid import uuid4
 
 from duckdb import DuckDBPyConnection
 
 from scrobble_recs.config import RecommendationWeightsConfig, ScrobbleRecsConfig
+from scrobble_recs.export import _display_score
 from scrobble_recs.models.feedback import (
     FeedbackProfile,
     apply_feedback_to_tag_profile,
@@ -73,6 +75,18 @@ class _CandidateScore:
     quality_gate: _QualityGateDecision
     fatigue: _FatiguePenalty
     explanation: dict[str, object]
+    score_band: str = "candidate_only"
+    normalized_score: float = 0.0
+    evidence_source_count: int = 0
+    trial_penalty: float = 0.0
+    local_scrobble_count: int = 0
+    listened_day_count: int = 0
+    first_listened_at: datetime | None = None
+    last_listened_at: datetime | None = None
+    years_since_last_listen: float = 0.0
+    rediscovery_eligible: bool = False
+    identity_confidence: float = 0.50
+    identity_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -83,7 +97,9 @@ class _ScoringData:
     feedback_similarity_by_target: dict[int, list[tuple[int, float]]]
     direct_tags_by_artist: dict[int, dict[str, float]]
     tag_ranks_by_artist: dict[int, list[tuple[str, int]]]
-    listening_by_artist: dict[int, tuple[float, float]]
+    listening_by_artist: dict[int, tuple[float, float, int, int, datetime | None, datetime | None]]
+    identity_confidence_by_artist: dict[int, float]
+    identity_warnings_by_artist: dict[int, list[str]]
 
 
 @dataclass(frozen=True)
@@ -219,6 +235,7 @@ def generate_recommendations(
         scoring_data,
         feedback_profile,
         fatigue_by_artist,
+        as_of=resolved_as_of,
         progress_callback=progress_callback,
     )
     _report_progress(
@@ -237,19 +254,32 @@ def generate_recommendations(
         enabled=config.recommendation.diversity.enabled,
         progress_callback=progress_callback,
     )
+    max_final = max((s.final_score for s in ranked_without_explanations), default=0.0)
+    banded = [
+        replace(
+            score,
+            normalized_score=_display_score(score.final_score, max_final),
+            score_band=_classify_score_band(
+                normalized=_display_score(score.final_score, max_final),
+                raw=score.raw_score,
+                evidence_count=score.evidence_source_count,
+            ),
+        )
+        for score in ranked_without_explanations
+    ]
     _report_progress(
         progress_callback,
         phase="rerank_diversity",
-        current=len(ranked_without_explanations),
+        current=len(banded),
         total=limit,
-        subject=f"{len(ranked_without_explanations)} selected",
+        subject=f"{len(banded)} selected",
         status="completed",
     )
     _report_progress(
         progress_callback,
         phase="build_explanations",
         current=0,
-        total=len(ranked_without_explanations),
+        total=len(banded),
         subject="recommendations",
         status="processing",
     )
@@ -263,13 +293,13 @@ def generate_recommendations(
                 tag_profile=effective_tag_profile,
             ),
         )
-        for score in ranked_without_explanations
+        for score in banded
     ]
     _report_progress(
         progress_callback,
         phase="build_explanations",
         current=len(ranked),
-        total=len(ranked_without_explanations),
+        total=len(banded),
         subject="recommendations",
         status="completed",
     )
@@ -499,18 +529,49 @@ def _load_scoring_data(
         candidates.add(artist)
         tag_ranks_by_artist.setdefault(artist, []).append((_normalize_tag_key(tag), int(tag_rank)))
 
+    listening_rows = conn.execute(
+        """
+        SELECT
+            artist_id,
+            coalesce(knownness, 0.0),
+            coalesce(rediscovery_score, 0.0),
+            coalesce(play_count, 0),
+            coalesce(active_days, 0),
+            first_played_at,
+            last_played_at
+        FROM artist_listening_fact
+        """
+    ).fetchall()
     listening_by_artist = {
-        int(artist_id): (float(knownness), float(rediscovery_score))
-        for artist_id, knownness, rediscovery_score in conn.execute(
-            """
-            SELECT
-                artist_id,
-                coalesce(knownness, 0.0),
-                coalesce(rediscovery_score, 0.0)
-            FROM artist_listening_fact
-            """
+        int(row[0]): (
+            float(row[1]),
+            float(row[2]),
+            int(row[3] or 0),
+            int(row[4] or 0),
+            row[5],
+            row[6],
+        )
+        for row in listening_rows
+    }
+
+    identity_by_artist = {
+        int(artist_id): float(conf or 0.50)
+        for artist_id, conf in conn.execute(
+            "SELECT artist_id, coalesce(identity_confidence, 0.50) FROM artist"
         ).fetchall()
     }
+
+    identity_warnings_by_artist: dict[int, list[str]] = {}
+    for artist_id, warnings_json in conn.execute(
+        "SELECT artist_id, coalesce(identity_warnings, '[]') FROM artist"
+    ).fetchall():
+        try:
+            parsed = json.loads(str(warnings_json))
+            identity_warnings_by_artist[int(artist_id)] = (
+                list(parsed) if isinstance(parsed, list) else []
+            )
+        except (json.JSONDecodeError, TypeError):
+            identity_warnings_by_artist[int(artist_id)] = []
 
     artist_names = {
         int(artist_id): str(canonical_name)
@@ -530,6 +591,8 @@ def _load_scoring_data(
         direct_tags_by_artist=direct_tags_by_artist,
         tag_ranks_by_artist=tag_ranks_by_artist,
         listening_by_artist=listening_by_artist,
+        identity_confidence_by_artist=identity_by_artist,
+        identity_warnings_by_artist=identity_warnings_by_artist,
     )
 
 
@@ -590,11 +653,13 @@ def _score_candidates(
     feedback_profile: FeedbackProfile,
     fatigue_by_artist: dict[int, _FatiguePenalty],
     *,
+    as_of: datetime | None = None,
     progress_callback: RecommendationProgressCallback | None = None,
 ) -> list[_CandidateScore]:
     seed_weight_by_id = {seed.artist_id: seed.seed_weight for seed in seeds}
     total_seed_weight = sum(seed_weight_by_id.values()) or 1.0
     scores: list[_CandidateScore] = []
+    candidate_only_scores: list[_CandidateScore] = []
     obviousness_enabled = config.recommendation.obviousness.enabled
     total_candidates = len(scoring_data.candidates)
     processed = 0
@@ -616,7 +681,10 @@ def _score_candidates(
         artist_name = scoring_data.artist_names.get(artist_id)
         if artist_name is None:
             continue
-        knownness, rediscovery = scoring_data.listening_by_artist.get(artist_id, (0.0, 0.0))
+        listening = scoring_data.listening_by_artist.get(artist_id, (0.0, 0.0, 0, 0, None, None))
+        knownness, rediscovery, local_play_count, local_active_days, first_played, last_played = (
+            listening
+        )
         candidate_tags = _candidate_tag_vector(artist_id, scoring_data)
         feedback_neighborhood_score = _feedback_neighborhood_score(
             artist_id,
@@ -636,6 +704,22 @@ def _score_candidates(
         )
         if artist_id in feedback_profile.known_artist_ids:
             knownness = max(knownness, 1.0)
+        years_since_last_listen = 0.0
+        if as_of is not None and last_played is not None:
+            years_since_last_listen = max(0.0, (as_of - last_played).days / 365.25)
+        has_positive_feedback = artist_id in feedback_profile.boosted_seed_artist_ids
+        trial_penalty = _compute_trial_penalty(
+            play_count=local_play_count,
+            active_days=local_active_days,
+            years_since_last_listen=years_since_last_listen,
+        )
+        rediscovery_eligible = _is_rediscovery_eligible(
+            play_count=local_play_count,
+            active_days=local_active_days,
+            has_positive_feedback=has_positive_feedback,
+        )
+        if mode.name == "rediscovery" and rediscovery > 0.0 and not rediscovery_eligible:
+            continue
         lastfm_score = _lastfm_similarity_score(
             artist_id,
             seed_weight_by_id,
@@ -683,6 +767,9 @@ def _score_candidates(
             rediscovery * mode.rediscovery_multiplier,
             feedback.score,
         )
+        evidence_count = sum(
+            1 for val in (lastfm_score, tag_score, feedback.score, rediscovery) if val > 0.0
+        )
         knownness_penalty = 0.40 * max(0.0, knownness - mode.max_knownness)
         obviousness_penalty = (
             mode.obviousness_penalty_weight * obviousness if obviousness_enabled else 0.0
@@ -692,7 +779,49 @@ def _score_candidates(
             _FatiguePenalty(prior_run_appearances=0, latest_run_rank=None, penalty=0.0),
         )
         final_score = raw_score - knownness_penalty - obviousness_penalty - fatigue.penalty
+        if mode.name == "balanced":
+            final_score -= trial_penalty
+
+        identity_conf = scoring_data.identity_confidence_by_artist.get(artist_id, 0.50)
+        identity_warnings = tuple(scoring_data.identity_warnings_by_artist.get(artist_id, []))
+        confidence_multiplier = 0.5 + 0.5 * identity_conf
+        final_score *= confidence_multiplier
+
         if final_score <= 0:
+            candidate_only = _CandidateScore(
+                artist_id=artist_id,
+                artist_name=artist_name,
+                final_score=0.0,
+                raw_score=raw_score,
+                lastfm_similarity_score=lastfm_score,
+                tag_similarity_score=tag_score,
+                feedback_score=feedback.score,
+                feedback_contributions=feedback.contributions,
+                feedback_effects=feedback.effects,
+                rediscovery_score=rediscovery,
+                knownness=knownness,
+                obviousness=obviousness,
+                knownness_penalty=knownness_penalty,
+                obviousness_penalty=obviousness_penalty,
+                diversity_penalty=0.0,
+                primary_tag=_primary_tag(artist_id, tag_profile, scoring_data),
+                quality_gate=quality_gate,
+                fatigue=fatigue,
+                explanation={},
+                score_band="candidate_only",
+                normalized_score=0.0,
+                evidence_source_count=evidence_count,
+                trial_penalty=trial_penalty,
+                local_scrobble_count=local_play_count,
+                listened_day_count=local_active_days,
+                first_listened_at=first_played,
+                last_listened_at=last_played,
+                years_since_last_listen=years_since_last_listen,
+                rediscovery_eligible=rediscovery_eligible,
+                identity_confidence=identity_conf,
+                identity_warnings=identity_warnings,
+            )
+            candidate_only_scores.append(candidate_only)
             continue
         scores.append(
             _CandidateScore(
@@ -715,6 +844,16 @@ def _score_candidates(
                 quality_gate=quality_gate,
                 fatigue=fatigue,
                 explanation={},
+                evidence_source_count=evidence_count,
+                trial_penalty=trial_penalty,
+                local_scrobble_count=local_play_count,
+                listened_day_count=local_active_days,
+                first_listened_at=first_played,
+                last_listened_at=last_played,
+                years_since_last_listen=years_since_last_listen,
+                rediscovery_eligible=rediscovery_eligible,
+                identity_confidence=identity_conf,
+                identity_warnings=identity_warnings,
             )
         )
         if processed % report_interval == 0:
@@ -731,10 +870,11 @@ def _score_candidates(
         phase="score_candidates",
         current=total_candidates,
         total=total_candidates,
-        subject=f"{len(scores)} positive scores",
+        subject=f"{len(scores)} positive scores, {len(candidate_only_scores)} candidate_only",
         status="completed",
     )
-    return scores
+    candidate_only_scores.sort(key=lambda s: s.raw_score, reverse=True)
+    return scores + candidate_only_scores[: min(len(scores) * 2, 500)]
 
 
 def _rerank_for_diversity(
@@ -1123,11 +1263,59 @@ def _explanation(
         tag_rows,
         key=lambda row: (-tag_profile.get(row[0], 0.0), row[1], row[0]),
     )
+    matching_tags = [tag for tag, _rank in ordered_tag_rows if tag_profile.get(tag, 0.0) > 0]
+    top_seed_names = [seed_name for _sid, seed_name, _sim, _c in seed_rows[:5]]
+    top_seed_scores = [similarity for _sid, _name, similarity, _c in seed_rows[:5]]
+
+    evidence_sources: list[str] = []
+    if score.lastfm_similarity_score > 0:
+        evidence_sources.append("last.fm similarity")
+    if score.tag_similarity_score > 0:
+        evidence_sources.append("tag similarity")
+    if score.feedback_score > 0:
+        evidence_sources.append("feedback")
+    if score.rediscovery_score > 0:
+        evidence_sources.append("rediscovery")
+
+    caution_parts: list[str] = []
+    if score.trial_penalty > 0:
+        caution_parts.append(f"trial listen penalty ({score.trial_penalty:.2f})")
+    if score.knownness_penalty > 0:
+        caution_parts.append(f"already known ({score.knownness_penalty:.2f})")
+    if score.obviousness_penalty > 0:
+        caution_parts.append(f"obvious ({score.obviousness_penalty:.2f})")
+    if score.fatigue.penalty > 0:
+        caution_parts.append(f"recently recommended ({score.fatigue.penalty:.2f})")
+    identity_warnings_list = list(score.identity_warnings)
+    if identity_warnings_list:
+        caution_parts.append("identity unresolved")
+
+    evidence_str = ", ".join(evidence_sources) if evidence_sources else "none"
+    caution_str = "; ".join(caution_parts) if caution_parts else "none"
+
+    summary = (
+        f"Matched tags: {len(matching_tags)}."
+        f" Nearest seeds: {len(seed_rows)}."
+        f" Evidence: {evidence_str}."
+        f" Caution: {caution_str}."
+    )
+
     return {
-        "summary": (
-            f"{score.artist_name} is similar to high-weight seed artists"
-            " and fits tags from the local listening profile."
-        ),
+        "summary": summary,
+        "top_seed_artists": top_seed_names,
+        "top_seed_edge_scores": top_seed_scores,
+        "matching_tags": matching_tags[:5],
+        "tag_fit_score": score.tag_similarity_score,
+        "lastfm_similarity_score": score.lastfm_similarity_score,
+        "rediscovery_score": score.rediscovery_score,
+        "feedback_score": score.feedback_score,
+        "knownness_penalty": score.knownness_penalty,
+        "obviousness_penalty": score.obviousness_penalty,
+        "fatigue_penalty": score.fatigue.penalty,
+        "trial_penalty": score.trial_penalty,
+        "identity_confidence": score.identity_confidence,
+        "identity_warnings": identity_warnings_list,
+        "candidate_sources": evidence_sources,
         "quality_gate": {
             "passed": score.quality_gate.passed,
             "reasons": list(score.quality_gate.reasons),
@@ -1176,6 +1364,8 @@ def _explanation(
             "is_new": score.knownness == 0.0,
             "is_rediscovery": score.rediscovery_score > 0.0,
             "is_obvious": score.obviousness >= 0.75,
+            "score_band": score.score_band,
+            "rediscovery_eligible": score.rediscovery_eligible,
         },
     }
 
@@ -1293,7 +1483,34 @@ def _persist_run(
                 "offline lastfm/tag first recommender",
             ],
         )
+        candidate_only_offset = 999900
+        artist_identity = {
+            int(aid): (
+                str(canonical_name or ""),
+                str(mbid or ""),
+                float(conf or 0.50),
+                str(warnings or "[]"),
+            )
+            for aid, canonical_name, mbid, conf, warnings in conn.execute(
+                """
+                SELECT artist_id, canonical_name,
+                       coalesce(musicbrainz_artist_mbid, ''),
+                       coalesce(identity_confidence, 0.50),
+                       coalesce(identity_warnings, '[]')
+                FROM artist
+                """
+            ).fetchall()
+        }
         for rank, score in enumerate(ranked, start=1):
+            if getattr(score, "score_band", "") == "candidate_only":
+                effective_rank = candidate_only_offset
+                candidate_only_offset += 1
+            else:
+                effective_rank = rank
+            identity = artist_identity.get(score.artist_id, (score.artist_name, "", 0.50, "[]"))
+            mbid_val = identity[1]
+            lastfm_url_val = f"https://www.last.fm/music/{quote(score.artist_name, safe='')}"
+            musicbrainz_url_val = f"https://musicbrainz.org/artist/{mbid_val}" if mbid_val else ""
             conn.execute(
                 """
                 INSERT INTO recommendation (
@@ -1311,13 +1528,34 @@ def _persist_run(
                     knownness,
                     obviousness,
                     diversity_penalty,
-                    explanation
+                    explanation,
+                    score_band,
+                    evidence_source_count,
+                    local_scrobble_count,
+                    listened_day_count,
+                    first_listened_at,
+                    last_listened_at,
+                    years_since_last_listen,
+                    rediscovery_eligible,
+                    trial_penalty,
+                    candidate_artist_name,
+                    canonical_artist_name,
+                    musicbrainz_artist_mbid,
+                    lastfm_url,
+                    musicbrainz_url,
+                    identity_confidence,
+                    identity_warnings
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?
+                )
                 """,
                 [
                     run_id,
-                    rank,
+                    effective_rank,
                     score.artist_id,
                     score.final_score,
                     score.raw_score,
@@ -1331,6 +1569,22 @@ def _persist_run(
                     score.obviousness,
                     score.diversity_penalty,
                     json.dumps(score.explanation),
+                    score.score_band,
+                    score.evidence_source_count,
+                    score.local_scrobble_count,
+                    score.listened_day_count,
+                    score.first_listened_at,
+                    score.last_listened_at,
+                    score.years_since_last_listen,
+                    score.rediscovery_eligible,
+                    score.trial_penalty,
+                    score.artist_name,
+                    identity[0],
+                    identity[1],
+                    lastfm_url_val,
+                    musicbrainz_url_val,
+                    identity[2],
+                    identity[3],
                 ],
             )
         conn.execute("COMMIT")
@@ -1357,6 +1611,66 @@ def _rank_penalty(rank: int) -> float:
     return _rank_affinity(rank)
 
 
+def _classify_score_band(*, normalized: float, raw: float, evidence_count: int) -> str:
+    if raw <= 0.0 or normalized <= 0.0:
+        return "candidate_only"
+    if normalized >= 0.50 and evidence_count >= 2:
+        return "strong"
+    if normalized >= 0.10 and evidence_count >= 1:
+        return "plausible"
+    return "weak"
+
+
+def _compute_trial_penalty(
+    *, play_count: int, active_days: int, years_since_last_listen: float
+) -> float:
+    if years_since_last_listen < 2.0:
+        return 0.0
+    if play_count == 1 and active_days <= 1:
+        return 0.35
+    if play_count == 2 and active_days <= 1:
+        return 0.20
+    return 0.0
+
+
+def _is_rediscovery_eligible(
+    *, play_count: int, active_days: int, has_positive_feedback: bool
+) -> bool:
+    return play_count >= 3 or active_days >= 2 or has_positive_feedback
+
+
 def _config_hash(config: ScrobbleRecsConfig) -> str:
     payload = config.recommendation.model_dump_json(by_alias=True)
     return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def compute_identity_confidence(
+    *,
+    artist_name: str,
+    mbid: str | None,
+    resolution_status: str,
+    lastfm_enrichment_mbid: str | None = None,
+    lastfm_url_from_enrichment: str | None = None,
+    canonical_name_match: bool = True,
+) -> tuple[float, list[str]]:
+    confidence = 0.50
+    warnings: list[str] = []
+
+    if mbid and resolution_status == "provisional_mbid":
+        confidence += 0.30
+    if lastfm_enrichment_mbid or lastfm_url_from_enrichment:
+        confidence += 0.15
+    if canonical_name_match:
+        confidence += 0.10
+
+    name_parts = artist_name.strip().split()
+    if len(name_parts) <= 1 and not mbid:
+        confidence -= 0.30
+        warnings.append("generic_short_name_no_mbid")
+    if resolution_status == "provisional_mbid_conflict":
+        confidence -= 0.20
+        warnings.append("multiple_possible_local_matches")
+    if not mbid:
+        warnings.append("missing_musicbrainz_mbid")
+
+    return (max(0.0, min(1.0, confidence)), sorted(warnings))

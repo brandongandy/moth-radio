@@ -11,7 +11,13 @@ from scrobble_recs.db import initialize_database
 from scrobble_recs.enrichment.lastfm import run_lastfm_enrichment
 from scrobble_recs.importers.lastfm_csv import import_lastfm_csv
 from scrobble_recs.models.feedback import record_feedback_event
-from scrobble_recs.models.recommend import generate_recommendations
+from scrobble_recs.models.recommend import (
+    _classify_score_band,
+    _compute_trial_penalty,
+    _is_rediscovery_eligible,
+    compute_identity_confidence,
+    generate_recommendations,
+)
 
 
 def write_config(tmp_path: Path) -> Path:
@@ -138,6 +144,22 @@ def test_recommendation_migration_creates_run_and_result_tables(tmp_path: Path) 
             "diversity_penalty": "DOUBLE",
             "explanation": "JSON",
             "created_at": "TIMESTAMP",
+            "score_band": "VARCHAR",
+            "evidence_source_count": "INTEGER",
+            "local_scrobble_count": "INTEGER",
+            "listened_day_count": "INTEGER",
+            "first_listened_at": "TIMESTAMP",
+            "last_listened_at": "TIMESTAMP",
+            "years_since_last_listen": "DOUBLE",
+            "rediscovery_eligible": "BOOLEAN",
+            "trial_penalty": "DOUBLE",
+            "candidate_artist_name": "VARCHAR",
+            "canonical_artist_name": "VARCHAR",
+            "musicbrainz_artist_mbid": "VARCHAR",
+            "lastfm_url": "VARCHAR",
+            "musicbrainz_url": "VARCHAR",
+            "identity_confidence": "DOUBLE",
+            "identity_warnings": "VARCHAR",
         }
 
         conn.execute(
@@ -294,6 +316,8 @@ def test_generate_recommendations_persists_ranked_run_with_explanations(
         "is_new": True,
         "is_rediscovery": False,
         "is_obvious": False,
+        "score_band": "strong",
+        "rediscovery_eligible": False,
     }
     assert explanation["seed_artists"][0]["artist"] == "The Cure"
     assert explanation["tags"][0]["tag"] == "post-punk"
@@ -331,7 +355,7 @@ def test_generate_recommendations_reports_phase_progress(tmp_path: Path) -> None
         ("score_candidates", 0, 3, "candidate artists", "processing"),
         ("score_candidates", 1, 3, "1 positive so far", "processing"),
         ("score_candidates", 2, 3, "2 positive so far", "processing"),
-        ("score_candidates", 3, 3, "2 positive scores", "completed"),
+        ("score_candidates", 3, 3, "2 positive scores, 0 candidate_only", "completed"),
         ("rerank_diversity", 0, 3, "ranked candidates", "processing"),
         ("rerank_diversity", 1, 3, "1 selected", "processing"),
         ("rerank_diversity", 2, 3, "2 selected", "processing"),
@@ -689,10 +713,11 @@ def test_generate_recommendations_keeps_obvious_rediscovery_candidate(
             play_count,
             track_count,
             active_months,
+            active_days,
             first_played_at,
             last_played_at
         )
-        VALUES (111, 1, 1, 1, '2018-01-01', '2019-01-01')
+        VALUES (111, 1, 1, 1, 1, '2018-01-01', '2019-01-01')
         """
     )
 
@@ -747,10 +772,11 @@ def test_generate_recommendations_skips_rediscovery_candidate_selected_as_seed(
             play_count,
             track_count,
             active_months,
+            active_days,
             first_played_at,
             last_played_at
         )
-        VALUES (113, 5, 3, 2, '2018-01-01', '2019-01-01')
+        VALUES (113, 5, 3, 2, 2, '2018-01-01', '2019-01-01')
         """
     )
 
@@ -1173,7 +1199,7 @@ def test_generate_recommendations_keeps_saved_current_candidate_with_outgoing_ed
 
     assert _recommendation_names(conn, stats.run_id)[:2] == [
         "Saved Candidate With Edges",
-        "Higher Similarity Neutral",
+        "Saved Candidate Neighbor",
     ]
     row = conn.execute(
         """
@@ -1845,6 +1871,7 @@ def _insert_scoring_artist(
             play_count,
             track_count,
             active_months,
+            active_days,
             first_played_at,
             last_played_at,
             lifetime_weight,
@@ -1852,10 +1879,11 @@ def _insert_scoring_artist(
             knownness,
             rediscovery_score
         )
-        VALUES (?, ?, 10, 10, '2024-01-01', '2026-05-01', ?, ?, ?, ?)
+        VALUES (?, ?, 10, 10, ?, '2024-01-01', '2026-05-01', ?, ?, ?, ?)
         """,
         [
             artist_id,
+            play_count,
             play_count,
             lifetime_weight,
             recent_weight,
@@ -2052,10 +2080,10 @@ def test_generate_recommendations_allows_rediscovery_with_tag_match(tmp_path: Pa
     conn.execute(
         """
         INSERT INTO artist_listening_fact (
-            artist_id, play_count, track_count, active_months,
+            artist_id, play_count, track_count, active_months, active_days,
             first_played_at, last_played_at
         )
-        VALUES (511, 1, 3, 2, '2018-01-01', '2023-01-01')
+        VALUES (511, 1, 3, 2, 3, '2018-01-01', '2023-01-01')
         """
     )
     conn.execute(
@@ -2468,3 +2496,113 @@ def test_generate_recommendations_persists_candidates(tmp_path: Path) -> None:
         assert int(rows[0]) > 0
     finally:
         conn.close()
+
+
+class TestScoreBand:
+    def test_strong_band(self) -> None:
+        result = _classify_score_band(normalized=0.55, raw=0.3, evidence_count=3)
+        assert result == "strong"
+
+    def test_plausible_band(self) -> None:
+        result = _classify_score_band(normalized=0.12, raw=0.1, evidence_count=1)
+        assert result == "plausible"
+
+    def test_plausible_needs_evidence(self) -> None:
+        result = _classify_score_band(normalized=0.12, raw=0.1, evidence_count=0)
+        assert result == "weak"
+
+    def test_weak_band(self) -> None:
+        result = _classify_score_band(normalized=0.05, raw=0.05, evidence_count=1)
+        assert result == "weak"
+
+    def test_candidate_only_zero_raw(self) -> None:
+        result = _classify_score_band(normalized=0.8, raw=0.0, evidence_count=3)
+        assert result == "candidate_only"
+
+    def test_candidate_only_zero_normalized(self) -> None:
+        result = _classify_score_band(normalized=0.0, raw=0.3, evidence_count=3)
+        assert result == "candidate_only"
+
+    def test_strong_needs_two_sources(self) -> None:
+        result = _classify_score_band(normalized=0.55, raw=0.3, evidence_count=1)
+        assert result == "plausible"
+
+
+class TestTrialPenalty:
+    def test_single_scrobble_single_day_old(self) -> None:
+        result = _compute_trial_penalty(play_count=1, active_days=1, years_since_last_listen=3.0)
+        assert result == pytest.approx(0.35)
+
+    def test_two_scrobbles_single_day_old(self) -> None:
+        result = _compute_trial_penalty(play_count=2, active_days=1, years_since_last_listen=3.0)
+        assert result == pytest.approx(0.20)
+
+    def test_single_scrobble_recent_no_penalty(self) -> None:
+        result = _compute_trial_penalty(play_count=1, active_days=1, years_since_last_listen=1.0)
+        assert result == 0.0
+
+    def test_multi_scrobble_no_penalty(self) -> None:
+        result = _compute_trial_penalty(play_count=3, active_days=1, years_since_last_listen=3.0)
+        assert result == 0.0
+
+    def test_single_scrobble_multi_day_no_penalty(self) -> None:
+        result = _compute_trial_penalty(play_count=1, active_days=2, years_since_last_listen=3.0)
+        assert result == 0.0
+
+    def test_five_scrobbles_no_penalty(self) -> None:
+        result = _compute_trial_penalty(play_count=5, active_days=3, years_since_last_listen=5.0)
+        assert result == 0.0
+
+
+class TestRediscoveryEligible:
+    def test_eligible_by_play_count(self) -> None:
+        assert _is_rediscovery_eligible(play_count=3, active_days=1, has_positive_feedback=False)
+
+    def test_eligible_by_active_days(self) -> None:
+        assert _is_rediscovery_eligible(play_count=1, active_days=2, has_positive_feedback=False)
+
+    def test_eligible_by_feedback(self) -> None:
+        assert _is_rediscovery_eligible(play_count=1, active_days=1, has_positive_feedback=True)
+
+    def test_not_eligible_single_scrobble_single_day(self) -> None:
+        assert not _is_rediscovery_eligible(
+            play_count=1, active_days=1, has_positive_feedback=False
+        )
+
+
+class TestIdentityConfidence:
+    def test_full_confidence_with_mbid(self) -> None:
+        conf, warnings = compute_identity_confidence(
+            artist_name="Radiohead",
+            mbid="a74b1b7f-71a5-4011-9441-d0b5e4122711",
+            resolution_status="provisional_mbid",
+        )
+        assert conf == pytest.approx(0.90)
+        assert warnings == []
+
+    def test_missing_mbid_warning(self) -> None:
+        conf, warnings = compute_identity_confidence(
+            artist_name="The Beatles",
+            mbid=None,
+            resolution_status="provisional_name",
+        )
+        assert conf == pytest.approx(0.60)
+        assert "missing_musicbrainz_mbid" in warnings
+
+    def test_short_generic_name_penalty(self) -> None:
+        conf, warnings = compute_identity_confidence(
+            artist_name="Bauhaus",
+            mbid=None,
+            resolution_status="provisional_name",
+        )
+        assert conf == pytest.approx(0.30)
+        assert "generic_short_name_no_mbid" in warnings
+
+    def test_mbid_conflict_penalty(self) -> None:
+        conf, warnings = compute_identity_confidence(
+            artist_name="Some Artist Name",
+            mbid=None,
+            resolution_status="provisional_mbid_conflict",
+        )
+        assert conf == pytest.approx(0.40)
+        assert "multiple_possible_local_matches" in warnings

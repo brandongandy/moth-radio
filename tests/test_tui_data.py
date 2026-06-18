@@ -98,6 +98,10 @@ def test_store_loads_latest_run_recommendations_with_compact_columns(tmp_path: P
     assert rows[0].primary_tags == ("post-punk",)
     assert rows[0].why_short == "Fits post-punk tags."
     assert rows[0].feedback_state == ""
+    assert rows[0].score_band == ""
+    assert rows[0].identity_confidence == 0.50
+    assert rows[0].identity_warnings == ()
+    assert rows[0].trial_penalty == 0.0
     conn.close()
 
 
@@ -214,6 +218,20 @@ def test_store_loads_detail_score_breakdown_and_missing_enrichment_statuses(
     assert detail.score_breakdown.raw_score == pytest.approx(0.61)
     assert detail.score_breakdown.feedback_score == pytest.approx(-0.10)
     assert detail.status_labels == ("partial_similarity", "partial_tags")
+    assert detail.score_band == ""
+    assert detail.identity_confidence == 0.50
+    assert detail.identity_warnings == ()
+    assert detail.local_scrobble_count == 0
+    assert detail.listened_day_count == 0
+    assert detail.years_since_last_listen == 0.0
+    assert detail.rediscovery_eligible is False
+    assert detail.trial_penalty == 0.0
+    assert detail.top_seed_artists == ()
+    assert detail.score_breakdown.score_band == ""
+    assert detail.score_breakdown.evidence_source_count == 0
+    assert detail.score_breakdown.trial_penalty == 0.0
+    assert detail.score_breakdown.identity_confidence == 0.50
+    assert detail.score_breakdown.identity_warnings == ()
     conn.close()
 
 
@@ -307,6 +325,15 @@ def _insert_recommendation(
     obviousness: float,
     diversity_penalty: float = 0.0,
     explanation: dict[str, object],
+    score_band: str = "",
+    evidence_source_count: int = 0,
+    local_scrobble_count: int = 0,
+    listened_day_count: int = 0,
+    years_since_last_listen: float = 0.0,
+    rediscovery_eligible: bool = False,
+    trial_penalty: float = 0.0,
+    identity_confidence: float = 0.50,
+    identity_warnings: str = "[]",
 ) -> None:
     conn.execute(
         """
@@ -325,9 +352,18 @@ def _insert_recommendation(
             knownness,
             obviousness,
             diversity_penalty,
-            explanation
+            explanation,
+            score_band,
+            evidence_source_count,
+            local_scrobble_count,
+            listened_day_count,
+            years_since_last_listen,
+            rediscovery_eligible,
+            trial_penalty,
+            identity_confidence,
+            identity_warnings
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             run_id,
@@ -345,6 +381,15 @@ def _insert_recommendation(
             obviousness,
             diversity_penalty,
             json.dumps(explanation),
+            score_band,
+            evidence_source_count,
+            local_scrobble_count,
+            listened_day_count,
+            years_since_last_listen,
+            rediscovery_eligible,
+            trial_penalty,
+            identity_confidence,
+            identity_warnings,
         ],
     )
 

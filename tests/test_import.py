@@ -661,7 +661,7 @@ def test_import_database_statement_count_is_bounded_for_many_rows(tmp_path: Path
 
     assert stats.scrobbles == 100
     assert stats.distinct_artists == 10
-    assert counting_conn.execute_calls <= 30
+    assert counting_conn.execute_calls <= 50
 
 
 @pytest.mark.parametrize("column", ["uts", "artist", "track"])

@@ -91,7 +91,7 @@ def test_export_recommendations_writes_csv(tmp_path: Path) -> None:
     assert rows[0]["rank"] == "1"
     assert rows[0]["artist"] == "Bauhaus"
     assert rows[0]["primary_tags"] == "gothic rock"
-    assert rows[0]["why"].startswith("Bauhaus is similar")
+    assert rows[0]["why"].startswith("Matched tags: 1.")
     conn.close()
 
 
@@ -137,7 +137,7 @@ def test_export_recommendations_normalizes_user_score_per_run(tmp_path: Path) ->
     export_recommendations(conn, output, format_name="jsonl", run_id=run_id)
 
     rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
-    assert [row["score"] for row in rows] == [pytest.approx(1.0), pytest.approx(0.5)]
+    assert [row["score_normalized"] for row in rows] == [pytest.approx(1.0), pytest.approx(0.5)]
     assert conn.execute(
         """
         SELECT final_score
@@ -175,6 +175,7 @@ def test_export_recommendations_url_encodes_lastfm_artist_path(tmp_path: Path) -
         artist_name="AC/DC ?#é",
         rank=1,
         created_at=datetime(2026, 6, 4, 12, 0, 0),
+        lastfm_url="https://www.last.fm/music/AC%2FDC%20%3F%23%C3%A9",
     )
     output = tmp_path / "recs.jsonl"
 
@@ -228,6 +229,8 @@ def _insert_export_row(
     created_at: datetime,
     final_score: float = 0.9,
     insert_run: bool = True,
+    lastfm_url: str = "",
+    score_band: str = "strong",
 ) -> None:
     conn.execute(
         """
@@ -268,9 +271,28 @@ def _insert_export_row(
             knownness,
             obviousness,
             diversity_penalty,
+            score_band,
+            evidence_source_count,
+            local_scrobble_count,
+            listened_day_count,
+            first_listened_at,
+            last_listened_at,
+            years_since_last_listen,
+            rediscovery_eligible,
+            trial_penalty,
+            candidate_artist_name,
+            canonical_artist_name,
+            musicbrainz_artist_mbid,
+            lastfm_url,
+            musicbrainz_url,
+            identity_confidence,
+            identity_warnings,
             explanation
         )
-        VALUES (?, ?, ?, ?, ?, 0.7, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ?)
+        VALUES (
+            ?, ?, ?, ?, ?, 0.7, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ?, ?,
+            NULL, NULL, NULL, NULL, NULL, NULL, 0.0, ?, ?, ?, ?, ?, 0.5, '[]', ?
+        )
         """,
         [
             run_id,
@@ -278,6 +300,13 @@ def _insert_export_row(
             artist_id,
             final_score,
             final_score,
+            score_band,
+            1,
+            artist_name,
+            artist_name,
+            "",
+            lastfm_url,
+            "",
             json.dumps(
                 {
                     "summary": f"{artist_name} is similar to seed artists.",
@@ -286,3 +315,43 @@ def _insert_export_row(
             ),
         ],
     )
+
+
+def test_export_includes_candidate_only_with_flag(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    run_id = "00000000-0000-0000-0000-000000000030"
+    created_at = datetime(2026, 6, 4, 12, 0, 0)
+
+    _insert_export_row(
+        conn,
+        run_id=run_id,
+        artist_id=801,
+        artist_name="Scored Artist",
+        rank=1,
+        created_at=created_at,
+        final_score=0.9,
+        score_band="strong",
+    )
+    _insert_export_row(
+        conn,
+        run_id=run_id,
+        artist_id=802,
+        artist_name="Candidate Only Artist",
+        rank=2,
+        created_at=created_at,
+        final_score=0.0,
+        insert_run=False,
+        score_band="candidate_only",
+    )
+
+    output_without = tmp_path / "without.jsonl"
+    exported = export_recommendations(conn, output_without, format_name="jsonl", run_id=run_id)
+    assert exported == 1
+
+    output_with = tmp_path / "with.jsonl"
+    exported_with = export_recommendations(
+        conn, output_with, format_name="jsonl", run_id=run_id, include_candidates=True
+    )
+    assert exported_with == 2
+    conn.close()

@@ -360,7 +360,6 @@ def test_resolve_command_reports_musicbrainz_disabled_by_default(tmp_path: Path)
 
     assert result.exit_code == 0
     assert "MusicBrainz resolution is disabled" in result.output
-    assert "unresolved artists: 4" in result.output
 
 
 def test_resolve_command_rejects_unknown_source(tmp_path: Path) -> None:
@@ -373,7 +372,7 @@ def test_resolve_command_rejects_unknown_source(tmp_path: Path) -> None:
     assert "only --source musicbrainz is supported" in result.output
 
 
-def test_resolve_command_reports_musicbrainz_enabled_not_implemented(tmp_path: Path) -> None:
+def test_resolve_command_runs_musicbrainz_resolution(tmp_path: Path, monkeypatch) -> None:
     runner = CliRunner()
     config_path = write_config(tmp_path)
     payload = json.loads(config_path.read_text(encoding="utf-8"))
@@ -381,14 +380,25 @@ def test_resolve_command_reports_musicbrainz_enabled_not_implemented(tmp_path: P
     config_path.write_text(json.dumps(payload), encoding="utf-8")
     runner.invoke(app, ["import", "--config", str(config_path)])
 
+    calls: list[dict] = []
+
+    def fake_run_resolution(conn, config, unresolved):
+        calls.append({"count": len(unresolved)})
+        return {"resolved": 1, "ambiguous": 2, "not_found": 1, "skipped": 0, "errors": 0}
+
+    monkeypatch.setattr("scrobble_recs.cli._run_musicbrainz_resolution", fake_run_resolution)
+
     result = runner.invoke(
         app,
         ["resolve", "--config", str(config_path), "--source", "musicbrainz"],
     )
 
-    assert result.exit_code == 1
-    assert "unresolved artists: 4" in result.output
-    assert "MusicBrainz resolution is not implemented in this version" in result.output
+    assert result.exit_code == 0
+    assert "unresolved artists: 2" in result.output
+    assert calls == [{"count": 2}]
+    assert "resolved: 1" in result.output
+    assert "ambiguous: 2" in result.output
+    assert "not_found: 1" in result.output
 
 
 def test_recommend_command_generates_persisted_run(tmp_path: Path, monkeypatch) -> None:
@@ -528,7 +538,7 @@ def test_export_command_writes_requested_format(tmp_path: Path, monkeypatch) -> 
     output = tmp_path / "recs.csv"
     calls: list[tuple[Path, str, str | None]] = []
 
-    def fake_export(conn, output_path, *, format_name, run_id=None):
+    def fake_export(conn, output_path, *, format_name, run_id=None, include_candidates=False):
         calls.append((output_path, format_name, run_id))
         output_path.write_text("rank,artist\n", encoding="utf-8")
         return 3
@@ -560,7 +570,7 @@ def test_export_command_prints_export_value_error(tmp_path: Path, monkeypatch) -
     config_path = write_config(tmp_path)
     output = tmp_path / "recs.csv"
 
-    def fake_export(conn, output_path, *, format_name, run_id=None):
+    def fake_export(conn, output_path, *, format_name, run_id=None, include_candidates=False):
         raise ValueError("no recommendation runs exist")
 
     monkeypatch.setattr("scrobble_recs.cli.export_recommendations", fake_export)

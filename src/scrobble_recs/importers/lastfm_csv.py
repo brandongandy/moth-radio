@@ -11,6 +11,7 @@ from typing import Any
 from duckdb import DuckDBPyConnection
 
 from scrobble_recs.config import EXPECTED_CSV_COLUMNS
+from scrobble_recs.models.recommend import compute_identity_confidence
 from scrobble_recs.normalize.strings import normalize_key
 from scrobble_recs.normalize.timestamps import parse_uts
 
@@ -93,6 +94,7 @@ def import_lastfm_csv(
             _insert_track_mbid_conflict_warnings(conn, next_warning_id)
             _insert_import_warnings(conn, next_warning_id)
             _insert_provisional_artists(conn, next_artist_id)
+            _update_identity_confidence(conn)
             _insert_provisional_tracks(conn)
             _rebuild_artist_listening_facts(conn)
         except Exception:
@@ -802,3 +804,22 @@ def _query_int(conn: DuckDBPyConnection, sql: str) -> int:
         return 0
     value: Any = result[0]
     return int(value or 0)
+
+
+def _update_identity_confidence(conn: DuckDBPyConnection) -> None:
+    rows = conn.execute(
+        """
+        SELECT artist_id, canonical_name, musicbrainz_artist_mbid, resolution_status
+        FROM artist
+        """
+    ).fetchall()
+    for artist_id, canonical_name, mbid, resolution_status in rows:
+        conf, warnings = compute_identity_confidence(
+            artist_name=str(canonical_name),
+            mbid=str(mbid) if mbid else None,
+            resolution_status=str(resolution_status) if resolution_status else "provisional_name",
+        )
+        conn.execute(
+            "UPDATE artist SET identity_confidence = ?, identity_warnings = ? WHERE artist_id = ?",
+            [conf, json.dumps(warnings), int(artist_id)],
+        )

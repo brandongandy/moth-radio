@@ -201,26 +201,28 @@ def enrich_command(
     config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
     source: Annotated[str, typer.Option("--source", help="Enrichment source to run.")] = "lastfm",
 ) -> None:
-    if source != "lastfm":
-        raise typer.BadParameter("only --source lastfm is supported in this milestone")
+    if source not in ("lastfm", "musicbrainz"):
+        raise typer.BadParameter("--source must be 'lastfm' or 'musicbrainz'")
 
     resolved_config = load_config(config)
     conn = initialize_database(resolved_config)
     try:
-        try:
-            console.print(
-                "Large Last.fm enrichment runs can take some time; "
-                "Last.fm API calls are rate limited, so please be patient."
-            )
-            stats = _run_lastfm_enrichment_with_progress(conn, resolved_config)
-        except RuntimeError as exc:
-            console.print(f"Error: {exc}")
-            raise typer.Exit(code=1) from exc
+        if source == "lastfm":
+            try:
+                console.print(
+                    "Large Last.fm enrichment runs can take some time; "
+                    "Last.fm API calls are rate limited, so please be patient."
+                )
+                stats = _run_lastfm_enrichment_with_progress(conn, resolved_config)
+            except RuntimeError as exc:
+                console.print(f"Error: {exc}")
+                raise typer.Exit(code=1) from exc
+            console.print("Last.fm enrichment complete")
+            _print_enrichment_stats(stats)
+        else:
+            _run_musicbrainz_enrichment(conn, resolved_config)
     finally:
         conn.close()
-
-    console.print("Last.fm enrichment complete")
-    _print_enrichment_stats(stats)
 
 
 @app.command("enrich-plan")
@@ -229,41 +231,43 @@ def enrich_plan_command(
     source: Annotated[str, typer.Option("--source", help="Enrichment source.")] = "lastfm",
 ) -> None:
     """Plan enrichment work without calling the network."""
-    if source != "lastfm":
-        raise typer.BadParameter("only --source lastfm is supported")
+    if source not in ("lastfm", "musicbrainz"):
+        raise typer.BadParameter("--source must be 'lastfm' or 'musicbrainz'")
 
     resolved_config = load_config(config)
     conn = initialize_database(resolved_config)
     try:
-        plan = plan_enrichment(
-            conn,
-            source=source,
-            seed_artist_limit=resolved_config.enrichment.seed_artist_limit,
-            similar_artists_per_seed=resolved_config.enrichment.similar_artists_per_seed,
-            top_tags_per_artist=resolved_config.enrichment.top_tags_per_artist,
-            tag_top_artists_limit=resolved_config.enrichment.tag_top_artists_limit,
-        )
+        if source == "lastfm":
+            plan = plan_enrichment(
+                conn,
+                source=source,
+                seed_artist_limit=resolved_config.enrichment.seed_artist_limit,
+                similar_artists_per_seed=resolved_config.enrichment.similar_artists_per_seed,
+                top_tags_per_artist=resolved_config.enrichment.top_tags_per_artist,
+                tag_top_artists_limit=resolved_config.enrichment.tag_top_artists_limit,
+            )
+            console.print(f"{source.capitalize()} enrichment plan")
+            console.print("")
+            console.print("artist.getSimilar:")
+            console.print(f"  queued: {plan.similar_artist_queued}")
+            console.print(f"  cached fresh: {plan.similar_artist_cached_fresh}")
+            console.print(f"  missing: {plan.similar_artist_queued}")
+            console.print("")
+            console.print("artist.getTopTags:")
+            console.print(f"  queued: {plan.artist_tag_queued}")
+            console.print(f"  cached fresh: {plan.artist_tag_cached_fresh}")
+            console.print(f"  missing: {plan.artist_tag_queued}")
+            console.print("")
+            console.print("tag.getTopArtists:")
+            console.print(f"  queued: {plan.tag_top_artist_queued}")
+            console.print(f"  cached fresh: {plan.tag_top_artist_cached_fresh}")
+            console.print(f"  missing: {plan.tag_top_artist_queued}")
+            console.print("")
+            console.print(f"total queued: {plan.total_queued}")
+        else:
+            _print_musicbrainz_enrichment_plan(conn, resolved_config)
     finally:
         conn.close()
-
-    console.print(f"{source.capitalize()} enrichment plan")
-    console.print("")
-    console.print("artist.getSimilar:")
-    console.print(f"  queued: {plan.similar_artist_queued}")
-    console.print(f"  cached fresh: {plan.similar_artist_cached_fresh}")
-    console.print(f"  missing: {plan.similar_artist_queued}")
-    console.print("")
-    console.print("artist.getTopTags:")
-    console.print(f"  queued: {plan.artist_tag_queued}")
-    console.print(f"  cached fresh: {plan.artist_tag_cached_fresh}")
-    console.print(f"  missing: {plan.artist_tag_queued}")
-    console.print("")
-    console.print("tag.getTopArtists:")
-    console.print(f"  queued: {plan.tag_top_artist_queued}")
-    console.print(f"  cached fresh: {plan.tag_top_artist_cached_fresh}")
-    console.print(f"  missing: {plan.tag_top_artist_queued}")
-    console.print("")
-    console.print(f"total queued: {plan.total_queued}")
 
 
 @app.command("enrich-status")
@@ -272,8 +276,8 @@ def enrich_status_command(
     source: Annotated[str, typer.Option("--source", help="Enrichment source.")] = "lastfm",
 ) -> None:
     """Show enrichment queue status."""
-    if source != "lastfm":
-        raise typer.BadParameter("only --source lastfm is supported")
+    if source not in ("lastfm", "musicbrainz"):
+        raise typer.BadParameter("--source must be 'lastfm' or 'musicbrainz'")
 
     resolved_config = load_config(config)
     conn = initialize_database(resolved_config)
@@ -297,8 +301,8 @@ def enrich_retry_command(
     source: Annotated[str, typer.Option("--source", help="Enrichment source.")] = "lastfm",
 ) -> None:
     """Retry failed enrichment queue entries."""
-    if source != "lastfm":
-        raise typer.BadParameter("only --source lastfm is supported")
+    if source not in ("lastfm", "musicbrainz"):
+        raise typer.BadParameter("--source must be 'lastfm' or 'musicbrainz'")
 
     resolved_config = load_config(config)
     conn = initialize_database(resolved_config)
@@ -631,6 +635,67 @@ def _update_artist_resolution(
         f"UPDATE artist SET {', '.join(updates)} WHERE artist_id = ?",
         params,
     )
+
+
+def _print_musicbrainz_enrichment_plan(
+    conn: DuckDBPyConnection,
+    resolved_config: ScrobbleRecsConfig,
+) -> None:
+    unresolved_row = conn.execute(
+        """
+        SELECT count(*) FROM artist
+        WHERE coalesce(identity_confidence, 0.0) < 0.80
+          AND (resolution_status IS NULL
+               OR resolution_status = 'unresolved'
+               OR resolution_status LIKE 'provisional%')
+        """
+    ).fetchone()
+    unresolved_count = int(unresolved_row[0]) if unresolved_row else 0
+
+    resolved_row = conn.execute(
+        """
+        SELECT count(*) FROM artist_identity_resolution
+        WHERE source = 'musicbrainz'
+        """
+    ).fetchone()
+    resolved_count = int(resolved_row[0]) if resolved_row else 0
+
+    console.print("Musicbrainz enrichment plan")
+    console.print(f"  unresolved artists: {unresolved_count}")
+    console.print(f"  previously resolved: {resolved_count}")
+
+
+def _run_musicbrainz_enrichment(
+    conn: DuckDBPyConnection,
+    resolved_config: ScrobbleRecsConfig,
+) -> None:
+    if not resolved_config.apis.musicbrainz.enabled:
+        console.print("MusicBrainz enrichment is disabled in config")
+        return
+
+    unresolved = conn.execute(
+        """
+        SELECT artist_id, canonical_name, artist_key, identity_confidence
+        FROM artist
+        WHERE coalesce(identity_confidence, 0.0) < 0.80
+          AND (resolution_status IS NULL
+               OR resolution_status = 'unresolved'
+               OR resolution_status LIKE 'provisional%')
+        ORDER BY identity_confidence NULLS FIRST, artist_id
+        """
+    ).fetchall()
+
+    console.print(f"unresolved artists: {len(unresolved)}")
+    if not unresolved:
+        return
+
+    resolve_stats = _run_musicbrainz_resolution(conn, resolved_config, unresolved)
+
+    console.print(f"resolved: {resolve_stats['resolved']}")
+    console.print(f"ambiguous: {resolve_stats['ambiguous']}")
+    console.print(f"not_found: {resolve_stats['not_found']}")
+    console.print(f"skipped: {resolve_stats['skipped']}")
+    console.print(f"errors: {resolve_stats['errors']}")
 
 
 @app.command("recommend")

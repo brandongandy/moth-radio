@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from pathlib import Path
 
 import duckdb
@@ -419,7 +420,7 @@ def test_recommend_command_generates_persisted_run(tmp_path: Path, monkeypatch) 
         subject = "candidate artists"
         status = "processing"
 
-    def fake_generate(conn, config, *, limit, mode=None, progress_callback=None):
+    def fake_generate(conn, config, *, limit, mode=None, history_window=None, progress_callback=None):
         calls.append((config.app.name, limit, mode))
         assert progress_callback is not None
         progress_callback(FakeProgress())
@@ -449,7 +450,7 @@ def test_recommend_command_passes_mode(tmp_path: Path, monkeypatch) -> None:
         mode = "fresh"
         recommendations = 5
 
-    def fake_generate(conn, config, *, limit, mode=None, progress_callback=None):
+    def fake_generate(conn, config, *, limit, mode=None, history_window=None, progress_callback=None):
         calls.append((config.app.name, limit, mode))
         return FakeRecommendationStats()
 
@@ -473,6 +474,51 @@ def test_recommend_command_passes_mode(tmp_path: Path, monkeypatch) -> None:
     assert "mode: fresh" in result.output
 
 
+def test_recommend_command_passes_explicit_history_window(tmp_path: Path, monkeypatch) -> None:
+    runner = CliRunner()
+    config_path = write_config(tmp_path)
+    windows = []
+
+    class FakeRecommendationStats:
+        run_id = "00000000-0000-0000-0000-000000000001"
+        mode = "balanced"
+        recommendations = 1
+
+    def fake_generate(conn, config, *, limit, mode=None, history_window=None, progress_callback=None):
+        windows.append(history_window)
+        return FakeRecommendationStats()
+
+    monkeypatch.setattr("scrobble_recs.cli.generate_recommendations", fake_generate)
+
+    result = runner.invoke(
+        app,
+        [
+            "recommend",
+            "--config",
+            str(config_path),
+            "--since",
+            "2024-01-01T00:00:00",
+            "--until",
+            "2024-07-01T00:00:00",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert windows[0].start == datetime(2024, 1, 1)
+    assert windows[0].end == datetime(2024, 7, 1)
+    assert "history window: 2024-01-01 00:00:00 to 2024-07-01 00:00:00" in result.output
+
+
+def test_recommend_command_rejects_malformed_history_window_timestamp(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["recommend", "--config", str(write_config(tmp_path)), "--since", "not-a-timestamp"],
+    )
+
+    assert result.exit_code != 0
+    assert "invalid timestamp" in result.output
+
+
 def test_recommend_command_rejects_nonpositive_limit(tmp_path: Path, monkeypatch) -> None:
     runner = CliRunner()
     config_path = write_config(tmp_path)
@@ -483,7 +529,7 @@ def test_recommend_command_rejects_nonpositive_limit(tmp_path: Path, monkeypatch
         mode = "balanced"
         recommendations = 0
 
-    def fake_generate(conn, config, *, limit, mode=None, progress_callback=None):
+    def fake_generate(conn, config, *, limit, mode=None, history_window=None, progress_callback=None):
         calls.append(limit)
         return FakeRecommendationStats()
 
@@ -503,7 +549,7 @@ def test_recommend_command_prints_generation_value_error(
     runner = CliRunner()
     config_path = write_config(tmp_path)
 
-    def fake_generate(conn, config, *, limit, mode=None, progress_callback=None):
+    def fake_generate(conn, config, *, limit, mode=None, history_window=None, progress_callback=None):
         raise ValueError("no recommendation candidates found")
 
     monkeypatch.setattr("scrobble_recs.cli.generate_recommendations", fake_generate)
@@ -518,7 +564,7 @@ def test_recommend_command_prints_invalid_mode_error(tmp_path: Path, monkeypatch
     runner = CliRunner()
     config_path = write_config(tmp_path)
 
-    def fake_generate(conn, config, *, limit, mode=None, progress_callback=None):
+    def fake_generate(conn, config, *, limit, mode=None, history_window=None, progress_callback=None):
         raise ValueError("unsupported recommendation mode 'fresh'")
 
     monkeypatch.setattr("scrobble_recs.cli.generate_recommendations", fake_generate)

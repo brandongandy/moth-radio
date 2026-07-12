@@ -23,6 +23,7 @@ from scrobble_recs.models.feedback import (
 from scrobble_recs.models.listening import refresh_artist_listening_scores
 from scrobble_recs.models.modes import RecommendationModeSettings, resolve_recommendation_mode
 from scrobble_recs.models.profile import SeedArtist, select_seed_artists
+from scrobble_recs.models.profile_window import ListeningWindow
 
 RecommendationProgressPhase: TypeAlias = Literal[
     "refresh_listening",
@@ -130,6 +131,7 @@ def generate_recommendations(
     limit: int,
     mode: str | None = None,
     as_of: datetime | None = None,
+    history_window: ListeningWindow | None = None,
     progress_callback: RecommendationProgressCallback | None = None,
 ) -> RecommendationStats:
     if limit < 1:

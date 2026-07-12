@@ -178,6 +178,7 @@ def generate_recommendations(
     as_of: datetime | None = None,
     history_window: ListeningWindow | None = None,
     local_history_end: datetime | None = None,
+    historical_cutoff: datetime | None = None,
     progress_callback: RecommendationProgressCallback | None = None,
 ) -> RecommendationStats:
     if limit < 1:
@@ -205,7 +206,8 @@ def generate_recommendations(
         subject="artist listening scores",
         status="processing",
     )
-    refresh_artist_listening_scores(conn, as_of=resolved_as_of)
+    if local_history_end is None:
+        refresh_artist_listening_scores(conn, as_of=resolved_as_of)
     _report_progress(
         progress_callback,
         phase="refresh_listening",
@@ -222,11 +224,12 @@ def generate_recommendations(
         subject=resolved_mode,
         status="processing",
     )
-    feedback_profile = load_feedback_profile(conn)
+    feedback_profile = load_feedback_profile(conn, as_of=historical_cutoff)
     cooldown_artist_ids = load_cooldown_artist_ids(
         conn,
         as_of=resolved_as_of,
         days=config.recommendation.feedback_cooldown_days,
+        until=historical_cutoff,
     )
     seeds = select_seed_artists(
         conn,
@@ -285,7 +288,12 @@ def generate_recommendations(
         feedback_profile,
         local_history_end=local_history_end,
     )
-    fatigue_by_artist = _load_fatigue_by_artist(conn, config, feedback_profile)
+    fatigue_by_artist = _load_fatigue_by_artist(
+        conn,
+        config,
+        feedback_profile,
+        as_of=historical_cutoff,
+    )
     _report_progress(
         progress_callback,
         phase="load_candidates",
@@ -621,36 +629,33 @@ def _load_scoring_data(
         candidates.add(artist)
         tag_ranks_by_artist.setdefault(artist, []).append((_normalize_tag_key(tag), int(tag_rank)))
 
-    listening_rows = conn.execute(
-        """
-        SELECT
-            artist_id,
-            coalesce(knownness, 0.0),
-            coalesce(rediscovery_score, 0.0),
-            coalesce(play_count, 0),
-            coalesce(active_days, 0),
-            first_played_at,
-            last_played_at
-        FROM artist_listening_fact
-        """
-    ).fetchall()
-    listening_by_artist = {
-        int(row[0]): (
-            float(row[1]),
-            float(row[2]),
-            int(row[3] or 0),
-            int(row[4] or 0),
-            row[5],
-            row[6],
-        )
-        for row in listening_rows
-    }
     if local_history_end is not None:
-        listening_by_artist = _with_local_history_before(
-            conn,
-            listening_by_artist,
-            end=local_history_end,
-        )
+        listening_by_artist = _load_local_history_before(conn, end=local_history_end)
+    else:
+        listening_rows = conn.execute(
+            """
+            SELECT
+                artist_id,
+                coalesce(knownness, 0.0),
+                coalesce(rediscovery_score, 0.0),
+                coalesce(play_count, 0),
+                coalesce(active_days, 0),
+                first_played_at,
+                last_played_at
+            FROM artist_listening_fact
+            """
+        ).fetchall()
+        listening_by_artist = {
+            int(row[0]): (
+                float(row[1]),
+                float(row[2]),
+                int(row[3] or 0),
+                int(row[4] or 0),
+                row[5],
+                row[6],
+            )
+            for row in listening_rows
+        }
 
     identity_by_artist = {
         int(artist_id): float(conf or 0.50)
@@ -695,12 +700,8 @@ def _load_scoring_data(
     )
 
 
-def _with_local_history_before(
+def _load_local_history_before(
     conn: DuckDBPyConnection,
-    listening_by_artist: dict[
-        int,
-        tuple[float, float, int, int, datetime | None, datetime | None],
-    ],
     *,
     end: datetime,
 ) -> dict[int, tuple[float, float, int, int, datetime | None, datetime | None]]:
@@ -749,14 +750,8 @@ def _with_local_history_before(
             last_played_at,
         ) in rows
     }
-    result: dict[int, tuple[float, float, int, int, datetime | None, datetime | None]] = {}
-    for artist_id in listening_by_artist | scoped_listening:
-        scoped = scoped_listening.get(artist_id)
-        if scoped is None:
-            result[artist_id] = (0.0, 0.0, 0, 0, None, None)
-            continue
-        scores, play_count, active_days, first_played_at, last_played_at = scoped
-        result[artist_id] = (
+    return {
+        artist_id: (
             scores.knownness,
             scores.rediscovery_score,
             play_count,
@@ -764,25 +759,39 @@ def _with_local_history_before(
             first_played_at,
             last_played_at,
         )
-    return result
+        for artist_id, (
+            scores,
+            play_count,
+            active_days,
+            first_played_at,
+            last_played_at,
+        ) in scoped_listening.items()
+    }
 
 
 def _load_fatigue_by_artist(
     conn: DuckDBPyConnection,
     config: ScrobbleRecsConfig,
     feedback_profile: FeedbackProfile,
+    *,
+    as_of: datetime | None = None,
 ) -> dict[int, _FatiguePenalty]:
     fatigue = config.recommendation.fatigue
     if not fatigue.enabled:
         return {}
+    cutoff_clause = "" if as_of is None else "WHERE created_at < ?"
+    params: list[object] = (
+        [fatigue.lookback_runs] if as_of is None else [as_of, fatigue.lookback_runs]
+    )
     recent_runs = conn.execute(
-        """
+        f"""
         SELECT run_id
         FROM recommendation_run
+        {cutoff_clause}
         ORDER BY created_at DESC
         LIMIT ?
         """,
-        [fatigue.lookback_runs],
+        params,
     ).fetchall()
     run_ids = [row[0] for row in recent_runs]
     if not run_ids:
@@ -1106,7 +1115,7 @@ def _score_candidates(
             fatigue=candidate.fatigue,
             serendipity=serendipity,
             explanation={},
-            score_band="candidate_only" if final_score <= 0.0 else "candidate_only",
+            score_band="candidate_only",
             normalized_score=0.0,
             evidence_source_count=evidence_count,
             trial_penalty=candidate.trial_penalty,

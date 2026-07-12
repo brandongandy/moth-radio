@@ -204,7 +204,8 @@ data:
   high-affinity tags.
 - Applies local feedback from prior recommendation runs.
 - Persists inspectable JSON explanations for each recommendation.
-- Exports persisted runs to CSV or JSONL.
+- Exports persisted runs with score, evidence, history-window, quality-gate, and
+  explanation fields to CSV or JSONL.
 
 The command shows phase progress while refreshing local scores, selecting seeds,
 building profiles, loading candidates, scoring, reranking, building
@@ -212,11 +213,16 @@ explanations, and persisting the run.
 
 ```bash
 scrobble-recs recommend --config config.example.json --limit 500
+scrobble-recs recommend --config config.example.json --since 2024-01-01 --until 2025-01-01
 scrobble-recs export --config config.example.json --format csv --output recs.csv
 scrobble-recs export --config config.example.json --format jsonl --output recs.jsonl
 ```
 
 `recommend` does not call live APIs. Run `enrich --source lastfm` first to populate the local graph.
+Without `--since` and `--until`, seed selection uses the configured profile window
+(12 calendar months by default) ending at generation time. Explicit `--since` /
+`--until` bounds use the same half-open interval convention: the start is included
+and the end is excluded.
 Persisted `recommendation.final_score` values are raw ranking utility scores,
 so their absolute magnitude can be small. User-facing recommendation lists and
 exports normalize the score within each run so the top recommendation displays
@@ -264,13 +270,21 @@ train/test split:
 
 ```bash
 scrobble-recs evaluate --config config.example.json --split-date 2023-01-01
-scrobble-recs evaluate --config config.example.json --train-until 2022-12-31 --test-from 2023-01-01
+scrobble-recs evaluate --config config.example.json --train-until 2022-12-31 --test-from 2023-01-01 --test-until 2023-04-01
 ```
 
-`evaluate` builds a profile from the training period, generates
-recommendations, and measures recall, NDCG, tag diversity, knownness,
-obviousness, rediscovery hit rate, and external candidate share against the
-test period. It does not call live APIs.
+`evaluate` uses the configured profile window (12 calendar months by default)
+ending at `train_until` for its seed profile, then generates recommendations from
+that pre-cutoff view only. Outcomes are artists first heard in the half-open
+`[test_from, test_until)` horizon, with no earlier non-duplicate local scrobble.
+Specify `--test-until` for an explicit horizon; otherwise the command derives a
+90-day horizon from `test_from`. `--split-date` uses one shared, exclusive
+training boundary: training ends there and outcomes start there.
+
+The report includes precision@50, recall, NDCG, eligible-candidate coverage,
+novelty, cooldown/permanent-exclusion rate, tag diversity, knownness,
+obviousness, rediscovery hit rate, and external candidate share. It does not
+call live APIs.
 
 ## Recommendation Algorithm
 
@@ -292,7 +306,9 @@ probably already know this" recommendations without hard-excluding every
 popular artist. Artists shown in recent recommendation runs receive a fatigue
 penalty unless positive feedback says they should remain prominent. A diversity
 reranker keeps the top of the list from collapsing into one tag or similarity
-neighborhood.
+neighborhood. Discovery recommendations must pass direct persisted graph
+evidence: either support from independent seed artists or a strong seed edge
+with tag reinforcement.
 
 `recommend` supports mode-specific ranking from local data:
 
@@ -334,7 +350,10 @@ Supported actions are `save`, `reject`, `already_know`, `too_obvious`,
 By default the command records the event and reranks that persisted run. Use
 `--no-rerank` to record feedback only. `recommend` consumes feedback as artist
 boosts/suppression, tag boosts/suppression, and lightweight
-similarity-neighborhood adjustments.
+similarity-neighborhood adjustments. `hide_artist` is permanent local
+suppression. Recent recommendation votes are excluded for the configured
+30-day cooldown (the default), so saved, rejected, already-known, and similar
+feedback does not immediately resurface the same artist.
 
 ## How To Contribute
 

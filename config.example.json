@@ -87,11 +87,16 @@
     },
     "quality_gate": {
       "enabled": true,
-      "rediscovery_requires_taste_match": true,
-      "min_lastfm_similarity_score": 0.01,
-      "min_tag_similarity_score": 0.05,
-      "min_positive_feedback_score": 0.05,
-      "rediscovery_mode_multiplier": 0.75
+      "rediscovery_requires_taste_match": true
+    },
+    "discovery_evidence": {
+      "minimum_seed_edge": 0.05,
+      "strong_seed_edge": 0.30,
+      "minimum_seed_count": 2,
+      "minimum_tag_reinforcement": 0.05
+    },
+    "calibration": {
+      "enabled": true
     },
     "fatigue": {
       "enabled": true,

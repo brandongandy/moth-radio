@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import warnings
 from math import isfinite
 from pathlib import Path
 from typing import Any
@@ -276,28 +277,71 @@ class DiversityConfig(BaseModel):
 
 
 class QualityGateConfig(BaseModel):
+    """Rediscovery-specific eligibility settings.
+
+    Standard discovery always requires ``discovery_evidence`` regardless of
+    ``enabled``. The legacy score thresholds are accepted only to provide a
+    visible migration path for existing configuration files.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
     rediscovery_requires_taste_match: bool = True
-    min_lastfm_similarity_score: float = 0.01
-    min_tag_similarity_score: float = 0.05
-    min_positive_feedback_score: float = 0.05
-    rediscovery_mode_multiplier: float = 0.75
 
-    @model_validator(mode="after")
-    def validate_thresholds(self) -> QualityGateConfig:
-        for field_name in (
+    @model_validator(mode="before")
+    @classmethod
+    def remove_legacy_thresholds(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        legacy_fields = {
             "min_lastfm_similarity_score",
             "min_tag_similarity_score",
             "min_positive_feedback_score",
+            "rediscovery_mode_multiplier",
+        }
+        present_legacy_fields = sorted(legacy_fields.intersection(value))
+        if not present_legacy_fields:
+            return value
+        warnings.warn(
+            "recommendation.quality_gate settings "
+            f"{', '.join(present_legacy_fields)} are deprecated and no longer affect "
+            "recommendation admission; configure discovery_evidence instead.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return {key: item for key, item in value.items() if key not in legacy_fields}
+
+
+class DiscoveryEvidenceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    minimum_seed_edge: float = 0.05
+    strong_seed_edge: float = 0.30
+    minimum_seed_count: int = 2
+    minimum_tag_reinforcement: float = 0.05
+
+    @model_validator(mode="after")
+    def validate_thresholds(self) -> DiscoveryEvidenceConfig:
+        for field_name in (
+            "minimum_seed_edge",
+            "strong_seed_edge",
+            "minimum_tag_reinforcement",
         ):
             value = float(getattr(self, field_name))
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{field_name} must be between 0 and 1")
-        if not 0.0 < self.rediscovery_mode_multiplier <= 1.0:
-            raise ValueError("rediscovery_mode_multiplier must be greater than 0 and at most 1")
+        if self.strong_seed_edge < self.minimum_seed_edge:
+            raise ValueError("strong_seed_edge must be >= minimum_seed_edge")
+        if self.minimum_seed_count < 1:
+            raise ValueError("minimum_seed_count must be at least 1")
         return self
+
+
+class CalibrationConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
 
 
 class FatigueConfig(BaseModel):
@@ -380,6 +424,8 @@ class RecommendationConfig(BaseModel):
     weights: RecommendationWeightsConfig = Field(default_factory=RecommendationWeightsConfig)
     diversity: DiversityConfig = Field(default_factory=DiversityConfig)
     quality_gate: QualityGateConfig = Field(default_factory=QualityGateConfig)
+    discovery_evidence: DiscoveryEvidenceConfig = Field(default_factory=DiscoveryEvidenceConfig)
+    calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
     fatigue: FatigueConfig = Field(default_factory=FatigueConfig)
     tag_profile: TagProfileConfig = Field(default_factory=TagProfileConfig)
 
@@ -505,11 +551,14 @@ def default_config_document() -> dict[str, Any]:
             "quality_gate": {
                 "enabled": True,
                 "rediscovery_requires_taste_match": True,
-                "min_lastfm_similarity_score": 0.01,
-                "min_tag_similarity_score": 0.05,
-                "min_positive_feedback_score": 0.05,
-                "rediscovery_mode_multiplier": 0.75,
             },
+            "discovery_evidence": {
+                "minimum_seed_edge": 0.05,
+                "strong_seed_edge": 0.30,
+                "minimum_seed_count": 2,
+                "minimum_tag_reinforcement": 0.05,
+            },
+            "calibration": {"enabled": True},
             "fatigue": {
                 "enabled": True,
                 "lookback_runs": 5,

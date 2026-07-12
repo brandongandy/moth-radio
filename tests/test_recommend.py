@@ -55,6 +55,8 @@ def write_config(tmp_path: Path) -> Path:
                     "similar_artists_per_seed": 10,
                     "min_seed_scrobbles": 2,
                     "obviousness": {"tag_top_artists_limit": 100},
+                    "discovery_evidence": {"minimum_seed_count": 1},
+                    "calibration": {"enabled": False},
                 },
             }
         ),
@@ -97,6 +99,8 @@ def write_config_with_obviousness_disabled(tmp_path: Path) -> Path:
                         "enabled": False,
                         "tag_top_artists_limit": 100,
                     },
+                    "discovery_evidence": {"minimum_seed_count": 1},
+                    "calibration": {"enabled": False},
                 },
             }
         ),
@@ -1288,7 +1292,7 @@ def test_generate_recommendations_keeps_saved_current_candidate_with_outgoing_ed
 
     assert _recommendation_names(conn, stats.run_id)[:2] == [
         "Saved Candidate With Edges",
-        "Saved Candidate Neighbor",
+        "Higher Similarity Neutral",
     ]
     row = conn.execute(
         """
@@ -2104,10 +2108,12 @@ def _insert_run_for_feedback(conn, *, run_id: str) -> None:
     )
 
 
-def test_generate_recommendations_skips_rediscovery_without_current_taste_match(
+def test_generate_recommendations_rediscovery_requires_taste_match_when_gate_is_disabled(
     tmp_path: Path,
 ) -> None:
     config = load_config(write_config(tmp_path))
+    config.recommendation.quality_gate.enabled = False
+    config.recommendation.quality_gate.rediscovery_requires_taste_match = True
     conn = initialize_database(config)
     _insert_scoring_artist(
         conn,
@@ -2120,15 +2126,20 @@ def test_generate_recommendations_skips_rediscovery_without_current_taste_match(
         rediscovery_score=0.0,
     )
     _insert_artist_tag(conn, artist_id=500, tag="post-punk", weight=100.0)
-    _insert_scoring_artist(
-        conn,
-        artist_id=501,
-        name="Old Random Local",
-        play_count=5,
-        lifetime_weight=0.0,
-        recent_weight=0.0,
-        knownness=0.02,
-        rediscovery_score=0.95,
+    conn.execute(
+        """
+        INSERT INTO artist (artist_id, canonical_name, artist_key, lastfm_name)
+        VALUES (501, 'Old Random Local', 'old-random-local', 'Old Random Local')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO artist_listening_fact (
+            artist_id, play_count, track_count, active_months, active_days,
+            first_played_at, last_played_at
+        )
+        VALUES (501, 1, 3, 2, 3, '2018-01-01', '2023-01-01')
+        """
     )
     conn.execute(
         """
@@ -2140,7 +2151,83 @@ def test_generate_recommendations_skips_rediscovery_without_current_taste_match(
             tag_count,
             fetched_at
         )
-        VALUES ('spoken word', 501, 'lastfm', 91, 1.0, current_timestamp)
+        VALUES ('post-punk', 501, 'lastfm', 91, 1.0, current_timestamp)
+        """
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=5,
+        mode="rediscovery",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    assert stats.recommendations == 0
+    assert _recommendation_names(conn, stats.run_id) == []
+    eligibility_state, eligibility_reasons, quality_gate = conn.execute(
+        """
+        SELECT eligibility_state, eligibility_reasons, quality_gate
+        FROM recommendation_candidate
+        WHERE run_id = CAST(? AS UUID) AND artist_id = 501
+        """,
+        [stats.run_id],
+    ).fetchone()
+    assert eligibility_state == "rejected"
+    assert json.loads(eligibility_reasons) == ["quality_gate"]
+    assert json.loads(quality_gate)["reasons"] == ["missing_direct_graph_evidence"]
+    conn.close()
+
+
+def test_generate_recommendations_rejects_tag_only_and_calibrates_direct_evidence(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    config.recommendation.discovery_evidence.minimum_seed_count = 2
+    config.recommendation.calibration.enabled = True
+    config.recommendation.quality_gate.enabled = False
+    conn = initialize_database(config)
+    for artist_id, name in ((700, "First Seed"), (701, "Second Seed")):
+        _insert_scoring_artist(
+            conn,
+            artist_id=artist_id,
+            name=name,
+            play_count=40,
+            lifetime_weight=8.0,
+            recent_weight=8.0,
+            knownness=0.9,
+            rediscovery_score=0.0,
+        )
+        _insert_artist_tag(conn, artist_id=artist_id, tag="post-punk", weight=100.0)
+
+    conn.execute(
+        """
+        INSERT INTO artist (artist_id, canonical_name, artist_key, lastfm_name)
+        VALUES (702, 'Broad Tag Only', 'broad-tag-only', 'Broad Tag Only')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO tag_top_artist (tag, artist_id, source, tag_rank, tag_count, fetched_at)
+        VALUES ('post-punk', 702, 'lastfm', 30, 1.0, current_timestamp)
+        """
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=700,
+        candidate_id=703,
+        candidate_name="Two Seed Candidate",
+        tag="post-punk",
+        tag_rank=31,
+        similarity=0.10,
+    )
+    conn.execute(
+        """
+        INSERT INTO artist_similarity_edge (
+            source_artist_id, target_artist_id, source,
+            source_score, normalized_score, evidence, fetched_at
+        )
+        VALUES (701, 703, 'lastfm', 0.08, 0.08, '{}', current_timestamp)
         """
     )
 
@@ -2152,8 +2239,35 @@ def test_generate_recommendations_skips_rediscovery_without_current_taste_match(
         as_of=datetime(2026, 6, 4),
     )
 
-    assert stats.recommendations == 0
-    assert _recommendation_names(conn, stats.run_id) == []
+    assert _recommendation_names(conn, stats.run_id) == ["Two Seed Candidate"]
+    (explanation_json,) = conn.execute(
+        "SELECT explanation FROM recommendation WHERE run_id = ? AND artist_id = 703",
+        [stats.run_id],
+    ).fetchone()
+    explanation = json.loads(explanation_json)
+    assert explanation["raw_components"] == {
+        "feedback": 0.0,
+        "lastfm_similarity": pytest.approx(0.09),
+        "tag_similarity": 1.0,
+    }
+    assert explanation["calibrated_components"] == {
+        "feedback": 0.0,
+        "lastfm_similarity": 1.0,
+        "tag_similarity": 1.0,
+    }
+
+    (quality_gate_json,) = conn.execute(
+        """
+        SELECT quality_gate
+        FROM recommendation_candidate
+        WHERE run_id = CAST(? AS UUID) AND artist_id = 702
+        """,
+        [stats.run_id],
+    ).fetchone()
+    quality_gate = json.loads(quality_gate_json)
+    assert quality_gate["passed"] is False
+    assert quality_gate["raw_components"]["tag_similarity"] > 0.0
+    assert quality_gate["calibrated_components"]["tag_similarity"] == 0.0
     conn.close()
 
 
@@ -2221,24 +2335,14 @@ def test_generate_recommendations_allows_rediscovery_with_tag_match(tmp_path: Pa
     ).fetchone()
     explanation = json.loads(explanation_json)
     assert explanation["quality_gate"]["passed"] is True
-    assert "tag_similarity" in explanation["quality_gate"]["reasons"]
+    assert "independent_seed_support" in explanation["quality_gate"]["reasons"]
     conn.close()
 
 
-def test_generate_recommendations_rediscovery_mode_relaxes_gate_thresholds(
+def test_generate_recommendations_keeps_rediscovery_scope_separate_from_balanced(
     tmp_path: Path,
 ) -> None:
     config_path = write_config(tmp_path)
-    raw = json.loads(config_path.read_text(encoding="utf-8"))
-    raw["recommendation"]["quality_gate"] = {
-        "enabled": True,
-        "rediscovery_requires_taste_match": True,
-        "min_lastfm_similarity_score": 0.50,
-        "min_tag_similarity_score": 0.50,
-        "min_positive_feedback_score": 0.05,
-        "rediscovery_mode_multiplier": 0.50,
-    }
-    config_path.write_text(json.dumps(raw), encoding="utf-8")
     config = load_config(config_path)
     conn = initialize_database(config)
     _insert_scoring_artist(
@@ -2277,8 +2381,8 @@ def test_generate_recommendations_rediscovery_mode_relaxes_gate_thresholds(
         as_of=datetime(2026, 6, 4),
     )
 
-    assert _recommendation_names(conn, balanced.run_id) == []
-    assert _recommendation_names(conn, rediscovery.run_id) == ["Relaxed Threshold Candidate"]
+    assert _recommendation_names(conn, balanced.run_id) == ["Relaxed Threshold Candidate"]
+    assert _recommendation_names(conn, rediscovery.run_id) == []
     conn.close()
 
 

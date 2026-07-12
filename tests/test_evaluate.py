@@ -98,13 +98,17 @@ def test_evaluate_reports_basic_metrics_with_split_date(tmp_path: Path) -> None:
         result = evaluate_recommendations(
             conn,
             config,
-            train_until=datetime(2024, 1, 2),
+            train_until=datetime(2024, 1, 3),
             test_from=datetime(2024, 1, 3),
         )
 
         assert isinstance(result, EvaluationResult)
-        assert result.train_until == "2024-01-02T00:00:00"
+        assert result.train_until == "2024-01-03T00:00:00"
         assert result.test_from == "2024-01-03T00:00:00"
+        (seed_summary_json,) = conn.execute(
+            "SELECT seed_summary FROM recommendation_run ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        assert json.loads(seed_summary_json)["history_window"]["source"] == "explicit"
         assert result.recommendations_generated > 0
         assert 0.0 <= result.recall_at_50 <= 1.0
         assert 0.0 <= result.recall_at_100 <= 1.0
@@ -125,7 +129,7 @@ def test_evaluate_empty_test_period_returns_zero_recall(tmp_path: Path) -> None:
         result = evaluate_recommendations(
             conn,
             config,
-            train_until=datetime(2024, 1, 2),
+            train_until=datetime(2024, 1, 3),
             test_from=datetime(2030, 1, 1),
         )
 
@@ -142,7 +146,7 @@ def test_evaluate_reports_tag_diversity_and_external_share(tmp_path: Path) -> No
         result = evaluate_recommendations(
             conn,
             config,
-            train_until=datetime(2024, 1, 2),
+            train_until=datetime(2024, 1, 3),
             test_from=datetime(2024, 1, 3),
         )
 
@@ -151,5 +155,75 @@ def test_evaluate_reports_tag_diversity_and_external_share(tmp_path: Path) -> No
             "expected non-zero tag diversity when recommendations have tag explanations"
         )
         assert result.external_candidate_share >= 0.0
+    finally:
+        conn.close()
+
+
+def test_evaluation_allows_candidate_first_listened_after_train_until(tmp_path: Path) -> None:
+    conn, config = _setup_db(tmp_path)
+    try:
+        (seed_artist_id,) = conn.execute(
+            "SELECT artist_id FROM artist WHERE canonical_name = 'The Cure'"
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO artist (artist_id, canonical_name, artist_key, lastfm_name)
+            VALUES (9001, 'Future Listener', 'future-listener', 'Future Listener')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO scrobble (scrobble_id, played_at, artist_key, track_key, is_duplicate)
+            SELECT
+                9001 + range,
+                TIMESTAMP '2024-01-04' + range * INTERVAL 30 DAY,
+                'future-listener',
+                'future-track-' || range,
+                false
+            FROM range(50)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO artist_listening_fact (
+                artist_id, play_count, track_count, active_months, active_days,
+                first_played_at, last_played_at
+            )
+            VALUES (9001, 50, 50, 12, 50, TIMESTAMP '2024-01-04', TIMESTAMP '2028-01-14')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO artist_similarity_edge (
+                source_artist_id, target_artist_id, source,
+                source_score, normalized_score, evidence, fetched_at
+            )
+            VALUES (?, 9001, 'lastfm', 0.95, 0.95, '{}', current_timestamp)
+            """,
+            [seed_artist_id],
+        )
+
+        result = evaluate_recommendations(
+            conn,
+            config,
+            train_until=datetime(2024, 1, 3),
+            test_from=datetime(2024, 1, 3),
+        )
+
+        assert result.recommendations_generated > 0
+        row = conn.execute(
+            """
+            SELECT r.knownness, r.rediscovery_score, r.local_scrobble_count, r.explanation
+            FROM recommendation AS r
+            JOIN artist AS a ON a.artist_id = r.artist_id
+            WHERE a.canonical_name = 'Future Listener'
+            """
+        ).fetchone()
+        assert row is not None
+        knownness, rediscovery_score, local_scrobble_count, explanation_json = row
+        assert knownness == 0.0
+        assert rediscovery_score == 0.0
+        assert local_scrobble_count == 0
+        assert json.loads(explanation_json)["penalties"]["knownness"] == 0.0
     finally:
         conn.close()

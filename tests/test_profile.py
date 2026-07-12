@@ -10,6 +10,7 @@ from scrobble_recs.db import initialize_database
 from scrobble_recs.importers.lastfm_csv import import_lastfm_csv
 from scrobble_recs.models.modes import resolve_recommendation_mode
 from scrobble_recs.models.profile import select_seed_artists
+from scrobble_recs.models.profile_window import ListeningWindow
 
 
 def _config_path(tmp_path: Path) -> Path:
@@ -281,6 +282,77 @@ def test_select_seed_artists_respects_min_scrobbles(tmp_path: Path) -> None:
 
     assert [seed.name for seed in seeds] == ["The Cure"]
     conn.close()
+
+
+def test_seed_selection_uses_only_scrobbles_in_explicit_window(tmp_path: Path) -> None:
+    config = load_config(_config_path(tmp_path))
+    conn = initialize_database(config)
+    try:
+        conn.execute(
+            """
+            INSERT INTO artist (artist_id, canonical_name, artist_key, lastfm_name)
+            VALUES
+                (901, 'Past Favorite', 'past-favorite', 'Past Favorite'),
+                (902, 'Current Favorite', 'current-favorite', 'Current Favorite')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO scrobble (scrobble_id, played_at, artist_key, track_key, is_duplicate)
+            SELECT 1000 + range, TIMESTAMP '2023-01-01', 'past-favorite', 'past-track', false
+            FROM range(20)
+            UNION ALL
+            SELECT 2000 + range, TIMESTAMP '2025-08-01', 'current-favorite', 'current-track', false
+            FROM range(5)
+            """
+        )
+
+        seeds = select_seed_artists(
+            conn,
+            limit=10,
+            min_scrobbles=1,
+            window=ListeningWindow(datetime(2025, 6, 1), datetime(2026, 6, 1)),
+        )
+
+        assert [seed.name for seed in seeds] == ["Current Favorite"]
+    finally:
+        conn.close()
+
+
+def test_seed_selection_normalizes_offset_aware_windows_for_local_scrobbles(
+    tmp_path: Path,
+) -> None:
+    config = load_config(_config_path(tmp_path))
+    conn = initialize_database(config)
+    try:
+        conn.execute(
+            """
+            INSERT INTO artist (artist_id, canonical_name, artist_key, lastfm_name)
+            VALUES (903, 'Offset Favorite', 'offset-favorite', 'Offset Favorite')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO scrobble (scrobble_id, played_at, artist_key, track_key, is_duplicate)
+            SELECT 3000 + range, TIMESTAMP '2025-06-01 07:00:00',
+                   'offset-favorite', 'offset-track', false
+            FROM range(5)
+            """
+        )
+
+        seeds = select_seed_artists(
+            conn,
+            limit=10,
+            min_scrobbles=1,
+            window=ListeningWindow(
+                datetime.fromisoformat("2025-06-01T00:00:00-07:00"),
+                datetime.fromisoformat("2026-06-01T00:00:00-07:00"),
+            ),
+        )
+
+        assert [seed.name for seed in seeds] == ["Offset Favorite"]
+    finally:
+        conn.close()
 
 
 def test_select_seed_artists_uses_lastfm_name_and_weight_fallbacks(

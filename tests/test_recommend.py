@@ -11,6 +11,7 @@ from scrobble_recs.db import initialize_database
 from scrobble_recs.enrichment.lastfm import run_lastfm_enrichment
 from scrobble_recs.importers.lastfm_csv import import_lastfm_csv
 from scrobble_recs.models.feedback import record_feedback_event
+from scrobble_recs.models.profile_window import ListeningWindow
 from scrobble_recs.models.recommend import (
     _classify_score_band,
     _compute_trial_penalty,
@@ -18,6 +19,8 @@ from scrobble_recs.models.recommend import (
     compute_identity_confidence,
     generate_recommendations,
 )
+
+_FIXTURE_HISTORY_WINDOW = ListeningWindow(datetime(2023, 1, 1), datetime(2025, 1, 1))
 
 
 def write_config(tmp_path: Path) -> Path:
@@ -287,6 +290,7 @@ def test_generate_recommendations_persists_ranked_run_with_explanations(
         limit=3,
         mode="balanced",
         as_of=datetime(2026, 6, 4),
+        history_window=_FIXTURE_HISTORY_WINDOW,
     )
 
     assert stats.recommendations == 2
@@ -325,6 +329,80 @@ def test_generate_recommendations_persists_ranked_run_with_explanations(
     conn.close()
 
 
+def test_generate_recommendations_uses_explicit_window_for_seeds_and_snapshots_it(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    try:
+        conn.execute(
+            """
+            INSERT INTO artist (artist_id, canonical_name, artist_key, lastfm_name)
+            VALUES
+                (901, 'Past Favorite', 'past-favorite', 'Past Favorite'),
+                (902, 'Current Favorite', 'current-favorite', 'Current Favorite')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO scrobble (scrobble_id, played_at, artist_key, track_key, is_duplicate)
+            SELECT 1000 + range, TIMESTAMP '2023-01-01', 'past-favorite', 'past-track', false
+            FROM range(20)
+            UNION ALL
+            SELECT 2000 + range, TIMESTAMP '2025-08-01', 'current-favorite', 'current-track', false
+            FROM range(5)
+            """
+        )
+        history_window = ListeningWindow(datetime(2025, 6, 1), datetime(2026, 6, 1))
+
+        stats = generate_recommendations(
+            conn,
+            config,
+            limit=5,
+            as_of=datetime(2026, 6, 1),
+            history_window=history_window,
+        )
+
+        (seed_summary_json,) = conn.execute(
+            "SELECT seed_summary FROM recommendation_run WHERE run_id = ?", [stats.run_id]
+        ).fetchone()
+        seed_summary = json.loads(seed_summary_json)
+        assert [seed["artist"] for seed in seed_summary["top_seeds"]] == ["Current Favorite"]
+        assert seed_summary["history_window"] == {
+            "start": "2025-06-01T00:00:00",
+            "end": "2026-06-01T00:00:00",
+            "source": "explicit",
+        }
+    finally:
+        conn.close()
+
+
+def test_generate_recommendations_snapshots_resolved_default_history_window(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    try:
+        stats = generate_recommendations(
+            conn,
+            config,
+            limit=5,
+            as_of=datetime(2026, 6, 4),
+        )
+
+        (seed_summary_json,) = conn.execute(
+            "SELECT seed_summary FROM recommendation_run WHERE run_id = ?", [stats.run_id]
+        ).fetchone()
+        seed_summary = json.loads(seed_summary_json)
+        assert seed_summary["history_window"] == {
+            "start": "2025-06-04T00:00:00",
+            "end": "2026-06-04T00:00:00",
+            "source": "default",
+        }
+    finally:
+        conn.close()
+
+
 def test_generate_recommendations_reports_phase_progress(tmp_path: Path) -> None:
     config = load_config(write_config(tmp_path))
     conn = initialize_database(config)
@@ -338,6 +416,7 @@ def test_generate_recommendations_reports_phase_progress(tmp_path: Path) -> None
         limit=3,
         mode="balanced",
         as_of=datetime(2026, 6, 4),
+        history_window=_FIXTURE_HISTORY_WINDOW,
         progress_callback=events.append,
     )
 
@@ -429,6 +508,7 @@ def test_generate_recommendations_replaces_existing_rows_for_new_run_only(
         limit=2,
         mode="balanced",
         as_of=datetime(2026, 6, 4),
+        history_window=_FIXTURE_HISTORY_WINDOW,
     )
     second = generate_recommendations(
         conn,
@@ -436,6 +516,7 @@ def test_generate_recommendations_replaces_existing_rows_for_new_run_only(
         limit=1,
         mode="balanced",
         as_of=datetime(2026, 6, 4),
+        history_window=_FIXTURE_HISTORY_WINDOW,
     )
 
     assert first.run_id != second.run_id
@@ -510,6 +591,7 @@ def test_generate_recommendations_orders_explanation_tags_before_slicing(
         limit=3,
         mode="balanced",
         as_of=datetime(2026, 6, 4),
+        history_window=_FIXTURE_HISTORY_WINDOW,
     )
 
     (explanation_json,) = conn.execute(
@@ -561,6 +643,7 @@ def test_generate_recommendations_explanation_uses_current_seed_edges_only(
         limit=3,
         mode="balanced",
         as_of=datetime(2026, 6, 4),
+        history_window=_FIXTURE_HISTORY_WINDOW,
     )
 
     (explanation_json,) = conn.execute(
@@ -681,7 +764,7 @@ def test_generate_recommendations_keeps_obvious_candidate_when_obviousness_disab
     conn.close()
 
 
-def test_generate_recommendations_keeps_obvious_rediscovery_candidate(
+def test_standard_mode_excludes_previously_listened_candidate(
     tmp_path: Path,
 ) -> None:
     config = load_config(write_config(tmp_path))
@@ -729,14 +812,7 @@ def test_generate_recommendations_keeps_obvious_rediscovery_candidate(
         as_of=datetime(2026, 6, 4),
     )
 
-    assert _recommendation_names(conn, stats.run_id) == ["Dormant Rank Two"]
-    (explanation_json,) = conn.execute(
-        "SELECT explanation FROM recommendation WHERE run_id = ? AND rank = 1",
-        [stats.run_id],
-    ).fetchone()
-    explanation = json.loads(explanation_json)
-    assert explanation["classification"]["is_obvious"] is True
-    assert explanation["classification"]["is_rediscovery"] is True
+    assert _recommendation_names(conn, stats.run_id) == []
     conn.close()
 
 
@@ -1891,6 +1967,15 @@ def _insert_scoring_artist(
             rediscovery_score,
         ],
     )
+    artist_key = name.casefold().replace(" ", "-")
+    conn.execute(
+        """
+        INSERT INTO scrobble (scrobble_id, played_at, artist_key, track_key, is_duplicate)
+        SELECT ? + range, TIMESTAMP '2026-05-01', ?, ?, false
+        FROM range(?)
+        """,
+        [artist_id * 1_000_000, artist_key, f"{artist_key}-track", play_count],
+    )
 
 
 def _insert_artist_tag(conn, *, artist_id: int, tag: str, weight: float) -> None:
@@ -2108,7 +2193,7 @@ def test_generate_recommendations_allows_rediscovery_with_tag_match(tmp_path: Pa
         conn,
         config,
         limit=5,
-        mode="balanced",
+        mode="rediscovery",
         as_of=datetime(2026, 6, 4),
     )
 

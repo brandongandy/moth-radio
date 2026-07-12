@@ -20,10 +20,11 @@ from scrobble_recs.models.feedback import (
     feedback_obviousness_for_candidate,
     load_feedback_profile,
 )
+from scrobble_recs.models.knownness import ArtistListeningInput, compute_artist_listening_scores
 from scrobble_recs.models.listening import refresh_artist_listening_scores
 from scrobble_recs.models.modes import RecommendationModeSettings, resolve_recommendation_mode
 from scrobble_recs.models.profile import SeedArtist, select_seed_artists
-from scrobble_recs.models.profile_window import ListeningWindow
+from scrobble_recs.models.profile_window import ListeningWindow, resolve_listening_window
 
 RecommendationProgressPhase: TypeAlias = Literal[
     "refresh_listening",
@@ -132,6 +133,7 @@ def generate_recommendations(
     mode: str | None = None,
     as_of: datetime | None = None,
     history_window: ListeningWindow | None = None,
+    local_history_end: datetime | None = None,
     progress_callback: RecommendationProgressCallback | None = None,
 ) -> RecommendationStats:
     if limit < 1:
@@ -140,6 +142,17 @@ def generate_recommendations(
     mode_settings = resolve_recommendation_mode(mode, config)
     resolved_mode = mode_settings.name
     resolved_as_of = as_of or datetime.now(tz=UTC).replace(tzinfo=None)
+    if history_window is None:
+        resolved_history_window = resolve_listening_window(
+            as_of=resolved_as_of,
+            default_months=config.recommendation.profile_window_months,
+            since=None,
+            until=None,
+        )
+        history_window_source = "default"
+    else:
+        resolved_history_window = history_window
+        history_window_source = "explicit"
     _report_progress(
         progress_callback,
         phase="refresh_listening",
@@ -171,6 +184,7 @@ def generate_recommendations(
         limit=config.recommendation.seed_artist_limit,
         min_scrobbles=config.recommendation.min_seed_scrobbles,
         regions=mode_settings.seed_regions,
+        window=resolved_history_window,
     )
     seeds = _add_feedback_seed_artists(conn, seeds, feedback_profile)
     seed_ids = {seed.artist_id for seed in seeds}
@@ -216,7 +230,12 @@ def generate_recommendations(
         subject="local graph",
         status="processing",
     )
-    scoring_data = _load_scoring_data(conn, seed_ids, feedback_profile)
+    scoring_data = _load_scoring_data(
+        conn,
+        seed_ids,
+        feedback_profile,
+        local_history_end=local_history_end,
+    )
     fatigue_by_artist = _load_fatigue_by_artist(conn, config, feedback_profile)
     _report_progress(
         progress_callback,
@@ -314,7 +333,17 @@ def generate_recommendations(
         subject="recommendation rows",
         status="processing",
     )
-    _persist_run(conn, run_id, resolved_mode, config, mode_settings, seeds, ranked)
+    _persist_run(
+        conn,
+        run_id,
+        resolved_mode,
+        config,
+        mode_settings,
+        seeds,
+        ranked,
+        history_window=resolved_history_window,
+        history_window_source=history_window_source,
+    )
     _report_progress(
         progress_callback,
         phase="persist_run",
@@ -470,6 +499,8 @@ def _load_scoring_data(
     conn: DuckDBPyConnection,
     seed_ids: set[int],
     feedback_profile: FeedbackProfile,
+    *,
+    local_history_end: datetime | None = None,
 ) -> _ScoringData:
     similarity_by_target: dict[int, list[tuple[int, float]]] = {}
     candidates = set[int]()
@@ -555,6 +586,12 @@ def _load_scoring_data(
         )
         for row in listening_rows
     }
+    if local_history_end is not None:
+        listening_by_artist = _with_local_history_before(
+            conn,
+            listening_by_artist,
+            end=local_history_end,
+        )
 
     identity_by_artist = {
         int(artist_id): float(conf or 0.50)
@@ -596,6 +633,78 @@ def _load_scoring_data(
         identity_confidence_by_artist=identity_by_artist,
         identity_warnings_by_artist=identity_warnings_by_artist,
     )
+
+
+def _with_local_history_before(
+    conn: DuckDBPyConnection,
+    listening_by_artist: dict[
+        int,
+        tuple[float, float, int, int, datetime | None, datetime | None],
+    ],
+    *,
+    end: datetime,
+) -> dict[int, tuple[float, float, int, int, datetime | None, datetime | None]]:
+    rows = conn.execute(
+        """
+        SELECT
+            a.artist_id,
+            count(*) AS play_count,
+            count(DISTINCT s.track_key) AS track_count,
+            count(DISTINCT date_trunc('month', s.played_at)) AS active_months,
+            count(DISTINCT s.played_date) AS active_days,
+            min(s.played_at) AS first_played_at,
+            max(s.played_at) AS last_played_at
+        FROM scrobble AS s
+        JOIN artist AS a ON a.artist_key = s.artist_key
+        WHERE NOT s.is_duplicate
+          AND s.played_at < ?
+        GROUP BY a.artist_id
+        """,
+        [end],
+    ).fetchall()
+    scoped_listening = {
+        int(artist_id): (
+            compute_artist_listening_scores(
+                ArtistListeningInput(
+                    play_count=int(play_count),
+                    track_count=int(track_count),
+                    active_months=int(active_months),
+                    first_played_at=first_played_at,
+                    last_played_at=last_played_at,
+                ),
+                as_of=end,
+            ),
+            int(play_count),
+            int(active_days),
+            first_played_at,
+            last_played_at,
+        )
+        for (
+            artist_id,
+            play_count,
+            track_count,
+            active_months,
+            active_days,
+            first_played_at,
+            last_played_at,
+        ) in rows
+    }
+    result: dict[int, tuple[float, float, int, int, datetime | None, datetime | None]] = {}
+    for artist_id in listening_by_artist | scoped_listening:
+        scoped = scoped_listening.get(artist_id)
+        if scoped is None:
+            result[artist_id] = (0.0, 0.0, 0, 0, None, None)
+            continue
+        scores, play_count, active_days, first_played_at, last_played_at = scoped
+        result[artist_id] = (
+            scores.knownness,
+            scores.rediscovery_score,
+            play_count,
+            active_days,
+            first_played_at,
+            last_played_at,
+        )
+    return result
 
 
 def _load_fatigue_by_artist(
@@ -687,6 +796,9 @@ def _score_candidates(
         knownness, rediscovery, local_play_count, local_active_days, first_played, last_played = (
             listening
         )
+        if mode.name != "rediscovery" and local_play_count > 0:
+            continue
+        scored_rediscovery = rediscovery if mode.name == "rediscovery" else 0.0
         candidate_tags = _candidate_tag_vector(artist_id, scoring_data)
         feedback_neighborhood_score = _feedback_neighborhood_score(
             artist_id,
@@ -746,7 +858,7 @@ def _score_candidates(
             mode,
             tag_profile,
             scoring_data,
-            rediscovery_score=rediscovery,
+            rediscovery_score=scored_rediscovery,
         ):
             continue
 
@@ -756,7 +868,7 @@ def _score_candidates(
             lastfm_similarity_score=lastfm_score,
             tag_similarity_score=tag_score,
             feedback_score=feedback.score,
-            rediscovery_score=rediscovery,
+            rediscovery_score=scored_rediscovery,
         )
         if not quality_gate.passed:
             continue
@@ -766,11 +878,11 @@ def _score_candidates(
             weights,
             lastfm_score * mode.lastfm_similarity_multiplier,
             tag_score * mode.tag_similarity_multiplier,
-            rediscovery * mode.rediscovery_multiplier,
+            scored_rediscovery * mode.rediscovery_multiplier,
             feedback.score,
         )
         evidence_count = sum(
-            1 for val in (lastfm_score, tag_score, feedback.score, rediscovery) if val > 0.0
+            1 for val in (lastfm_score, tag_score, feedback.score, scored_rediscovery) if val > 0.0
         )
         knownness_penalty = 0.40 * max(0.0, knownness - mode.max_knownness)
         obviousness_penalty = (
@@ -800,7 +912,7 @@ def _score_candidates(
                 feedback_score=feedback.score,
                 feedback_contributions=feedback.contributions,
                 feedback_effects=feedback.effects,
-                rediscovery_score=rediscovery,
+                rediscovery_score=scored_rediscovery,
                 knownness=knownness,
                 obviousness=obviousness,
                 knownness_penalty=knownness_penalty,
@@ -836,7 +948,7 @@ def _score_candidates(
                 feedback_score=feedback.score,
                 feedback_contributions=feedback.contributions,
                 feedback_effects=feedback.effects,
-                rediscovery_score=rediscovery,
+                rediscovery_score=scored_rediscovery,
                 knownness=knownness,
                 obviousness=obviousness,
                 knownness_penalty=knownness_penalty,
@@ -1424,6 +1536,9 @@ def _persist_run(
     mode_settings: RecommendationModeSettings,
     seeds: list[SeedArtist],
     ranked: list[_CandidateScore],
+    *,
+    history_window: ListeningWindow,
+    history_window_source: str,
 ) -> None:
     conn.execute("BEGIN TRANSACTION")
     try:
@@ -1446,6 +1561,11 @@ def _persist_run(
                 json.dumps(
                     {
                         "seed_count": len(seeds),
+                        "history_window": {
+                            "start": history_window.start.isoformat(),
+                            "end": history_window.end.isoformat(),
+                            "source": history_window_source,
+                        },
                         "regions": _seed_region_counts(seeds, mode_settings),
                         "top_seeds": [
                             {

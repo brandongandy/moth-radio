@@ -7,7 +7,9 @@ from typing import TypedDict
 
 from duckdb import DuckDBPyConnection
 
+from scrobble_recs.models.knownness import ArtistListeningInput, compute_artist_listening_scores
 from scrobble_recs.models.modes import SeedRegionName, SeedRegionSetting
+from scrobble_recs.models.profile_window import ListeningWindow
 
 
 @dataclass(frozen=True)
@@ -50,13 +52,14 @@ def select_seed_artists(
     limit: int,
     min_scrobbles: int,
     regions: Sequence[SeedRegionSetting] | None = None,
+    window: ListeningWindow | None = None,
 ) -> list[SeedArtist]:
     if limit < 1:
         return []
     resolved_regions: Sequence[SeedRegionSetting] = (
         regions if regions is not None else (("recent", limit, 1.0),)
     )
-    rows = _load_seed_rows(conn, min_scrobbles=min_scrobbles)
+    rows = _load_seed_rows(conn, min_scrobbles=min_scrobbles, window=window)
     selected: dict[int, _SeedAccumulator] = {}
     total_region_limit = sum(
         region_limit for _, region_limit, _ in resolved_regions if region_limit > 0
@@ -188,7 +191,10 @@ def _load_seed_rows(
     conn: DuckDBPyConnection,
     *,
     min_scrobbles: int,
+    window: ListeningWindow | None = None,
 ) -> list[_SeedRow]:
+    if window is not None:
+        return _load_window_seed_rows(conn, min_scrobbles=min_scrobbles, window=window)
     rows = conn.execute(
         """
         SELECT
@@ -222,6 +228,62 @@ def _load_seed_rows(
         }
         for row in rows
     ]
+
+
+def _load_window_seed_rows(
+    conn: DuckDBPyConnection,
+    *,
+    min_scrobbles: int,
+    window: ListeningWindow,
+) -> list[_SeedRow]:
+    rows = conn.execute(
+        """
+        SELECT
+            a.artist_id,
+            a.canonical_name,
+            a.artist_key,
+            coalesce(nullif(a.lastfm_name, ''), a.canonical_name) AS lastfm_name,
+            count(*) AS play_count,
+            count(DISTINCT s.track_key) AS track_count,
+            count(DISTINCT date_trunc('month', s.played_at)) AS active_months,
+            min(s.played_at) AS first_played_at,
+            max(s.played_at) AS last_played_at
+        FROM scrobble AS s
+        JOIN artist AS a ON a.artist_key = s.artist_key
+        WHERE NOT s.is_duplicate
+          AND s.played_at >= ?
+          AND s.played_at < ?
+        GROUP BY ALL
+        HAVING count(*) >= ?
+        """,
+        [window.start, window.end, min_scrobbles],
+    ).fetchall()
+    result: list[_SeedRow] = []
+    for row in rows:
+        scores = compute_artist_listening_scores(
+            ArtistListeningInput(
+                play_count=int(row[4]),
+                track_count=int(row[5]),
+                active_months=int(row[6]),
+                first_played_at=row[7],
+                last_played_at=row[8],
+            ),
+            as_of=window.end,
+        )
+        result.append(
+            {
+                "artist_id": int(row[0]),
+                "name": str(row[1]),
+                "artist_key": str(row[2]),
+                "lastfm_name": str(row[3]),
+                "play_count": int(row[4]),
+                "lifetime_weight": scores.lifetime_weight,
+                "recent_weight": scores.recent_weight,
+                "knownness": scores.knownness,
+                "rediscovery_score": scores.rediscovery_score,
+            }
+        )
+    return result
 
 
 def _effective_region_limit(

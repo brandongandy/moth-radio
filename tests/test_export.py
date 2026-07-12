@@ -11,7 +11,10 @@ from scrobble_recs.db import initialize_database
 from scrobble_recs.enrichment.lastfm import run_lastfm_enrichment
 from scrobble_recs.export import export_recommendations
 from scrobble_recs.importers.lastfm_csv import import_lastfm_csv
+from scrobble_recs.models.profile_window import ListeningWindow
 from scrobble_recs.models.recommend import generate_recommendations
+
+_FIXTURE_HISTORY_WINDOW = ListeningWindow(datetime(2023, 1, 1), datetime(2025, 1, 1))
 
 
 class ExportFakeLastFmClient:
@@ -75,6 +78,7 @@ def _prepared_run(tmp_path: Path) -> tuple[object, str]:
         limit=1,
         mode="balanced",
         as_of=datetime(2026, 6, 4),
+        history_window=_FIXTURE_HISTORY_WINDOW,
     )
     return conn, stats.run_id
 

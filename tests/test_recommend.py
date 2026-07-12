@@ -4,9 +4,10 @@ from pathlib import Path
 
 import pytest
 from duckdb import ConstraintException
+from pydantic import ValidationError
 
 from scrobble_recs.apis.lastfm import LastFmArtistTag, LastFmSimilarArtist, LastFmTagTopArtist
-from scrobble_recs.config import load_config
+from scrobble_recs.config import RecommendationConfig, load_config
 from scrobble_recs.db import initialize_database
 from scrobble_recs.enrichment.lastfm import run_lastfm_enrichment
 from scrobble_recs.importers.lastfm_csv import import_lastfm_csv
@@ -813,6 +814,16 @@ def test_standard_mode_excludes_previously_listened_candidate(
     )
 
     assert _recommendation_names(conn, stats.run_id) == []
+    eligibility_state, eligibility_reasons = conn.execute(
+        """
+        SELECT eligibility_state, eligibility_reasons
+        FROM recommendation_candidate
+        WHERE run_id = CAST(? AS UUID) AND artist_id = 111
+        """,
+        [stats.run_id],
+    ).fetchone()
+    assert eligibility_state == "excluded"
+    assert json.loads(eligibility_reasons) == ["locally_listened"]
     conn.close()
 
 
@@ -1178,6 +1189,7 @@ def test_generate_recommendations_applies_direct_feedback_scores(
         artist_id=301,
         action="save",
         context={"tags": ["post-punk"]},
+        created_at=datetime(2026, 1, 1),
         feedback_id="00000000-0000-0000-0000-000000000401",
     )
 
@@ -1262,6 +1274,7 @@ def test_generate_recommendations_keeps_saved_current_candidate_with_outgoing_ed
         artist_id=331,
         action="save",
         context={"tags": ["post-punk"]},
+        created_at=datetime(2026, 1, 1),
         feedback_id="00000000-0000-0000-0000-000000000404",
     )
 
@@ -1539,6 +1552,7 @@ def test_generate_recommendations_applies_tag_feedback_scores(
         artist_id=341,
         action="boost_tag",
         context={"tags": ["coldwave"]},
+        created_at=datetime(2026, 1, 1),
         feedback_id="00000000-0000-0000-0000-000000000405",
     )
 
@@ -1613,6 +1627,7 @@ def test_generate_recommendations_matches_feedback_to_mixed_case_candidate_tags(
         artist_id=391,
         action="boost_tag",
         context={"tags": ["coldwave"]},
+        created_at=datetime(2026, 1, 1),
         feedback_id="00000000-0000-0000-0000-000000000410",
     )
 
@@ -1675,6 +1690,7 @@ def test_generate_recommendations_marks_already_known_candidates_with_knownness_
         run_id="00000000-0000-0000-0000-000000000306",
         artist_id=351,
         action="already_know",
+        created_at=datetime(2026, 1, 1),
         feedback_id="00000000-0000-0000-0000-000000000406",
     )
 
@@ -1806,6 +1822,7 @@ def test_generate_recommendations_demotes_suppressed_feedback_candidate(
         run_id="00000000-0000-0000-0000-000000000308",
         artist_id=371,
         action="less_like_this",
+        created_at=datetime(2026, 1, 1),
         feedback_id="00000000-0000-0000-0000-000000000408",
     )
 
@@ -2386,6 +2403,7 @@ def test_generate_recommendations_positive_feedback_bypasses_fatigue(
         run_id="00000000-0000-0000-0000-000000000540",
         artist_id=541,
         action="save",
+        created_at=datetime(2026, 1, 1),
         feedback_id="00000000-0000-0000-0000-000000000541",
     )
 
@@ -2449,6 +2467,7 @@ def test_generate_recommendations_respects_hide_artist_across_runs(
         run_id="00000000-0000-0000-0000-000000000600",
         artist_id=601,
         action="hide_artist",
+        created_at=datetime(2026, 1, 1),
         feedback_id="00000000-0000-0000-0000-000000000601",
     )
 
@@ -2463,6 +2482,72 @@ def test_generate_recommendations_respects_hide_artist_across_runs(
     names = _recommendation_names(conn, stats.run_id)
     assert "Hidden Artist" not in names
     assert "Visible Artist" in names
+    eligibility_state, eligibility_reasons = conn.execute(
+        """
+        SELECT eligibility_state, eligibility_reasons
+        FROM recommendation_candidate
+        WHERE run_id = CAST(? AS UUID) AND artist_id = 601
+        """,
+        [stats.run_id],
+    ).fetchone()
+    assert eligibility_state == "excluded"
+    assert json.loads(eligibility_reasons) == ["hidden_artist"]
+    conn.close()
+
+
+def test_generate_recommendations_excludes_feedback_cooldown_candidate(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    _insert_scoring_artist(
+        conn,
+        artist_id=620,
+        name="Seed Source",
+        play_count=40,
+        lifetime_weight=8.0,
+        recent_weight=8.0,
+        knownness=0.9,
+        rediscovery_score=0.0,
+    )
+    _insert_artist_tag(conn, artist_id=620, tag="post-punk", weight=100.0)
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=620,
+        candidate_id=621,
+        candidate_name="Recently Rejected Artist",
+        tag="post-punk",
+        tag_rank=30,
+        similarity=0.85,
+    )
+    _insert_run_for_feedback(conn, run_id="00000000-0000-0000-0000-000000000620")
+    record_feedback_event(
+        conn,
+        run_id="00000000-0000-0000-0000-000000000620",
+        artist_id=621,
+        action="reject",
+        created_at=datetime(2026, 5, 10),
+        feedback_id="00000000-0000-0000-0000-000000000621",
+    )
+
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=5,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    assert _recommendation_names(conn, stats.run_id) == []
+    eligibility_state, eligibility_reasons, quality_gate = conn.execute(
+        """
+        SELECT eligibility_state, eligibility_reasons, quality_gate
+        FROM recommendation_candidate
+        WHERE run_id = CAST(? AS UUID) AND artist_id = 621
+        """,
+        [stats.run_id],
+    ).fetchone()
+    assert eligibility_state == "excluded"
+    assert json.loads(eligibility_reasons) == ["feedback_cooldown"]
+    assert json.loads(quality_gate)["passed"] is None
     conn.close()
 
 
@@ -2510,6 +2595,7 @@ def test_generate_recommendations_less_like_this_suppresses_across_runs(
         artist_id=611,
         action="less_like_this",
         context={"tags": ["post-punk"]},
+        created_at=datetime(2026, 1, 1),
         feedback_id="00000000-0000-0000-0000-000000000611",
     )
 
@@ -2557,6 +2643,27 @@ def test_recommendation_candidate_migration_creates_table():
     }
     assert "recommendation_candidate" in tables
     conn.close()
+
+
+def test_recommendation_candidate_quality_migration_adds_diagnostic_columns(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+
+    assert _column_types(conn, "recommendation_candidate")["eligibility_state"] == "VARCHAR"
+    assert _column_types(conn, "recommendation_candidate")["eligibility_reasons"] == "JSON"
+    assert _column_types(conn, "recommendation_candidate")["quality_gate"] == "JSON"
+    conn.close()
+
+    reopened = initialize_database(config)
+    assert _column_types(reopened, "recommendation_candidate")["quality_gate"] == "JSON"
+    reopened.close()
+
+
+def test_recommendation_config_validates_feedback_cooldown_days() -> None:
+    assert RecommendationConfig().feedback_cooldown_days == 30
+
+    with pytest.raises(ValidationError, match="feedback_cooldown_days must be at least 1"):
+        RecommendationConfig(feedback_cooldown_days=0)
 
 
 def test_generate_recommendations_persists_candidates(tmp_path: Path) -> None:

@@ -8,10 +8,12 @@ from duckdb import ConstraintException
 from scrobble_recs.config import load_config
 from scrobble_recs.db import initialize_database
 from scrobble_recs.models.feedback import (
+    COOLDOWN_FEEDBACK_ACTIONS,
     FeedbackProfile,
     apply_feedback_to_tag_profile,
     feedback_adjustment_for_candidate,
     feedback_obviousness_for_candidate,
+    load_cooldown_artist_ids,
     load_feedback_profile,
     record_feedback_event,
     rerank_recommendation_run,
@@ -124,6 +126,49 @@ def test_feedback_migration_creates_event_table(tmp_path: Path) -> None:
             )
     finally:
         conn.close()
+
+
+def test_load_cooldown_artist_ids_uses_strict_cutoff_and_ignores_non_votes(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    as_of = datetime(2026, 6, 4, 12, 0, 0)
+    run_id = "00000000-0000-0000-0000-000000000701"
+    _insert_run(conn, run_id=run_id)
+    for artist_id, action, created_at in (
+        (701, "save", datetime(2026, 6, 4, 11, 59, 59)),
+        (702, "reject", datetime(2026, 5, 5, 12, 0, 0)),
+        (703, "opened_link", datetime(2026, 6, 4, 11, 59, 59)),
+        (704, "played_externally", datetime(2026, 6, 4, 11, 59, 59)),
+        (705, "note", datetime(2026, 6, 4, 11, 59, 59)),
+        (706, "hide_artist", datetime(2026, 6, 4, 11, 59, 59)),
+    ):
+        record_feedback_event(
+            conn,
+            run_id=run_id,
+            artist_id=artist_id,
+            action=action,
+            created_at=created_at,
+        )
+
+    assert COOLDOWN_FEEDBACK_ACTIONS == frozenset(
+        {
+            "save",
+            "reject",
+            "already_know",
+            "too_obvious",
+            "wrong_genre",
+            "more_like_this",
+            "less_like_this",
+            "hide_tag",
+            "boost_tag",
+            "rediscovery_good",
+            "rediscovery_bad",
+        }
+    )
+    assert load_cooldown_artist_ids(conn, as_of=as_of, days=30) == {701}
+    conn.close()
 
 
 def _columns(conn, table_name: str) -> list[tuple[str, str]]:

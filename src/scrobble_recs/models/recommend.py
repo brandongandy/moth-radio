@@ -18,6 +18,7 @@ from scrobble_recs.models.feedback import (
     FeedbackProfile,
     apply_feedback_to_tag_profile,
     feedback_obviousness_for_candidate,
+    load_cooldown_artist_ids,
     load_feedback_profile,
 )
 from scrobble_recs.models.knownness import ArtistListeningInput, compute_artist_listening_scores
@@ -119,6 +120,14 @@ class _QualityGateDecision:
 
 
 @dataclass(frozen=True)
+class _CandidateDiagnostic:
+    artist_id: int
+    state: Literal["eligible", "excluded", "rejected"]
+    reasons: tuple[str, ...]
+    quality_gate: dict[str, object]
+
+
+@dataclass(frozen=True)
 class _FatiguePenalty:
     prior_run_appearances: int
     latest_run_rank: int | None
@@ -179,6 +188,11 @@ def generate_recommendations(
         status="processing",
     )
     feedback_profile = load_feedback_profile(conn)
+    cooldown_artist_ids = load_cooldown_artist_ids(
+        conn,
+        as_of=resolved_as_of,
+        days=config.recommendation.feedback_cooldown_days,
+    )
     seeds = select_seed_artists(
         conn,
         limit=config.recommendation.seed_artist_limit,
@@ -246,8 +260,7 @@ def generate_recommendations(
         status="completed",
     )
     run_id = str(uuid4())
-    _persist_candidates(conn, run_id, scoring_data)
-    scores = _score_candidates(
+    scores, candidate_diagnostics = _score_candidates(
         config,
         mode_settings,
         seeds,
@@ -256,9 +269,11 @@ def generate_recommendations(
         scoring_data,
         feedback_profile,
         fatigue_by_artist,
+        cooldown_artist_ids,
         as_of=resolved_as_of,
         progress_callback=progress_callback,
     )
+    _persist_candidates(conn, run_id, scoring_data, candidate_diagnostics)
     _report_progress(
         progress_callback,
         phase="rerank_diversity",
@@ -763,14 +778,16 @@ def _score_candidates(
     scoring_data: _ScoringData,
     feedback_profile: FeedbackProfile,
     fatigue_by_artist: dict[int, _FatiguePenalty],
+    cooldown_artist_ids: set[int],
     *,
     as_of: datetime | None = None,
     progress_callback: RecommendationProgressCallback | None = None,
-) -> list[_CandidateScore]:
+) -> tuple[list[_CandidateScore], list[_CandidateDiagnostic]]:
     seed_weight_by_id = {seed.artist_id: seed.seed_weight for seed in seeds}
     total_seed_weight = sum(seed_weight_by_id.values()) or 1.0
     scores: list[_CandidateScore] = []
     candidate_only_scores: list[_CandidateScore] = []
+    diagnostics: list[_CandidateDiagnostic] = []
     obviousness_enabled = config.recommendation.obviousness.enabled
     total_candidates = len(scoring_data.candidates)
     processed = 0
@@ -786,17 +803,24 @@ def _score_candidates(
     for artist_id in scoring_data.candidates:
         processed += 1
         if artist_id in seed_ids:
+            diagnostics.append(_excluded_candidate_diagnostic(artist_id, "seed_artist"))
             continue
         if artist_id in feedback_profile.hidden_artist_ids:
+            diagnostics.append(_excluded_candidate_diagnostic(artist_id, "hidden_artist"))
+            continue
+        if artist_id in cooldown_artist_ids:
+            diagnostics.append(_excluded_candidate_diagnostic(artist_id, "feedback_cooldown"))
             continue
         artist_name = scoring_data.artist_names.get(artist_id)
         if artist_name is None:
+            diagnostics.append(_excluded_candidate_diagnostic(artist_id, "missing_artist_name"))
             continue
         listening = scoring_data.listening_by_artist.get(artist_id, (0.0, 0.0, 0, 0, None, None))
         knownness, rediscovery, local_play_count, local_active_days, first_played, last_played = (
             listening
         )
         if mode.name != "rediscovery" and local_play_count > 0:
+            diagnostics.append(_excluded_candidate_diagnostic(artist_id, "locally_listened"))
             continue
         scored_rediscovery = rediscovery if mode.name == "rediscovery" else 0.0
         candidate_tags = _candidate_tag_vector(artist_id, scoring_data)
@@ -833,6 +857,9 @@ def _score_candidates(
             has_positive_feedback=has_positive_feedback,
         )
         if mode.name == "rediscovery" and rediscovery > 0.0 and not rediscovery_eligible:
+            diagnostics.append(
+                _excluded_candidate_diagnostic(artist_id, "rediscovery_not_eligible")
+            )
             continue
         lastfm_score = _lastfm_similarity_score(
             artist_id,
@@ -860,6 +887,7 @@ def _score_candidates(
             scoring_data,
             rediscovery_score=scored_rediscovery,
         ):
+            diagnostics.append(_excluded_candidate_diagnostic(artist_id, "obvious_candidate"))
             continue
 
         quality_gate = _quality_gate_decision(
@@ -870,8 +898,32 @@ def _score_candidates(
             feedback_score=feedback.score,
             rediscovery_score=scored_rediscovery,
         )
+        quality_gate_payload = _quality_gate_payload(
+            quality_gate,
+            lastfm_similarity_score=lastfm_score,
+            tag_similarity_score=tag_score,
+            feedback_score=feedback.score,
+            rediscovery_score=scored_rediscovery,
+        )
         if not quality_gate.passed:
+            diagnostics.append(
+                _CandidateDiagnostic(
+                    artist_id=artist_id,
+                    state="rejected",
+                    reasons=("quality_gate",),
+                    quality_gate=quality_gate_payload,
+                )
+            )
             continue
+
+        diagnostics.append(
+            _CandidateDiagnostic(
+                artist_id=artist_id,
+                state="eligible",
+                reasons=("eligible",),
+                quality_gate=quality_gate_payload,
+            )
+        )
 
         weights = config.recommendation.weights
         raw_score = _raw_score(
@@ -988,7 +1040,7 @@ def _score_candidates(
         status="completed",
     )
     candidate_only_scores.sort(key=lambda s: s.raw_score, reverse=True)
-    return scores + candidate_only_scores[: min(len(scores) * 2, 500)]
+    return scores + candidate_only_scores[: min(len(scores) * 2, 500)], diagnostics
 
 
 def _rerank_for_diversity(
@@ -1352,6 +1404,41 @@ def _quality_gate_decision(
     )
 
 
+def _excluded_candidate_diagnostic(artist_id: int, reason: str) -> _CandidateDiagnostic:
+    return _CandidateDiagnostic(
+        artist_id=artist_id,
+        state="excluded",
+        reasons=(reason,),
+        quality_gate={
+            "passed": None,
+            "reasons": [],
+            "thresholds": {},
+            "scores": {},
+        },
+    )
+
+
+def _quality_gate_payload(
+    decision: _QualityGateDecision,
+    *,
+    lastfm_similarity_score: float,
+    tag_similarity_score: float,
+    feedback_score: float,
+    rediscovery_score: float,
+) -> dict[str, object]:
+    return {
+        "passed": decision.passed,
+        "reasons": list(decision.reasons),
+        "thresholds": decision.thresholds,
+        "scores": {
+            "lastfm_similarity_score": lastfm_similarity_score,
+            "tag_similarity_score": tag_similarity_score,
+            "feedback_score": feedback_score,
+            "rediscovery_score": rediscovery_score,
+        },
+    }
+
+
 def _explanation(
     score: _CandidateScore,
     scoring_data: _ScoringData,
@@ -1504,18 +1591,28 @@ def _persist_candidates(
     conn: DuckDBPyConnection,
     run_id: str,
     scoring_data: _ScoringData,
+    diagnostics: list[_CandidateDiagnostic],
 ) -> None:
     """Persist candidate artists for the current recommendation run."""
-    for artist_id in scoring_data.candidates:
+    for diagnostic in diagnostics:
+        artist_id = diagnostic.artist_id
         sources = scoring_data.similarity_by_target.get(artist_id, [])
         tags = scoring_data.tag_ranks_by_artist.get(artist_id, [])
         conn.execute(
             """
             INSERT INTO recommendation_candidate
                 (run_id, artist_id, candidate_sources, max_source_score,
-                 appeared_from_seed_count, appeared_from_tag_count)
-            VALUES (CAST(? AS UUID), ?, ?::JSON, ?, ?, ?)
-            ON CONFLICT (run_id, artist_id) DO NOTHING
+                 appeared_from_seed_count, appeared_from_tag_count, eligibility_state,
+                 eligibility_reasons, quality_gate)
+            VALUES (CAST(? AS UUID), ?, ?::JSON, ?, ?, ?, ?, ?::JSON, ?::JSON)
+            ON CONFLICT (run_id, artist_id) DO UPDATE SET
+                candidate_sources = excluded.candidate_sources,
+                max_source_score = excluded.max_source_score,
+                appeared_from_seed_count = excluded.appeared_from_seed_count,
+                appeared_from_tag_count = excluded.appeared_from_tag_count,
+                eligibility_state = excluded.eligibility_state,
+                eligibility_reasons = excluded.eligibility_reasons,
+                quality_gate = excluded.quality_gate
             """,
             [
                 run_id,
@@ -1524,6 +1621,9 @@ def _persist_candidates(
                 float(max((s[1] for s in sources), default=0.0)),
                 len(sources),
                 len(tags),
+                diagnostic.state,
+                json.dumps(list(diagnostic.reasons)),
+                json.dumps(diagnostic.quality_gate, sort_keys=True),
             ],
         )
 

@@ -374,6 +374,7 @@ class RecommendationConfig(BaseModel):
     max_knownness_default: float = 0.65
     rediscovery_enabled: bool = True
     run_limit: int = 500
+    feedback_cooldown_days: int = 30
     obviousness: ObviousnessConfig = Field(default_factory=ObviousnessConfig)
     knownness: KnownnessConfig = Field(default_factory=KnownnessConfig)
     weights: RecommendationWeightsConfig = Field(default_factory=RecommendationWeightsConfig)
@@ -396,6 +397,8 @@ class RecommendationConfig(BaseModel):
             raise ValueError("max_knownness_default must be between 0 and 1")
         if self.run_limit < 1:
             raise ValueError("run_limit must be at least 1")
+        if self.feedback_cooldown_days < 1:
+            raise ValueError("feedback_cooldown_days must be at least 1")
         return self
 
 
@@ -473,6 +476,7 @@ def default_config_document() -> dict[str, Any]:
             "max_knownness_default": 0.65,
             "rediscovery_enabled": True,
             "run_limit": 500,
+            "feedback_cooldown_days": 30,
             "obviousness": {
                 "enabled": True,
                 "top_n_per_tag_penalty": 10,

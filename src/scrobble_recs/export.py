@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import csv
 import json
+from math import isfinite
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from duckdb import DuckDBPyConnection
 
@@ -21,7 +22,13 @@ def export_recommendations(
     if format_name not in ("csv", "jsonl"):
         raise ValueError("format_name must be 'csv' or 'jsonl'")
     resolved_run_id = run_id or _latest_run_id(conn)
-    rows = _load_rows(conn, resolved_run_id, include_candidates=include_candidates)
+    history_window = _load_history_window(conn, resolved_run_id)
+    rows = _load_rows(
+        conn,
+        resolved_run_id,
+        history_window=history_window,
+        include_candidates=include_candidates,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if format_name == "csv":
         _write_csv(output_path, rows)
@@ -44,8 +51,21 @@ def _latest_run_id(conn: DuckDBPyConnection) -> str:
     return str(row[0])
 
 
+def _load_history_window(conn: DuckDBPyConnection, run_id: str) -> dict[str, Any]:
+    row = conn.execute(
+        "SELECT seed_summary FROM recommendation_run WHERE run_id = ?",
+        [run_id],
+    ).fetchone()
+    seed_summary = _as_mapping(row[0] if row else None)
+    return _as_mapping(seed_summary.get("history_window"))
+
+
 def _load_rows(
-    conn: DuckDBPyConnection, run_id: str, *, include_candidates: bool = False
+    conn: DuckDBPyConnection,
+    run_id: str,
+    *,
+    history_window: dict[str, Any],
+    include_candidates: bool = False,
 ) -> list[dict[str, object]]:
     filter_clause = "" if include_candidates else "AND r.score_band != 'candidate_only'"
     rows = conn.execute(
@@ -103,7 +123,14 @@ def _load_rows(
             canonical_name,
             explanation_json,
         ) = row
-        explanation = json.loads(str(explanation_json)) if explanation_json else {}
+        explanation = _as_mapping(explanation_json)
+        quality = _as_mapping(explanation.get("quality_gate"))
+        serendipity = _as_mapping(explanation.get("serendipity"))
+        serendipity_bonus = _as_float(
+            serendipity.get("bonus")
+            if "bonus" in serendipity
+            else serendipity.get("calibrated_bonus")
+        )
         result.append(
             {
                 "rank": int(rank),
@@ -117,7 +144,7 @@ def _load_rows(
                 "score_band": str(score_band or ""),
                 "evidence_source_count": int(evidence_count or 0),
                 "primary_tags": ", ".join(
-                    str(tag.get("tag", "")) for tag in explanation.get("tags", [])[:3]
+                    str(tag.get("tag", "")) for tag in _as_mapping_list(explanation.get("tags"))[:3]
                 ),
                 "knownness": float(knownness or 0.0),
                 "obviousness": float(obviousness or 0.0),
@@ -156,6 +183,12 @@ def _load_rows(
                 "candidate_sources": ", ".join(
                     str(s) for s in explanation.get("candidate_sources", [])
                 ),
+                "history_window_start": str(history_window.get("start", "")),
+                "history_window_end": str(history_window.get("end", "")),
+                "quality_gate_reasons": ";".join(_as_string_list(quality.get("reasons"))),
+                "serendipity_bonus": serendipity_bonus,
+                "serendipity_cohesion": _as_float(serendipity.get("cohesion")),
+                "serendipity_bridge": str(_as_bool(serendipity.get("is_bridge"))).lower(),
                 "explanation": explanation,
             }
         )
@@ -200,6 +233,12 @@ def _write_csv(output_path: Path, rows: list[dict[str, object]]) -> None:
         "obviousness_penalty",
         "fatigue_penalty",
         "candidate_sources",
+        "history_window_start",
+        "history_window_end",
+        "quality_gate_reasons",
+        "serendipity_bonus",
+        "serendipity_cohesion",
+        "serendipity_bridge",
     ]
     with output_path.open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
@@ -211,10 +250,62 @@ def _write_csv(output_path: Path, rows: list[dict[str, object]]) -> None:
 def _write_jsonl(output_path: Path, rows: list[dict[str, object]]) -> None:
     with output_path.open("w", encoding="utf-8") as file:
         for row in rows:
-            file.write(json.dumps(row, sort_keys=True) + "\n")
+            file.write(
+                json.dumps(_sanitize_json_value(row), allow_nan=False, sort_keys=True) + "\n"
+            )
 
 
 def _display_score(final_score: float, max_final_score: float) -> float:
     if max_final_score <= 0.0:
         return 0.0
     return max(0.0, min(final_score / max_final_score, 1.0))
+
+
+def _as_mapping(value: object) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if value is None:
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _as_mapping_list(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _as_string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
+def _as_float(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return 0.0
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return result if isfinite(result) else 0.0
+
+
+def _as_bool(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().casefold() in {"1", "true", "yes"}
+    return bool(value)
+
+
+def _sanitize_json_value(value: object) -> Any:
+    if isinstance(value, float):
+        return value if isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(key): _sanitize_json_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_json_value(item) for item in value]
+    return value

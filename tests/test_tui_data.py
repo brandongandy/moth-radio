@@ -274,6 +274,116 @@ def test_store_normalizes_display_scores_without_changing_raw_breakdown(
     conn.close()
 
 
+def test_recommendation_detail_projects_structured_quality_evidence(tmp_path: Path) -> None:
+    conn = initialize_database(load_config(write_config(tmp_path)))
+    run_id = "00000000-0000-0000-0000-000000000006"
+    _insert_run(conn, run_id=run_id, mode="balanced")
+    _insert_artist(conn, artist_id=42, name="Quality Artist")
+    _insert_recommendation(
+        conn,
+        run_id=run_id,
+        artist_id=42,
+        rank=1,
+        final_score=0.75,
+        knownness=0.10,
+        obviousness=0.10,
+        explanation={
+            "raw_components": {"lastfm_similarity": 0.60, "tag_similarity": 0.30},
+            "calibrated_components": {
+                "lastfm_similarity": 0.75,
+                "tag_similarity": 0.50,
+            },
+            "serendipity": {"calibrated_bonus": 0.12},
+        },
+    )
+
+    detail = TuiRecommendationStore(conn).get_detail(run_id, artist_id=42)
+
+    assert detail.score_breakdown.raw_components == {
+        "lastfm_similarity": pytest.approx(0.60),
+        "tag_similarity": pytest.approx(0.30),
+    }
+    assert detail.score_breakdown.calibrated_components["lastfm_similarity"] == pytest.approx(0.75)
+    assert detail.score_breakdown.serendipity_bonus == pytest.approx(0.12)
+    conn.close()
+
+
+def test_recommendation_detail_projects_non_finite_and_boolean_quality_values_as_zero(
+    tmp_path: Path,
+) -> None:
+    conn = initialize_database(load_config(write_config(tmp_path)))
+    run_id = "00000000-0000-0000-0000-000000000008"
+    _insert_run(conn, run_id=run_id, mode="balanced")
+    _insert_artist(conn, artist_id=44, name="Invalid Numeric Detail")
+    _insert_recommendation(
+        conn,
+        run_id=run_id,
+        artist_id=44,
+        rank=1,
+        final_score=0.75,
+        knownness=0.10,
+        obviousness=0.10,
+        explanation={
+            "raw_components": {
+                "not_a_number": float("nan"),
+                "infinite": float("inf"),
+                "boolean": True,
+            },
+            "calibrated_components": {
+                "not_a_number": float("nan"),
+                "infinite": float("inf"),
+                "boolean": True,
+            },
+            "serendipity": {"bonus": float("nan")},
+        },
+    )
+
+    detail = TuiRecommendationStore(conn).get_detail(run_id, artist_id=44)
+
+    assert detail.score_breakdown.raw_components == {
+        "not_a_number": 0.0,
+        "infinite": 0.0,
+        "boolean": 0.0,
+    }
+    assert detail.score_breakdown.calibrated_components == {
+        "not_a_number": 0.0,
+        "infinite": 0.0,
+        "boolean": 0.0,
+    }
+    assert detail.score_breakdown.serendipity_bonus == 0.0
+    conn.close()
+
+
+def test_recommendation_detail_uses_empty_quality_evidence_for_invalid_json(
+    tmp_path: Path,
+) -> None:
+    conn = initialize_database(load_config(write_config(tmp_path)))
+    run_id = "00000000-0000-0000-0000-000000000007"
+    _insert_run(conn, run_id=run_id, mode="balanced")
+    _insert_artist(conn, artist_id=43, name="Malformed Detail")
+    _insert_recommendation(
+        conn,
+        run_id=run_id,
+        artist_id=43,
+        rank=1,
+        final_score=0.75,
+        knownness=0.10,
+        obviousness=0.10,
+        explanation={},
+    )
+    conn.execute(
+        "UPDATE recommendation SET explanation = ? WHERE run_id = ? AND artist_id = ?",
+        [json.dumps(["not", "an", "object"]), run_id, 43],
+    )
+
+    detail = TuiRecommendationStore(conn).get_detail(run_id, artist_id=43)
+
+    assert detail.score_breakdown.raw_components == {}
+    assert detail.score_breakdown.calibrated_components == {}
+    assert detail.score_breakdown.serendipity_bonus == 0.0
+    conn.close()
+
+
 def _insert_run(
     conn,
     *,

@@ -1035,6 +1035,42 @@ def test_tag_focus_mode_persists_effective_mode_scoring_metadata(tmp_path: Path)
     conn.close()
 
 
+def test_generate_recommendations_persists_effective_serendipity_configuration(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    config.recommendation.serendipity.enabled = False
+    config.recommendation.serendipity.minimum_neighbor_edge = 0.20
+    config.recommendation.serendipity.minimum_neighbors = 3
+    config.recommendation.serendipity.max_bonus = 0.12
+    config.recommendation.serendipity.bridge_bonus = 0.04
+    conn = initialize_database(config)
+
+    try:
+        stats = generate_recommendations(
+            conn,
+            config,
+            limit=1,
+            mode="balanced",
+            as_of=datetime(2026, 6, 4),
+        )
+
+        (scoring_weights_json,) = conn.execute(
+            "SELECT scoring_weights FROM recommendation_run WHERE run_id = ?",
+            [stats.run_id],
+        ).fetchone()
+        scoring_snapshot = json.loads(scoring_weights_json)
+        assert scoring_snapshot["serendipity"] == {
+            "enabled": False,
+            "minimum_neighbor_edge": 0.20,
+            "minimum_neighbors": 3,
+            "max_bonus": 0.12,
+            "bridge_bonus": 0.04,
+        }
+    finally:
+        conn.close()
+
+
 def test_generate_recommendations_caps_same_primary_tag_in_top_twenty(
     tmp_path: Path,
 ) -> None:
@@ -2074,6 +2110,112 @@ def _insert_candidate_from_seed(
         """,
         [tag, candidate_id, tag_rank],
     )
+
+
+def test_generate_recommendations_reranks_eligible_discoveries_by_serendipity(
+    tmp_path: Path,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    config.recommendation.diversity.enabled = False
+    config.recommendation.fatigue.enabled = False
+    config.recommendation.serendipity.enabled = False
+    conn = initialize_database(config)
+    for artist_id, name in (
+        (700, "Seed One"),
+        (701, "Seed Two"),
+        (702, "Seed Three"),
+        (703, "Seed Four"),
+    ):
+        _insert_scoring_artist(
+            conn,
+            artist_id=artist_id,
+            name=name,
+            play_count=40,
+            lifetime_weight=8.0,
+            recent_weight=8.0,
+            knownness=0.9,
+            rediscovery_score=0.0,
+        )
+    conn.execute(
+        """
+        INSERT INTO artist_similarity_edge (
+            source_artist_id, target_artist_id, source,
+            source_score, normalized_score, evidence, fetched_at
+        )
+        VALUES
+            (700, 701, 'lastfm', 0.9, 0.9, '{}', current_timestamp),
+            (702, 703, 'lastfm', 0.9, 0.9, '{}', current_timestamp)
+        """
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=700,
+        candidate_id=710,
+        candidate_name="A Deep Candidate",
+        tag="post-punk",
+        tag_rank=40,
+        similarity=0.8,
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=700,
+        candidate_id=711,
+        candidate_name="Z Bridge Candidate",
+        tag="post-punk",
+        tag_rank=40,
+        similarity=0.8,
+    )
+    conn.execute(
+        """
+        INSERT INTO artist_similarity_edge (
+            source_artist_id, target_artist_id, source,
+            source_score, normalized_score, evidence, fetched_at
+        )
+        VALUES
+            (701, 710, 'lastfm', 0.8, 0.8, '{}', current_timestamp),
+            (702, 711, 'lastfm', 0.8, 0.8, '{}', current_timestamp)
+        """
+    )
+    _insert_candidate_from_seed(
+        conn,
+        seed_id=700,
+        candidate_id=712,
+        candidate_name="Low Evidence Candidate",
+        tag="post-punk",
+        tag_rank=40,
+        similarity=0.8,
+    )
+
+    without_serendipity = generate_recommendations(
+        conn,
+        config,
+        limit=3,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+    config.recommendation.serendipity.enabled = True
+    with_serendipity = generate_recommendations(
+        conn,
+        config,
+        limit=3,
+        mode="balanced",
+        as_of=datetime(2026, 6, 4),
+    )
+
+    without_names = _recommendation_names(conn, without_serendipity.run_id)
+    with_names = _recommendation_names(conn, with_serendipity.run_id)
+    assert without_names.index("A Deep Candidate") < without_names.index("Z Bridge Candidate")
+    assert with_names.index("Z Bridge Candidate") < with_names.index("A Deep Candidate")
+    (explanation_json,) = conn.execute(
+        """
+        SELECT explanation
+        FROM recommendation
+        WHERE run_id = ? AND artist_id = 712
+        """,
+        [with_serendipity.run_id],
+    ).fetchone()
+    assert json.loads(explanation_json)["serendipity"]["raw_bonus"] == 0.0
+    conn.close()
 
 
 def _recommendation_names(conn, run_id: str) -> list[str]:

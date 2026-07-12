@@ -344,6 +344,28 @@ class CalibrationConfig(BaseModel):
     enabled: bool = True
 
 
+class SerendipityConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    minimum_neighbor_edge: float = 0.05
+    minimum_neighbors: int = 2
+    max_bonus: float = 0.15
+    bridge_bonus: float = 0.05
+
+    @model_validator(mode="after")
+    def validate_thresholds(self) -> SerendipityConfig:
+        for field_name in ("minimum_neighbor_edge", "max_bonus", "bridge_bonus"):
+            value = float(getattr(self, field_name))
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{field_name} must be between 0 and 1")
+        if self.minimum_neighbors < 2:
+            raise ValueError("minimum_neighbors must be at least 2")
+        if self.bridge_bonus > self.max_bonus:
+            raise ValueError("bridge_bonus must be <= max_bonus")
+        return self
+
+
 class FatigueConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -426,6 +448,7 @@ class RecommendationConfig(BaseModel):
     quality_gate: QualityGateConfig = Field(default_factory=QualityGateConfig)
     discovery_evidence: DiscoveryEvidenceConfig = Field(default_factory=DiscoveryEvidenceConfig)
     calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
+    serendipity: SerendipityConfig = Field(default_factory=SerendipityConfig)
     fatigue: FatigueConfig = Field(default_factory=FatigueConfig)
     tag_profile: TagProfileConfig = Field(default_factory=TagProfileConfig)
 
@@ -559,6 +582,13 @@ def default_config_document() -> dict[str, Any]:
                 "minimum_tag_reinforcement": 0.05,
             },
             "calibration": {"enabled": True},
+            "serendipity": {
+                "enabled": True,
+                "minimum_neighbor_edge": 0.05,
+                "minimum_neighbors": 2,
+                "max_bonus": 0.15,
+                "bridge_bonus": 0.05,
+            },
             "fatigue": {
                 "enabled": True,
                 "lookback_runs": 5,

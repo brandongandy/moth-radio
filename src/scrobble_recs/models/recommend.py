@@ -31,6 +31,7 @@ from scrobble_recs.models.recommendation_quality import (
     calibrate_positive_components,
     evaluate_discovery_evidence,
 )
+from scrobble_recs.models.serendipity import SerendipityEvidence, score_serendipity
 
 RecommendationProgressPhase: TypeAlias = Literal[
     "refresh_listening",
@@ -84,6 +85,7 @@ class _CandidateScore:
     raw_components: dict[str, float]
     calibrated_components: dict[str, float]
     fatigue: _FatiguePenalty
+    serendipity: SerendipityEvidence
     explanation: dict[str, object]
     score_band: str = "candidate_only"
     normalized_score: float = 0.0
@@ -110,6 +112,7 @@ class _ScoringData:
     listening_by_artist: dict[int, tuple[float, float, int, int, datetime | None, datetime | None]]
     identity_confidence_by_artist: dict[int, float]
     identity_warnings_by_artist: dict[int, list[str]]
+    seed_graph: dict[int, dict[int, float]]
 
 
 @dataclass(frozen=True)
@@ -550,6 +553,7 @@ def _load_scoring_data(
     local_history_end: datetime | None = None,
 ) -> _ScoringData:
     similarity_by_target: dict[int, list[tuple[int, float]]] = {}
+    seed_graph: dict[int, dict[int, float]] = {seed_id: {} for seed_id in seed_ids}
     candidates = set[int]()
     for source_artist_id, target_artist_id, normalized_score in conn.execute(
         """
@@ -558,11 +562,19 @@ def _load_scoring_data(
         WHERE source = 'lastfm'
         """
     ).fetchall():
+        source_id = int(source_artist_id)
         target_id = int(target_artist_id)
+        edge_weight = float(normalized_score)
         candidates.add(target_id)
-        similarity_by_target.setdefault(target_id, []).append(
-            (int(source_artist_id), float(normalized_score))
-        )
+        similarity_by_target.setdefault(target_id, []).append((source_id, edge_weight))
+        if source_id in seed_ids and target_id in seed_ids:
+            retained_weight = max(
+                edge_weight,
+                seed_graph[source_id].get(target_id, 0.0),
+                seed_graph[target_id].get(source_id, 0.0),
+            )
+            seed_graph[source_id][target_id] = retained_weight
+            seed_graph[target_id][source_id] = retained_weight
 
     feedback_similarity_by_target: dict[int, list[tuple[int, float]]] = {}
     feedback_neighborhood_source_ids = (
@@ -679,6 +691,7 @@ def _load_scoring_data(
         listening_by_artist=listening_by_artist,
         identity_confidence_by_artist=identity_by_artist,
         identity_warnings_by_artist=identity_warnings_by_artist,
+        seed_graph=seed_graph,
     )
 
 
@@ -1052,12 +1065,24 @@ def _score_candidates(
         obviousness_penalty = (
             mode.obviousness_penalty_weight * candidate.obviousness if obviousness_enabled else 0.0
         )
+        serendipity = score_serendipity(
+            candidate_edges=tuple(
+                (source_artist_id, similarity)
+                for source_artist_id, similarity in scoring_data.similarity_by_target.get(
+                    candidate.artist_id, []
+                )
+                if source_artist_id in seed_ids
+            ),
+            seed_graph=scoring_data.seed_graph,
+            config=config.recommendation.serendipity,
+        )
         final_score = (
             raw_score - knownness_penalty - obviousness_penalty - candidate.fatigue.penalty
         )
         if mode.name == "balanced":
             final_score -= candidate.trial_penalty
         final_score *= 0.5 + 0.5 * candidate.identity_confidence
+        final_score += serendipity.calibrated_bonus
         score = _CandidateScore(
             artist_id=candidate.artist_id,
             artist_name=candidate.artist_name,
@@ -1079,6 +1104,7 @@ def _score_candidates(
             raw_components=raw_components,
             calibrated_components=calibrated_components,
             fatigue=candidate.fatigue,
+            serendipity=serendipity,
             explanation={},
             score_band="candidate_only" if final_score <= 0.0 else "candidate_only",
             normalized_score=0.0,
@@ -1597,6 +1623,14 @@ def _explanation(
         "feedback_score": score.feedback_score,
         "raw_components": score.raw_components,
         "calibrated_components": score.calibrated_components,
+        "serendipity": {
+            "neighbors": list(score.serendipity.neighbors),
+            "cohesion": score.serendipity.cohesion,
+            "component_ids": list(score.serendipity.component_ids),
+            "is_bridge": score.serendipity.is_bridge,
+            "raw_bonus": score.serendipity.raw_bonus,
+            "calibrated_bonus": score.serendipity.calibrated_bonus,
+        },
         "knownness_penalty": score.knownness_penalty,
         "obviousness_penalty": score.obviousness_penalty,
         "fatigue_penalty": score.fatigue.penalty,
@@ -1776,6 +1810,7 @@ def _persist_run(
                 json.dumps(
                     {
                         "base": config.recommendation.weights.model_dump(mode="json"),
+                        "serendipity": config.recommendation.serendipity.model_dump(mode="json"),
                         "mode": {
                             "name": mode_settings.name,
                             "diversity_lambda": mode_settings.diversity_lambda,

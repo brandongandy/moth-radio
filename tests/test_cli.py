@@ -420,7 +420,9 @@ def test_recommend_command_generates_persisted_run(tmp_path: Path, monkeypatch) 
         subject = "candidate artists"
         status = "processing"
 
-    def fake_generate(conn, config, *, limit, mode=None, history_window=None, progress_callback=None):
+    def fake_generate(
+        conn, config, *, limit, mode=None, history_window=None, progress_callback=None
+    ):
         calls.append((config.app.name, limit, mode))
         assert progress_callback is not None
         progress_callback(FakeProgress())
@@ -450,7 +452,9 @@ def test_recommend_command_passes_mode(tmp_path: Path, monkeypatch) -> None:
         mode = "fresh"
         recommendations = 5
 
-    def fake_generate(conn, config, *, limit, mode=None, history_window=None, progress_callback=None):
+    def fake_generate(
+        conn, config, *, limit, mode=None, history_window=None, progress_callback=None
+    ):
         calls.append((config.app.name, limit, mode))
         return FakeRecommendationStats()
 
@@ -484,7 +488,9 @@ def test_recommend_command_passes_explicit_history_window(tmp_path: Path, monkey
         mode = "balanced"
         recommendations = 1
 
-    def fake_generate(conn, config, *, limit, mode=None, history_window=None, progress_callback=None):
+    def fake_generate(
+        conn, config, *, limit, mode=None, history_window=None, progress_callback=None
+    ):
         windows.append(history_window)
         return FakeRecommendationStats()
 
@@ -529,7 +535,9 @@ def test_recommend_command_rejects_nonpositive_limit(tmp_path: Path, monkeypatch
         mode = "balanced"
         recommendations = 0
 
-    def fake_generate(conn, config, *, limit, mode=None, history_window=None, progress_callback=None):
+    def fake_generate(
+        conn, config, *, limit, mode=None, history_window=None, progress_callback=None
+    ):
         calls.append(limit)
         return FakeRecommendationStats()
 
@@ -549,7 +557,9 @@ def test_recommend_command_prints_generation_value_error(
     runner = CliRunner()
     config_path = write_config(tmp_path)
 
-    def fake_generate(conn, config, *, limit, mode=None, history_window=None, progress_callback=None):
+    def fake_generate(
+        conn, config, *, limit, mode=None, history_window=None, progress_callback=None
+    ):
         raise ValueError("no recommendation candidates found")
 
     monkeypatch.setattr("scrobble_recs.cli.generate_recommendations", fake_generate)
@@ -564,7 +574,9 @@ def test_recommend_command_prints_invalid_mode_error(tmp_path: Path, monkeypatch
     runner = CliRunner()
     config_path = write_config(tmp_path)
 
-    def fake_generate(conn, config, *, limit, mode=None, history_window=None, progress_callback=None):
+    def fake_generate(
+        conn, config, *, limit, mode=None, history_window=None, progress_callback=None
+    ):
         raise ValueError("unsupported recommendation mode 'fresh'")
 
     monkeypatch.setattr("scrobble_recs.cli.generate_recommendations", fake_generate)
@@ -884,7 +896,9 @@ def test_evaluate_command_runs_and_prints_metrics(monkeypatch, tmp_path):
     fake_result = EvaluationResult(
         train_until="2021-01-02T23:59:59",
         test_from="2021-01-03T00:00:00",
+        test_until="2021-04-03T00:00:00",
         recommendations_generated=5,
+        precision_at_50=0.042,
         recall_at_50=0.042,
         recall_at_100=0.067,
         ndcg_at_50=0.031,
@@ -893,11 +907,17 @@ def test_evaluate_command_runs_and_prints_metrics(monkeypatch, tmp_path):
         tag_diversity_at_20=0.78,
         rediscovery_hit_rate=0.05,
         external_candidate_share=0.83,
+        eligible_candidate_coverage=0.67,
+        novelty_rate=0.91,
+        cooldown_or_repeat_rate=0.14,
     )
 
     import scrobble_recs.cli as cli_module
 
-    def fake_evaluate(conn, config, *, train_until, test_from):
+    calls = []
+
+    def fake_evaluate(conn, config, *, train_until, test_from, test_until):
+        calls.append((train_until, test_from, test_until))
         return fake_result
 
     monkeypatch.setattr(cli_module, "evaluate_recommendations_from_config", fake_evaluate)
@@ -915,6 +935,153 @@ def test_evaluate_command_runs_and_prints_metrics(monkeypatch, tmp_path):
     assert "recall@50" in result.stdout
     assert "0.042" in result.stdout
     assert "ndcg@50" in result.stdout
+    assert "precision@50" in result.stdout
+    assert "eligible_candidate_coverage" in result.stdout
+    assert "novelty_rate" in result.stdout
+    assert "cooldown_or_repeat_rate" in result.stdout
+    assert calls == [
+        (
+            datetime(2021, 1, 3),
+            datetime(2021, 1, 3),
+            datetime(2021, 4, 3),
+        )
+    ]
+
+
+def test_evaluate_command_passes_explicit_horizon(monkeypatch, tmp_path) -> None:
+    from scrobble_recs.models.evaluate import EvaluationResult
+
+    calls = []
+    fake_result = EvaluationResult(
+        train_until="2021-01-01T00:00:00",
+        test_from="2021-01-02T00:00:00",
+        test_until="2021-01-10T00:00:00",
+        recommendations_generated=0,
+        precision_at_50=0.0,
+        recall_at_50=0.0,
+        recall_at_100=0.0,
+        ndcg_at_50=0.0,
+        knownness_median=0.0,
+        obviousness_median=0.0,
+        tag_diversity_at_20=0.0,
+        rediscovery_hit_rate=0.0,
+        external_candidate_share=0.0,
+        eligible_candidate_coverage=0.0,
+        novelty_rate=0.0,
+        cooldown_or_repeat_rate=0.0,
+    )
+
+    def fake_evaluate(conn, config, *, train_until, test_from, test_until):
+        calls.append((train_until, test_from, test_until))
+        return fake_result
+
+    import scrobble_recs.cli as cli_module
+
+    monkeypatch.setattr(cli_module, "evaluate_recommendations_from_config", fake_evaluate)
+    result = CliRunner().invoke(
+        app,
+        [
+            "evaluate",
+            "--config",
+            str(write_config(tmp_path)),
+            "--train-until",
+            "2021-01-01",
+            "--test-from",
+            "2021-01-02",
+            "--test-until",
+            "2021-01-10",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            datetime(2021, 1, 1),
+            datetime(2021, 1, 2),
+            datetime(2021, 1, 10),
+        )
+    ]
+
+
+def test_evaluate_command_normalizes_offset_bounds_and_derived_horizon(
+    monkeypatch, tmp_path
+) -> None:
+    from scrobble_recs.models.evaluate import EvaluationResult
+
+    calls = []
+    fake_result = EvaluationResult(
+        train_until="2021-01-01T00:00:00",
+        test_from="2021-01-02T00:00:00",
+        test_until="2021-04-02T00:00:00",
+        recommendations_generated=0,
+        precision_at_50=0.0,
+        recall_at_50=0.0,
+        recall_at_100=0.0,
+        ndcg_at_50=0.0,
+        knownness_median=0.0,
+        obviousness_median=0.0,
+        tag_diversity_at_20=0.0,
+        rediscovery_hit_rate=0.0,
+        external_candidate_share=0.0,
+        eligible_candidate_coverage=0.0,
+        novelty_rate=0.0,
+        cooldown_or_repeat_rate=0.0,
+    )
+
+    def fake_evaluate(conn, config, *, train_until, test_from, test_until):
+        calls.append((train_until, test_from, test_until))
+        return fake_result
+
+    import scrobble_recs.cli as cli_module
+
+    monkeypatch.setattr(cli_module, "evaluate_recommendations_from_config", fake_evaluate)
+    result = CliRunner().invoke(
+        app,
+        [
+            "evaluate",
+            "--config",
+            str(write_config(tmp_path)),
+            "--train-until",
+            "2021-01-01T08:00:00+08:00",
+            "--test-from",
+            "2021-01-02T03:00:00+03:00",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            datetime(2021, 1, 1),
+            datetime(2021, 1, 2),
+            datetime(2021, 4, 2),
+        )
+    ]
+
+
+def test_evaluate_command_rejects_nonpositive_horizon(monkeypatch, tmp_path) -> None:
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("evaluation should not run for an invalid horizon")
+
+    import scrobble_recs.cli as cli_module
+
+    monkeypatch.setattr(cli_module, "evaluate_recommendations_from_config", fail_if_called)
+    result = CliRunner().invoke(
+        app,
+        [
+            "evaluate",
+            "--config",
+            str(write_config(tmp_path)),
+            "--train-until",
+            "2021-01-01",
+            "--test-from",
+            "2021-01-02",
+            "--test-until",
+            "2021-01-02",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "test_until must be after test_from" in result.stdout
 
 
 def test_profile_tags_command_prints_tag_weights(monkeypatch, tmp_path):

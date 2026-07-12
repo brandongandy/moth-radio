@@ -15,8 +15,8 @@ class ListeningWindow:
     end: datetime
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "start", _normalize_timestamp(self.start))
-        object.__setattr__(self, "end", _normalize_timestamp(self.end))
+        object.__setattr__(self, "start", normalize_timestamp(self.start))
+        object.__setattr__(self, "end", normalize_timestamp(self.end))
         if self.start >= self.end:
             raise ValueError("--since must be before --until")
 
@@ -24,7 +24,8 @@ class ListeningWindow:
         return self.start <= played_at < self.end
 
 
-def _normalize_timestamp(value: datetime) -> datetime:
+def normalize_timestamp(value: datetime) -> datetime:
+    """Convert offset-aware timestamps to the project's naive UTC representation."""
     if value.tzinfo is None or value.utcoffset() is None:
         return value
     return value.astimezone(UTC).replace(tzinfo=None)

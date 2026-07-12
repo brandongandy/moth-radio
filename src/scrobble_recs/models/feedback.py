@@ -186,14 +186,23 @@ def record_feedback_event(
     )
 
 
-def load_feedback_profile(conn: DuckDBPyConnection) -> FeedbackProfile:
+def load_feedback_profile(
+    conn: DuckDBPyConnection,
+    *,
+    as_of: datetime | None = None,
+) -> FeedbackProfile:
+    """Load only feedback available at an optional historical cutoff."""
     profile = FeedbackProfile()
+    cutoff_clause = "" if as_of is None else "WHERE created_at < ?"
+    params: list[object] = [] if as_of is None else [as_of]
     rows = conn.execute(
-        """
+        f"""
         SELECT artist_id, action, value, context
         FROM feedback_event
+        {cutoff_clause}
         ORDER BY created_at, feedback_id
-        """
+        """,
+        params,
     ).fetchall()
     for artist_id_raw, action_raw, value_raw, context_raw in rows:
         artist_id = int(artist_id_raw)
@@ -226,18 +235,25 @@ def load_cooldown_artist_ids(
     *,
     as_of: datetime,
     days: int,
+    until: datetime | None = None,
 ) -> set[int]:
     """Return artists with a cooldown vote strictly newer than the cutoff."""
     cutoff = as_of - timedelta(days=days)
     placeholders = ", ".join("?" for _ in COOLDOWN_FEEDBACK_ACTIONS)
+    upper_bound_clause = "" if until is None else "AND created_at < ?"
+    params: list[object] = [cutoff]
+    if until is not None:
+        params.append(until)
+    params.extend(sorted(COOLDOWN_FEEDBACK_ACTIONS))
     rows = conn.execute(
         f"""
         SELECT DISTINCT artist_id
         FROM feedback_event
         WHERE created_at > ?
+          {upper_bound_clause}
           AND action IN ({placeholders})
         """,
-        [cutoff, *sorted(COOLDOWN_FEEDBACK_ACTIONS)],
+        params,
     ).fetchall()
     return {int(row[0]) for row in rows}
 

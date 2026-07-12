@@ -37,7 +37,11 @@ from scrobble_recs.importers.lastfm_csv import ImportStats, get_import_stats, im
 from scrobble_recs.models.evaluate import EvaluationResult, evaluate_recommendations
 from scrobble_recs.models.feedback import record_feedback_event, rerank_recommendation_run
 from scrobble_recs.models.profile_builder import build_profile
-from scrobble_recs.models.profile_window import ListeningWindow, resolve_listening_window
+from scrobble_recs.models.profile_window import (
+    ListeningWindow,
+    normalize_timestamp,
+    resolve_listening_window,
+)
 from scrobble_recs.models.recommend import (
     RecommendationProgress,
     RecommendationStats,
@@ -818,6 +822,10 @@ def evaluate_command(
         str | None,
         typer.Option("--test-from", help="Start of test period (YYYY-MM-DD or ISO timestamp)."),
     ] = None,
+    test_until: Annotated[
+        str | None,
+        typer.Option("--test-until", help="End of test period (YYYY-MM-DD or ISO timestamp)."),
+    ] = None,
 ) -> None:
     """Evaluate recommendation quality using a train/test split."""
     from datetime import timedelta
@@ -830,12 +838,17 @@ def evaluate_command(
             train_dt = _parse_timestamp(train_until)
             test_dt = _parse_timestamp(test_from)
         elif split_date:
-            train_dt = _parse_timestamp(split_date).replace(hour=23, minute=59, second=59)
-            test_dt = _parse_timestamp(split_date).replace(hour=0, minute=0, second=0) + timedelta(
-                days=1
-            )
+            train_dt = _parse_timestamp(split_date)
+            test_dt = train_dt
         else:
             console.print("Error: provide --split-date or both --train-until and --test-from")
+            raise typer.Exit(code=1)
+        test_end_dt = _parse_timestamp(test_until) if test_until else test_dt + timedelta(days=90)
+        if test_dt < train_dt:
+            console.print("Error: test_from must not be before train_until")
+            raise typer.Exit(code=1)
+        if test_end_dt <= test_dt:
+            console.print("Error: test_until must be after test_from")
             raise typer.Exit(code=1)
 
         console.print("Generating evaluation recommendations from local DuckDB data...")
@@ -844,6 +857,7 @@ def evaluate_command(
             resolved_config,
             train_until=train_dt,
             test_from=test_dt,
+            test_until=test_end_dt,
         )
     finally:
         conn.close()
@@ -853,7 +867,9 @@ def evaluate_command(
     console.print("")
     console.print(f"train_until: {result.train_until}")
     console.print(f"test_from: {result.test_from}")
+    console.print(f"test_until: {result.test_until}")
     console.print("")
+    console.print(f"precision@50: {result.precision_at_50:.3f}")
     console.print(f"recall@50: {result.recall_at_50:.3f}")
     console.print(f"recall@100: {result.recall_at_100:.3f}")
     console.print(f"ndcg@50: {result.ndcg_at_50:.3f}")
@@ -862,6 +878,9 @@ def evaluate_command(
     console.print(f"obviousness median: {result.obviousness_median:.3f}")
     console.print(f"rediscovery_hit_rate: {result.rediscovery_hit_rate:.3f}")
     console.print(f"external_candidate_share: {result.external_candidate_share:.3f}")
+    console.print(f"eligible_candidate_coverage: {result.eligible_candidate_coverage:.3f}")
+    console.print(f"novelty_rate: {result.novelty_rate:.3f}")
+    console.print(f"cooldown_or_repeat_rate: {result.cooldown_or_repeat_rate:.3f}")
 
 
 @app.command("feedback")
@@ -933,7 +952,7 @@ def feedback_command(
 def _parse_timestamp(value: str) -> datetime:
     """Parse YYYY-MM-DD or ISO-8601 timestamp string."""
     try:
-        return datetime.fromisoformat(value)
+        return normalize_timestamp(datetime.fromisoformat(value))
     except ValueError as err:
         raise typer.BadParameter(f"invalid timestamp: {value}") from err
 
@@ -944,9 +963,16 @@ def evaluate_recommendations_from_config(
     *,
     train_until: datetime,
     test_from: datetime,
+    test_until: datetime,
 ) -> EvaluationResult:
     """Thin wrapper for CLI monkeypatching in tests."""
-    return evaluate_recommendations(conn, config, train_until=train_until, test_from=test_from)
+    return evaluate_recommendations(
+        conn,
+        config,
+        train_until=train_until,
+        test_from=test_from,
+        test_until=test_until,
+    )
 
 
 def _count_query(conn: DuckDBPyConnection, sql: str) -> int:

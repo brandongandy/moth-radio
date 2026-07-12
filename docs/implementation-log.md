@@ -1,5 +1,69 @@
 # Implementation Log
 
+## 2026-07-12: Leakage-free discovery evaluation
+
+Changed:
+
+- Bounded evaluation seed history to the 12 calendar months before `train_until`
+  and bounded held-out discovery outcomes to `[test_from, test_until)`.
+- Defined positive outcomes as artists first heard in the held-out horizon with
+  no earlier non-duplicate local scrobble.
+- Added precision@50, eligible-candidate coverage, recommendation novelty, and
+  cooldown/permanent-exclusion diagnostic rates to the evaluation result and
+  CLI output.
+- Added `--test-until`; when omitted, `evaluate` derives a 90-day held-out
+  horizon from `--test-from`.
+- Updated evaluation fixtures for direct persisted graph-evidence admission and
+  added regressions for future-only seed leakage and held-out horizon reporting.
+- Scoped feedback profiles, cooldown votes, and recommendation-run fatigue to
+  the evaluation cutoff so future user activity cannot alter historical scores.
+- Made `--split-date` a single shared exclusive boundary and added explicit
+  evaluation CLI horizon validation.
+- Prevented historical evaluation from refreshing or reading all-time
+  `artist_listening_fact` values; cutoff-bounded recommendation scoring now
+  derives local listening state from pre-cutoff scrobbles only.
+- Documented default/explicit history windows, discovery-only admission,
+  feedback cooldowns and hides, and inspectable export/explanation fields.
+
+Verified:
+
+- `python -m pytest tests/test_evaluate.py tests/test_cli.py -q` before implementation -> 7 failed, 35 passed; failures showed the missing `test_until` contract and metrics.
+- `python -m pytest tests/test_evaluate.py tests/test_cli.py -q` after implementation -> 42 passed.
+- `python -m pytest` -> 342 passed.
+- `python -m ruff check .` -> All checks passed.
+- `python -m ruff format --check .` -> 63 files already formatted.
+- `python -m mypy src` -> Success, no issues found in 38 source files.
+- Additional Task 7 review regression: `python -m pytest tests/test_evaluate.py tests/test_cli.py -q` before the cutoff fix -> 4 failed, 42 passed; failures proved post-cutoff feedback, fatigue, split boundaries, and invalid horizons leaked or were unvalidated.
+- Additional Task 7 review regression: `python -m pytest tests/test_evaluate.py tests/test_cli.py -q` after the cutoff fix -> 46 passed.
+- Final Task 7 review verification: `python -m pytest` -> 346 passed.
+- Final Task 7 review verification: `python -m ruff check .` -> All checks passed.
+- Final Task 7 review verification: `python -m ruff format --check .` -> 63 files already formatted.
+- Final Task 7 review verification: `python -m mypy src` -> Success, no issues found in 38 source files.
+- Final Task 7 boundary regression: exact-`train_until` feedback, cooldown, and
+  recommendation-run events are excluded from historical evaluation; evaluation
+  and CLI ISO offsets normalize to naive UTC before boundary validation,
+  arithmetic, and queries.
+- Final Task 7 boundary red/green: `python -m pytest tests/test_evaluate.py
+  tests/test_cli.py -q` before the fix -> 4 failed, 44 passed; after -> 48
+  passed.
+- Final Task 7 boundary verification: `python -m pytest` -> 348 passed.
+- Final Task 7 boundary verification: `python -m ruff check .` -> All checks
+  passed.
+- Final Task 7 boundary verification: `python -m ruff format --check .` -> 63
+  files already formatted.
+- Final Task 7 boundary verification: `python -m mypy src` -> Success, no
+  issues found in 38 source files.
+- Follow-up whole-branch regression: `python -m pytest
+  tests/test_evaluate.py::test_evaluation_uses_pre_cutoff_history_without_refreshing_future_artist_fact
+  -q` before the fix -> 1 failed; the future artist fact was rewritten from
+  the all-time aggregate.
+- Follow-up whole-branch focused verification: `python -m pytest
+  tests/test_evaluate.py tests/test_cli.py -q` -> 48 passed.
+- Follow-up whole-branch final verification: `python -m pytest` -> 348 passed;
+  `python -m ruff check .` -> All checks passed; `python -m ruff format --check
+  .` -> 63 files already formatted; `python -m mypy src` -> Success, no issues
+  found in 38 source files.
+
 ## 2026-06-15: Recommendation quality base hardening
 
 Changed:

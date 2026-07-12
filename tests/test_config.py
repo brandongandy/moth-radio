@@ -547,6 +547,15 @@ def test_recommendation_config_includes_run_limit_and_knownness():
     assert cfg.knownness.threshold == 0.65
 
 
+def test_recommendation_config_validates_profile_window_months():
+    from scrobble_recs.config import RecommendationConfig
+
+    assert RecommendationConfig(profile_window_months=12).profile_window_months == 12
+
+    with pytest.raises(ValidationError, match="profile_window_months must be at least 1"):
+        RecommendationConfig(profile_window_months=0)
+
+
 def test_full_config_loads_enrichment_and_knownness_sections(tmp_path):
     config_path = tmp_path / "config.json"
     config_path.write_text(

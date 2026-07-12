@@ -370,6 +370,7 @@ class RecommendationConfig(BaseModel):
     seed_artist_limit: int = 250
     similar_artists_per_seed: int = 100
     min_seed_scrobbles: int = 3
+    profile_window_months: int = 12
     max_knownness_default: float = 0.65
     rediscovery_enabled: bool = True
     run_limit: int = 500
@@ -389,6 +390,8 @@ class RecommendationConfig(BaseModel):
             raise ValueError("similar_artists_per_seed must be at least 1")
         if self.min_seed_scrobbles < 1:
             raise ValueError("min_seed_scrobbles must be at least 1")
+        if self.profile_window_months < 1:
+            raise ValueError("profile_window_months must be at least 1")
         if not 0.0 <= self.max_knownness_default <= 1.0:
             raise ValueError("max_knownness_default must be between 0 and 1")
         if self.run_limit < 1:

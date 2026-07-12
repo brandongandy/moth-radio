@@ -37,6 +37,7 @@ from scrobble_recs.importers.lastfm_csv import ImportStats, get_import_stats, im
 from scrobble_recs.models.evaluate import EvaluationResult, evaluate_recommendations
 from scrobble_recs.models.feedback import record_feedback_event, rerank_recommendation_run
 from scrobble_recs.models.profile_builder import build_profile
+from scrobble_recs.models.profile_window import ListeningWindow, resolve_listening_window
 from scrobble_recs.models.recommend import (
     RecommendationProgress,
     RecommendationStats,
@@ -706,12 +707,30 @@ def recommend_command(
         typer.Option("--limit", help="Number of recommendations to persist."),
     ] = 500,
     mode: Annotated[str | None, typer.Option("--mode", help="Recommendation mode.")] = None,
+    since: Annotated[
+        str | None,
+        typer.Option("--since", help="Start of listening history (ISO timestamp)."),
+    ] = None,
+    until: Annotated[
+        str | None,
+        typer.Option("--until", help="End of listening history (ISO timestamp)."),
+    ] = None,
 ) -> None:
     if limit < 1:
         console.print("Error: limit must be at least 1")
         raise typer.Exit(code=1)
 
     resolved_config = load_config(config)
+    try:
+        history_window = resolve_listening_window(
+            as_of=datetime.now(tz=UTC).replace(tzinfo=None),
+            default_months=resolved_config.recommendation.profile_window_months,
+            since=_parse_timestamp(since) if since is not None else None,
+            until=_parse_timestamp(until) if until is not None else None,
+        )
+    except (typer.BadParameter, ValueError) as exc:
+        console.print(f"Error: {exc}")
+        raise typer.Exit(code=1) from exc
     conn = initialize_database(resolved_config)
     try:
         try:
@@ -721,6 +740,7 @@ def recommend_command(
                 resolved_config,
                 limit=limit,
                 mode=mode,
+                history_window=history_window,
             )
         except ValueError as exc:
             console.print(f"Error: {exc}")
@@ -730,6 +750,7 @@ def recommend_command(
 
     console.print("Recommendation run complete")
     _print_recommendation_stats(stats)
+    console.print(f"history window: {history_window.start} to {history_window.end}")
 
 
 @app.command("export")
@@ -1004,6 +1025,7 @@ def _generate_recommendations_with_progress(
     *,
     limit: int,
     mode: str | None,
+    history_window: ListeningWindow | None = None,
 ) -> RecommendationStats:
     task_ids: dict[str, TaskID] = {}
     with Progress(
@@ -1036,6 +1058,7 @@ def _generate_recommendations_with_progress(
             resolved_config,
             limit=limit,
             mode=mode,
+            history_window=history_window,
             progress_callback=on_progress,
         )
 

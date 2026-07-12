@@ -26,6 +26,11 @@ from scrobble_recs.models.listening import refresh_artist_listening_scores
 from scrobble_recs.models.modes import RecommendationModeSettings, resolve_recommendation_mode
 from scrobble_recs.models.profile import SeedArtist, select_seed_artists
 from scrobble_recs.models.profile_window import ListeningWindow, resolve_listening_window
+from scrobble_recs.models.recommendation_quality import (
+    DirectEvidence,
+    calibrate_positive_components,
+    evaluate_discovery_evidence,
+)
 
 RecommendationProgressPhase: TypeAlias = Literal[
     "refresh_listening",
@@ -76,6 +81,8 @@ class _CandidateScore:
     diversity_penalty: float
     primary_tag: str | None
     quality_gate: _QualityGateDecision
+    raw_components: dict[str, float]
+    calibrated_components: dict[str, float]
     fatigue: _FatiguePenalty
     explanation: dict[str, object]
     score_band: str = "candidate_only"
@@ -117,6 +124,31 @@ class _QualityGateDecision:
     passed: bool
     reasons: tuple[str, ...]
     thresholds: dict[str, float]
+    evidence: DirectEvidence
+
+
+@dataclass(frozen=True)
+class _EligibleCandidate:
+    artist_id: int
+    artist_name: str
+    lastfm_similarity_score: float
+    tag_similarity_score: float
+    feedback: _FeedbackScore
+    rediscovery_score: float
+    knownness: float
+    obviousness: float
+    trial_penalty: float
+    primary_tag: str | None
+    quality_gate: _QualityGateDecision
+    fatigue: _FatiguePenalty
+    local_scrobble_count: int
+    listened_day_count: int
+    first_listened_at: datetime | None
+    last_listened_at: datetime | None
+    years_since_last_listen: float
+    rediscovery_eligible: bool
+    identity_confidence: float
+    identity_warnings: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -787,6 +819,7 @@ def _score_candidates(
     total_seed_weight = sum(seed_weight_by_id.values()) or 1.0
     scores: list[_CandidateScore] = []
     candidate_only_scores: list[_CandidateScore] = []
+    eligible_candidates: list[_EligibleCandidate] = []
     diagnostics: list[_CandidateDiagnostic] = []
     obviousness_enabled = config.recommendation.obviousness.enabled
     total_candidates = len(scoring_data.candidates)
@@ -890,19 +923,22 @@ def _score_candidates(
             diagnostics.append(_excluded_candidate_diagnostic(artist_id, "obvious_candidate"))
             continue
 
+        raw_components = {
+            "lastfm_similarity": lastfm_score,
+            "tag_similarity": tag_score,
+            "feedback": feedback.score,
+        }
         quality_gate = _quality_gate_decision(
             config,
             mode,
-            lastfm_similarity_score=lastfm_score,
-            tag_similarity_score=tag_score,
-            feedback_score=feedback.score,
-            rediscovery_score=scored_rediscovery,
-        )
-        quality_gate_payload = _quality_gate_payload(
-            quality_gate,
-            lastfm_similarity_score=lastfm_score,
-            tag_similarity_score=tag_score,
-            feedback_score=feedback.score,
+            edges=tuple(
+                (source_artist_id, similarity)
+                for source_artist_id, similarity in scoring_data.similarity_by_target.get(
+                    artist_id, []
+                )
+                if source_artist_id in seed_weight_by_id
+            ),
+            tag_score=tag_score,
             rediscovery_score=scored_rediscovery,
         )
         if not quality_gate.passed:
@@ -911,107 +947,36 @@ def _score_candidates(
                     artist_id=artist_id,
                     state="rejected",
                     reasons=("quality_gate",),
-                    quality_gate=quality_gate_payload,
+                    quality_gate=_quality_gate_payload(
+                        quality_gate,
+                        raw_components=raw_components,
+                        calibrated_components={key: 0.0 for key in raw_components},
+                        rediscovery_score=scored_rediscovery,
+                    ),
                 )
             )
             continue
 
-        diagnostics.append(
-            _CandidateDiagnostic(
-                artist_id=artist_id,
-                state="eligible",
-                reasons=("eligible",),
-                quality_gate=quality_gate_payload,
-            )
-        )
-
-        weights = config.recommendation.weights
-        raw_score = _raw_score(
-            weights,
-            lastfm_score * mode.lastfm_similarity_multiplier,
-            tag_score * mode.tag_similarity_multiplier,
-            scored_rediscovery * mode.rediscovery_multiplier,
-            feedback.score,
-        )
-        evidence_count = sum(
-            1 for val in (lastfm_score, tag_score, feedback.score, scored_rediscovery) if val > 0.0
-        )
-        knownness_penalty = 0.40 * max(0.0, knownness - mode.max_knownness)
-        obviousness_penalty = (
-            mode.obviousness_penalty_weight * obviousness if obviousness_enabled else 0.0
-        )
         fatigue = fatigue_by_artist.get(
             artist_id,
             _FatiguePenalty(prior_run_appearances=0, latest_run_rank=None, penalty=0.0),
         )
-        final_score = raw_score - knownness_penalty - obviousness_penalty - fatigue.penalty
-        if mode.name == "balanced":
-            final_score -= trial_penalty
-
         identity_conf = scoring_data.identity_confidence_by_artist.get(artist_id, 0.50)
         identity_warnings = tuple(scoring_data.identity_warnings_by_artist.get(artist_id, []))
-        confidence_multiplier = 0.5 + 0.5 * identity_conf
-        final_score *= confidence_multiplier
-
-        if final_score <= 0:
-            candidate_only = _CandidateScore(
+        eligible_candidates.append(
+            _EligibleCandidate(
                 artist_id=artist_id,
                 artist_name=artist_name,
-                final_score=0.0,
-                raw_score=raw_score,
                 lastfm_similarity_score=lastfm_score,
                 tag_similarity_score=tag_score,
-                feedback_score=feedback.score,
-                feedback_contributions=feedback.contributions,
-                feedback_effects=feedback.effects,
+                feedback=feedback,
                 rediscovery_score=scored_rediscovery,
                 knownness=knownness,
                 obviousness=obviousness,
-                knownness_penalty=knownness_penalty,
-                obviousness_penalty=obviousness_penalty,
-                diversity_penalty=0.0,
+                trial_penalty=trial_penalty,
                 primary_tag=_primary_tag(artist_id, tag_profile, scoring_data),
                 quality_gate=quality_gate,
                 fatigue=fatigue,
-                explanation={},
-                score_band="candidate_only",
-                normalized_score=0.0,
-                evidence_source_count=evidence_count,
-                trial_penalty=trial_penalty,
-                local_scrobble_count=local_play_count,
-                listened_day_count=local_active_days,
-                first_listened_at=first_played,
-                last_listened_at=last_played,
-                years_since_last_listen=years_since_last_listen,
-                rediscovery_eligible=rediscovery_eligible,
-                identity_confidence=identity_conf,
-                identity_warnings=identity_warnings,
-            )
-            candidate_only_scores.append(candidate_only)
-            continue
-        scores.append(
-            _CandidateScore(
-                artist_id=artist_id,
-                artist_name=artist_name,
-                final_score=final_score,
-                raw_score=raw_score,
-                lastfm_similarity_score=lastfm_score,
-                tag_similarity_score=tag_score,
-                feedback_score=feedback.score,
-                feedback_contributions=feedback.contributions,
-                feedback_effects=feedback.effects,
-                rediscovery_score=scored_rediscovery,
-                knownness=knownness,
-                obviousness=obviousness,
-                knownness_penalty=knownness_penalty,
-                obviousness_penalty=obviousness_penalty,
-                diversity_penalty=0.0,
-                primary_tag=_primary_tag(artist_id, tag_profile, scoring_data),
-                quality_gate=quality_gate,
-                fatigue=fatigue,
-                explanation={},
-                evidence_source_count=evidence_count,
-                trial_penalty=trial_penalty,
                 local_scrobble_count=local_play_count,
                 listened_day_count=local_active_days,
                 first_listened_at=first_played,
@@ -1028,9 +993,110 @@ def _score_candidates(
                 phase="score_candidates",
                 current=processed,
                 total=total_candidates,
-                subject=f"{len(scores)} positive so far",
+                subject=f"{len(eligible_candidates)} positive so far",
                 status="processing",
             )
+
+    raw_component_rows = [
+        {
+            "lastfm_similarity": candidate.lastfm_similarity_score,
+            "tag_similarity": candidate.tag_similarity_score,
+            "feedback": candidate.feedback.score,
+        }
+        for candidate in eligible_candidates
+    ]
+    calibrated_component_rows = (
+        calibrate_positive_components(raw_component_rows)
+        if config.recommendation.calibration.enabled
+        else [dict(row) for row in raw_component_rows]
+    )
+    for candidate, raw_components, calibrated_components in zip(
+        eligible_candidates, raw_component_rows, calibrated_component_rows, strict=True
+    ):
+        diagnostics.append(
+            _CandidateDiagnostic(
+                artist_id=candidate.artist_id,
+                state="eligible",
+                reasons=("eligible",),
+                quality_gate=_quality_gate_payload(
+                    candidate.quality_gate,
+                    raw_components=raw_components,
+                    calibrated_components=calibrated_components,
+                    rediscovery_score=candidate.rediscovery_score,
+                ),
+            )
+        )
+        calibrated_feedback = (
+            calibrated_components["feedback"]
+            if candidate.feedback.score > 0.0
+            else candidate.feedback.score
+        )
+        raw_score = _raw_score(
+            config.recommendation.weights,
+            calibrated_components["lastfm_similarity"] * mode.lastfm_similarity_multiplier,
+            calibrated_components["tag_similarity"] * mode.tag_similarity_multiplier,
+            candidate.rediscovery_score * mode.rediscovery_multiplier,
+            calibrated_feedback,
+        )
+        evidence_count = sum(
+            1
+            for value in (
+                candidate.lastfm_similarity_score,
+                candidate.tag_similarity_score,
+                candidate.feedback.score,
+                candidate.rediscovery_score,
+            )
+            if value > 0.0
+        )
+        knownness_penalty = 0.40 * max(0.0, candidate.knownness - mode.max_knownness)
+        obviousness_penalty = (
+            mode.obviousness_penalty_weight * candidate.obviousness if obviousness_enabled else 0.0
+        )
+        final_score = (
+            raw_score - knownness_penalty - obviousness_penalty - candidate.fatigue.penalty
+        )
+        if mode.name == "balanced":
+            final_score -= candidate.trial_penalty
+        final_score *= 0.5 + 0.5 * candidate.identity_confidence
+        score = _CandidateScore(
+            artist_id=candidate.artist_id,
+            artist_name=candidate.artist_name,
+            final_score=max(0.0, final_score),
+            raw_score=raw_score,
+            lastfm_similarity_score=candidate.lastfm_similarity_score,
+            tag_similarity_score=candidate.tag_similarity_score,
+            feedback_score=candidate.feedback.score,
+            feedback_contributions=candidate.feedback.contributions,
+            feedback_effects=candidate.feedback.effects,
+            rediscovery_score=candidate.rediscovery_score,
+            knownness=candidate.knownness,
+            obviousness=candidate.obviousness,
+            knownness_penalty=knownness_penalty,
+            obviousness_penalty=obviousness_penalty,
+            diversity_penalty=0.0,
+            primary_tag=candidate.primary_tag,
+            quality_gate=candidate.quality_gate,
+            raw_components=raw_components,
+            calibrated_components=calibrated_components,
+            fatigue=candidate.fatigue,
+            explanation={},
+            score_band="candidate_only" if final_score <= 0.0 else "candidate_only",
+            normalized_score=0.0,
+            evidence_source_count=evidence_count,
+            trial_penalty=candidate.trial_penalty,
+            local_scrobble_count=candidate.local_scrobble_count,
+            listened_day_count=candidate.listened_day_count,
+            first_listened_at=candidate.first_listened_at,
+            last_listened_at=candidate.last_listened_at,
+            years_since_last_listen=candidate.years_since_last_listen,
+            rediscovery_eligible=candidate.rediscovery_eligible,
+            identity_confidence=candidate.identity_confidence,
+            identity_warnings=candidate.identity_warnings,
+        )
+        if final_score <= 0.0:
+            candidate_only_scores.append(score)
+        else:
+            scores.append(score)
     _report_progress(
         progress_callback,
         phase="score_candidates",
@@ -1363,44 +1429,57 @@ def _quality_gate_decision(
     config: ScrobbleRecsConfig,
     mode: RecommendationModeSettings,
     *,
-    lastfm_similarity_score: float,
-    tag_similarity_score: float,
-    feedback_score: float,
+    edges: tuple[tuple[int, float], ...],
+    tag_score: float,
     rediscovery_score: float,
 ) -> _QualityGateDecision:
     gate = config.recommendation.quality_gate
+    evidence_decision = evaluate_discovery_evidence(
+        edges=edges,
+        tag_score=tag_score,
+        config=config.recommendation.discovery_evidence,
+    )
+    thresholds = {
+        "minimum_seed_edge": config.recommendation.discovery_evidence.minimum_seed_edge,
+        "strong_seed_edge": config.recommendation.discovery_evidence.strong_seed_edge,
+        "minimum_seed_count": float(config.recommendation.discovery_evidence.minimum_seed_count),
+        "minimum_tag_reinforcement": (
+            config.recommendation.discovery_evidence.minimum_tag_reinforcement
+        ),
+    }
+    if mode.name != "rediscovery":
+        return _QualityGateDecision(
+            passed=evidence_decision.passed,
+            reasons=evidence_decision.reasons,
+            thresholds=thresholds,
+            evidence=evidence_decision.evidence,
+        )
+    if gate.rediscovery_requires_taste_match:
+        return _QualityGateDecision(
+            passed=evidence_decision.passed,
+            reasons=evidence_decision.reasons,
+            thresholds=thresholds,
+            evidence=evidence_decision.evidence,
+        )
     if not gate.enabled:
         return _QualityGateDecision(
             passed=True,
             reasons=("disabled",),
-            thresholds={
-                "min_lastfm_similarity_score": 0.0,
-                "min_tag_similarity_score": 0.0,
-                "min_positive_feedback_score": 0.0,
-            },
+            thresholds=thresholds,
+            evidence=evidence_decision.evidence,
         )
-
-    multiplier = gate.rediscovery_mode_multiplier if mode.name == "rediscovery" else 1.0
-    min_lastfm = gate.min_lastfm_similarity_score * multiplier
-    min_tag = gate.min_tag_similarity_score * multiplier
-    min_feedback = gate.min_positive_feedback_score * multiplier
-    reasons: list[str] = []
-    if lastfm_similarity_score >= min_lastfm:
-        reasons.append("lastfm_similarity")
-    if tag_similarity_score >= min_tag:
-        reasons.append("tag_similarity")
-    if feedback_score >= min_feedback:
-        reasons.append("feedback")
-    if not gate.rediscovery_requires_taste_match and rediscovery_score > 0.0:
-        reasons.append("rediscovery")
+    if mode.name == "rediscovery" and rediscovery_score > 0.0:
+        return _QualityGateDecision(
+            passed=True,
+            reasons=("rediscovery",),
+            thresholds=thresholds,
+            evidence=evidence_decision.evidence,
+        )
     return _QualityGateDecision(
-        passed=bool(reasons),
-        reasons=tuple(reasons),
-        thresholds={
-            "min_lastfm_similarity_score": min_lastfm,
-            "min_tag_similarity_score": min_tag,
-            "min_positive_feedback_score": min_feedback,
-        },
+        passed=evidence_decision.passed,
+        reasons=evidence_decision.reasons,
+        thresholds=thresholds,
+        evidence=evidence_decision.evidence,
     )
 
 
@@ -1421,19 +1500,25 @@ def _excluded_candidate_diagnostic(artist_id: int, reason: str) -> _CandidateDia
 def _quality_gate_payload(
     decision: _QualityGateDecision,
     *,
-    lastfm_similarity_score: float,
-    tag_similarity_score: float,
-    feedback_score: float,
+    raw_components: dict[str, float],
+    calibrated_components: dict[str, float],
     rediscovery_score: float,
 ) -> dict[str, object]:
     return {
         "passed": decision.passed,
         "reasons": list(decision.reasons),
         "thresholds": decision.thresholds,
+        "direct_evidence": {
+            "distinct_seed_count": decision.evidence.distinct_seed_count,
+            "strongest_edge": decision.evidence.strongest_edge,
+            "qualifying_edges": [list(edge) for edge in decision.evidence.qualifying_edges],
+        },
+        "raw_components": raw_components,
+        "calibrated_components": calibrated_components,
         "scores": {
-            "lastfm_similarity_score": lastfm_similarity_score,
-            "tag_similarity_score": tag_similarity_score,
-            "feedback_score": feedback_score,
+            "lastfm_similarity_score": raw_components["lastfm_similarity"],
+            "tag_similarity_score": raw_components["tag_similarity"],
+            "feedback_score": raw_components["feedback"],
             "rediscovery_score": rediscovery_score,
         },
     }
@@ -1510,6 +1595,8 @@ def _explanation(
         "lastfm_similarity_score": score.lastfm_similarity_score,
         "rediscovery_score": score.rediscovery_score,
         "feedback_score": score.feedback_score,
+        "raw_components": score.raw_components,
+        "calibrated_components": score.calibrated_components,
         "knownness_penalty": score.knownness_penalty,
         "obviousness_penalty": score.obviousness_penalty,
         "fatigue_penalty": score.fatigue.penalty,
@@ -1521,6 +1608,15 @@ def _explanation(
             "passed": score.quality_gate.passed,
             "reasons": list(score.quality_gate.reasons),
             "thresholds": score.quality_gate.thresholds,
+            "direct_evidence": {
+                "distinct_seed_count": score.quality_gate.evidence.distinct_seed_count,
+                "strongest_edge": score.quality_gate.evidence.strongest_edge,
+                "qualifying_edges": [
+                    list(edge) for edge in score.quality_gate.evidence.qualifying_edges
+                ],
+            },
+            "raw_components": score.raw_components,
+            "calibrated_components": score.calibrated_components,
             "scores": {
                 "lastfm_similarity_score": score.lastfm_similarity_score,
                 "tag_similarity_score": score.tag_similarity_score,

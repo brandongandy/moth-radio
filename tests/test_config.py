@@ -1,4 +1,5 @@
 import json
+import warnings
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ from pydantic import ValidationError
 from scrobble_recs.config import (
     EXPECTED_CSV_COLUMNS,
     DiversityConfig,
+    QualityGateConfig,
     default_config_document,
     load_config,
 )
@@ -456,12 +458,35 @@ def test_default_config_document_contains_spec_defaults() -> None:
     assert document["recommendation"]["seed_artist_limit"] == 250
     assert document["recommendation"]["similar_artists_per_seed"] == 100
     assert document["recommendation"]["obviousness"]["top_n_per_tag_hide"] == 3
-    assert document["recommendation"]["quality_gate"]["enabled"] is True
-    assert document["recommendation"]["quality_gate"]["rediscovery_requires_taste_match"] is True
+    assert document["recommendation"]["quality_gate"] == {
+        "enabled": True,
+        "rediscovery_requires_taste_match": True,
+    }
     assert document["recommendation"]["fatigue"]["enabled"] is True
     assert document["recommendation"]["fatigue"]["lookback_runs"] == 5
     assert "soundtrack" in document["recommendation"]["tag_profile"]["weak_tags"]
     assert "spoken word" in document["recommendation"]["tag_profile"]["weak_tags"]
+
+
+def test_checked_in_config_example_loads_warning_free_with_task_4_defaults() -> None:
+    config_path = Path(__file__).resolve().parents[1] / "config.example.json"
+
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        config = load_config(config_path)
+
+    assert caught_warnings == []
+    assert config.recommendation.quality_gate.model_dump() == {
+        "enabled": True,
+        "rediscovery_requires_taste_match": True,
+    }
+    assert config.recommendation.discovery_evidence.model_dump() == {
+        "minimum_seed_edge": 0.05,
+        "strong_seed_edge": 0.30,
+        "minimum_seed_count": 2,
+        "minimum_tag_reinforcement": 0.05,
+    }
+    assert config.recommendation.calibration.enabled is True
 
 
 def test_recommendation_quality_gate_defaults_are_loaded(tmp_path: Path) -> None:
@@ -490,10 +515,6 @@ def test_recommendation_quality_gate_defaults_are_loaded(tmp_path: Path) -> None
 
     assert config.recommendation.quality_gate.enabled is True
     assert config.recommendation.quality_gate.rediscovery_requires_taste_match is True
-    assert config.recommendation.quality_gate.min_lastfm_similarity_score == pytest.approx(0.01)
-    assert config.recommendation.quality_gate.min_tag_similarity_score == pytest.approx(0.05)
-    assert config.recommendation.quality_gate.min_positive_feedback_score == pytest.approx(0.05)
-    assert config.recommendation.quality_gate.rediscovery_mode_multiplier == pytest.approx(0.75)
     assert config.recommendation.fatigue.enabled is True
     assert config.recommendation.fatigue.lookback_runs == 5
     assert config.recommendation.fatigue.latest_run_penalty == pytest.approx(0.12)
@@ -501,6 +522,25 @@ def test_recommendation_quality_gate_defaults_are_loaded(tmp_path: Path) -> None
     assert "soundtrack" in config.recommendation.tag_profile.weak_tags
     assert "spoken word" in config.recommendation.tag_profile.weak_tags
     assert config.recommendation.tag_profile.weak_tag_penalty == pytest.approx(0.25)
+
+
+def test_quality_gate_legacy_thresholds_are_ignored_with_deprecation_warning() -> None:
+    with pytest.warns(UserWarning, match="no longer affect recommendation admission"):
+        gate = QualityGateConfig.model_validate(
+            {
+                "enabled": True,
+                "rediscovery_requires_taste_match": True,
+                "min_lastfm_similarity_score": 0.01,
+                "min_tag_similarity_score": 0.05,
+                "min_positive_feedback_score": 0.05,
+                "rediscovery_mode_multiplier": 0.75,
+            }
+        )
+
+    assert gate.model_dump() == {
+        "enabled": True,
+        "rediscovery_requires_taste_match": True,
+    }
 
 
 def test_knownness_config_defaults():

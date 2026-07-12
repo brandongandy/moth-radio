@@ -23,6 +23,7 @@ The application uses:
 - Prefer small, testable vertical slices over large unverified implementations.
 - Keep API clients cache-first.
 - TUI interactions must operate on persisted local recommendation runs, not live API calls.
+- When executing an approved multi-task plan, keep future-task findings in their assigned task. Do not move them earlier solely because intermediate code could be observed; note them and resume the approved order. Only change task order when explicitly authorized.
 
 ## Commands
 

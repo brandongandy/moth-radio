@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import calendar
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 
 @dataclass(frozen=True)
@@ -15,11 +15,19 @@ class ListeningWindow:
     end: datetime
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "start", _normalize_timestamp(self.start))
+        object.__setattr__(self, "end", _normalize_timestamp(self.end))
         if self.start >= self.end:
             raise ValueError("--since must be before --until")
 
     def contains(self, played_at: datetime) -> bool:
         return self.start <= played_at < self.end
+
+
+def _normalize_timestamp(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)
 
 
 def resolve_listening_window(

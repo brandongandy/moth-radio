@@ -9,6 +9,7 @@ from duckdb import DuckDBPyConnection
 
 from scrobble_recs.config import ScrobbleRecsConfig
 from scrobble_recs.models.profile_builder import build_profile
+from scrobble_recs.models.profile_window import resolve_listening_window
 from scrobble_recs.models.recommend import generate_recommendations
 
 
@@ -35,11 +36,19 @@ def evaluate_recommendations(
     test_from: datetime,
 ) -> EvaluationResult:
     build_profile(conn, config, as_of=train_until)
+    history_window = resolve_listening_window(
+        as_of=train_until,
+        default_months=config.recommendation.profile_window_months,
+        since=None,
+        until=train_until,
+    )
     stats = generate_recommendations(
         conn,
         config,
         limit=config.recommendation.similar_artists_per_seed,
         as_of=train_until,
+        history_window=history_window,
+        local_history_end=train_until,
     )
     run_id = stats.run_id
 

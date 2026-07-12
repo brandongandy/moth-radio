@@ -223,6 +223,201 @@ def test_export_recommendations_uses_deterministic_latest_run_fallback(
     conn.close()
 
 
+def test_csv_export_includes_quality_and_serendipity_columns(tmp_path: Path) -> None:
+    conn = initialize_database(load_config(write_config(tmp_path)))
+    run_id = "00000000-0000-0000-0000-000000000020"
+    _insert_export_row(
+        conn,
+        run_id=run_id,
+        artist_id=701,
+        artist_name="Evidence Artist",
+        rank=1,
+        created_at=datetime(2026, 6, 4, 12, 0, 0),
+    )
+    conn.execute(
+        "UPDATE recommendation_run SET seed_summary = ? WHERE run_id = ?",
+        [
+            json.dumps(
+                {
+                    "history_window": {
+                        "start": "2025-06-04T00:00:00",
+                        "end": "2026-06-04T00:00:00",
+                    }
+                }
+            ),
+            run_id,
+        ],
+    )
+    conn.execute(
+        "UPDATE recommendation SET explanation = ? WHERE run_id = ? AND artist_id = ?",
+        [
+            json.dumps(
+                {
+                    "quality_gate": {"reasons": ["independent_seed_support"]},
+                    "serendipity": {
+                        "calibrated_bonus": 0.12,
+                        "cohesion": 0.40,
+                        "is_bridge": True,
+                    },
+                }
+            ),
+            run_id,
+            701,
+        ],
+    )
+    output = tmp_path / "quality.csv"
+
+    export_recommendations(conn, output, format_name="csv", run_id=run_id)
+
+    with output.open(encoding="utf-8", newline="") as file:
+        row = next(csv.DictReader(file))
+    assert row["history_window_start"] == "2025-06-04T00:00:00"
+    assert row["history_window_end"] == "2026-06-04T00:00:00"
+    assert row["quality_gate_reasons"] == "independent_seed_support"
+    assert float(row["serendipity_bonus"]) == pytest.approx(0.12)
+    assert float(row["serendipity_cohesion"]) == pytest.approx(0.40)
+    assert row["serendipity_bridge"] == "true"
+    conn.close()
+
+
+def test_export_uses_empty_quality_evidence_for_invalid_explanation(tmp_path: Path) -> None:
+    conn = initialize_database(load_config(write_config(tmp_path)))
+    run_id = "00000000-0000-0000-0000-000000000021"
+    _insert_export_row(
+        conn,
+        run_id=run_id,
+        artist_id=702,
+        artist_name="Malformed Evidence",
+        rank=1,
+        created_at=datetime(2026, 6, 4, 12, 0, 0),
+    )
+    conn.execute(
+        "UPDATE recommendation SET explanation = ? WHERE run_id = ? AND artist_id = ?",
+        [json.dumps(["not", "an", "object"]), run_id, 702],
+    )
+    output = tmp_path / "malformed.jsonl"
+
+    export_recommendations(conn, output, format_name="jsonl", run_id=run_id)
+
+    row = json.loads(output.read_text(encoding="utf-8"))
+    assert row["quality_gate_reasons"] == ""
+    assert row["serendipity_bonus"] == 0.0
+    assert row["serendipity_cohesion"] == 0.0
+    assert row["serendipity_bridge"] == "false"
+    conn.close()
+
+
+def test_jsonl_export_projects_non_finite_serendipity_values_as_zero(
+    tmp_path: Path,
+) -> None:
+    conn = initialize_database(load_config(write_config(tmp_path)))
+    run_id = "00000000-0000-0000-0000-000000000022"
+    _insert_export_row(
+        conn,
+        run_id=run_id,
+        artist_id=703,
+        artist_name="Invalid Numeric Evidence",
+        rank=1,
+        created_at=datetime(2026, 6, 4, 12, 0, 0),
+    )
+    conn.execute(
+        "UPDATE recommendation SET explanation = ? WHERE run_id = ? AND artist_id = ?",
+        [
+            json.dumps(
+                {
+                    "serendipity": {
+                        "bonus": float("nan"),
+                        "cohesion": float("inf"),
+                    }
+                }
+            ),
+            run_id,
+            703,
+        ],
+    )
+    output = tmp_path / "invalid-numeric-evidence.jsonl"
+
+    export_recommendations(conn, output, format_name="jsonl", run_id=run_id)
+
+    row = json.loads(output.read_text(encoding="utf-8"))
+    assert row["serendipity_bonus"] == 0.0
+    assert row["serendipity_cohesion"] == 0.0
+    conn.close()
+
+
+def test_jsonl_export_replaces_nested_non_finite_explanation_values_with_null(
+    tmp_path: Path,
+) -> None:
+    conn = initialize_database(load_config(write_config(tmp_path)))
+    run_id = "00000000-0000-0000-0000-000000000024"
+    _insert_export_row(
+        conn,
+        run_id=run_id,
+        artist_id=705,
+        artist_name="Nested Invalid Evidence",
+        rank=1,
+        created_at=datetime(2026, 6, 4, 12, 0, 0),
+    )
+    conn.execute(
+        "UPDATE recommendation SET explanation = ? WHERE run_id = ? AND artist_id = ?",
+        [
+            json.dumps(
+                {
+                    "raw_components": {
+                        "not_a_number": float("nan"),
+                        "nested": [float("inf"), {"negative": float("-inf")}],
+                    },
+                    "serendipity": {"calibrated_bonus": 0.12},
+                }
+            ),
+            run_id,
+            705,
+        ],
+    )
+    output = tmp_path / "nested-invalid-numeric-evidence.jsonl"
+
+    export_recommendations(conn, output, format_name="jsonl", run_id=run_id)
+
+    serialized = output.read_text(encoding="utf-8")
+
+    def reject_non_finite_token(token: str) -> object:
+        raise ValueError(f"non-finite JSON token: {token}")
+
+    row = json.loads(serialized, parse_constant=reject_non_finite_token)
+    assert "NaN" not in serialized
+    assert "Infinity" not in serialized
+    assert row["explanation"]["raw_components"] == {
+        "not_a_number": None,
+        "nested": [None, {"negative": None}],
+    }
+    assert row["explanation"]["serendipity"]["calibrated_bonus"] == pytest.approx(0.12)
+    conn.close()
+
+
+def test_jsonl_export_projects_boolean_serendipity_bonus_as_zero(tmp_path: Path) -> None:
+    conn = initialize_database(load_config(write_config(tmp_path)))
+    run_id = "00000000-0000-0000-0000-000000000023"
+    _insert_export_row(
+        conn,
+        run_id=run_id,
+        artist_id=704,
+        artist_name="Boolean Numeric Evidence",
+        rank=1,
+        created_at=datetime(2026, 6, 4, 12, 0, 0),
+    )
+    conn.execute(
+        "UPDATE recommendation SET explanation = ? WHERE run_id = ? AND artist_id = ?",
+        [json.dumps({"serendipity": {"bonus": True}}), run_id, 704],
+    )
+    output = tmp_path / "boolean-numeric-evidence.jsonl"
+
+    export_recommendations(conn, output, format_name="jsonl", run_id=run_id)
+
+    row = json.loads(output.read_text(encoding="utf-8"))
+    assert row["serendipity_bonus"] == 0.0
+    conn.close()
+
+
 def _insert_export_row(
     conn,
     *,

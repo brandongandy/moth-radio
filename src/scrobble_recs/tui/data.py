@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC
+from math import isfinite
 from typing import Any
 
 from duckdb import DuckDBPyConnection
@@ -57,6 +58,9 @@ class ScoreBreakdown:
     knownness: float
     obviousness: float
     diversity_penalty: float
+    raw_components: dict[str, float] = field(default_factory=dict)
+    calibrated_components: dict[str, float] = field(default_factory=dict)
+    serendipity_bonus: float = 0.0
     score_band: str = ""
     normalized_score: float = 0.0
     evidence_source_count: int = 0
@@ -259,6 +263,9 @@ class TuiRecommendationStore:
             knownness=float(row[11] or 0.0),
             obviousness=float(row[12] or 0.0),
             diversity_penalty=float(row[13] or 0.0),
+            raw_components=_float_map(explanation.get("raw_components")),
+            calibrated_components=_float_map(explanation.get("calibrated_components")),
+            serendipity_bonus=_serendipity_bonus(explanation),
             score_band=str(row[15] or ""),
             normalized_score=_display_score(float(row[2] or 0.0), max_final),
             evidence_source_count=int(row[16] or 0),
@@ -374,7 +381,10 @@ def _parse_json(value: object) -> dict[str, Any]:
         return {}
     if isinstance(value, dict):
         return value
-    parsed = json.loads(str(value))
+    try:
+        parsed = json.loads(str(value))
+    except (json.JSONDecodeError, TypeError):
+        return {}
     return parsed if isinstance(parsed, dict) else {}
 
 
@@ -419,7 +429,26 @@ def _seed_names(explanation: dict[str, Any]) -> tuple[str, ...]:
 def _float_map(value: object) -> dict[str, float]:
     if not isinstance(value, dict):
         return {}
-    return {str(key): float(raw or 0.0) for key, raw in value.items()}
+    return {str(key): _as_float(raw) for key, raw in value.items()}
+
+
+def _serendipity_bonus(explanation: dict[str, Any]) -> float:
+    serendipity = explanation.get("serendipity")
+    if not isinstance(serendipity, dict):
+        return 0.0
+    if "bonus" in serendipity:
+        return _as_float(serendipity.get("bonus"))
+    return _as_float(serendipity.get("calibrated_bonus"))
+
+
+def _as_float(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return 0.0
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return result if isfinite(result) else 0.0
 
 
 def _bool_map(value: object) -> dict[str, bool]:

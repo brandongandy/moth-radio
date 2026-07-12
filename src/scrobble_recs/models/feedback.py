@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import uuid4
 
@@ -43,6 +43,22 @@ ALLOWED_FEEDBACK_ACTIONS: frozenset[str] = frozenset(
         "opened_link",
         "played_externally",
         "note",
+    }
+)
+
+COOLDOWN_FEEDBACK_ACTIONS: frozenset[str] = frozenset(
+    {
+        "save",
+        "reject",
+        "already_know",
+        "too_obvious",
+        "wrong_genre",
+        "more_like_this",
+        "less_like_this",
+        "hide_tag",
+        "boost_tag",
+        "rediscovery_good",
+        "rediscovery_bad",
     }
 )
 
@@ -203,6 +219,27 @@ def load_feedback_profile(conn: DuckDBPyConnection) -> FeedbackProfile:
                 OBVIOUSNESS_TAG_ADJUSTMENTS.get(action, 0.0) * value,
             )
     return profile
+
+
+def load_cooldown_artist_ids(
+    conn: DuckDBPyConnection,
+    *,
+    as_of: datetime,
+    days: int,
+) -> set[int]:
+    """Return artists with a cooldown vote strictly newer than the cutoff."""
+    cutoff = as_of - timedelta(days=days)
+    placeholders = ", ".join("?" for _ in COOLDOWN_FEEDBACK_ACTIONS)
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT artist_id
+        FROM feedback_event
+        WHERE created_at > ?
+          AND action IN ({placeholders})
+        """,
+        [cutoff, *sorted(COOLDOWN_FEEDBACK_ACTIONS)],
+    ).fetchall()
+    return {int(row[0]) for row in rows}
 
 
 def feedback_adjustment_for_candidate(

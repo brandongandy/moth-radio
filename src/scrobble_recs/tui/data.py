@@ -92,6 +92,7 @@ class RecommendationDetail:
     rediscovery_eligible: bool = False
     trial_penalty: float = 0.0
     top_seed_artists: tuple[str, ...] = ()
+    lastfm_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -235,7 +236,8 @@ class TuiRecommendationStore:
                 r.rediscovery_eligible,
                 r.trial_penalty,
                 r.identity_confidence,
-                r.identity_warnings
+                r.identity_warnings,
+                r.lastfm_url
             FROM recommendation r
             JOIN artist a ON a.artist_id = r.artist_id
             WHERE r.run_id = ?
@@ -298,6 +300,7 @@ class TuiRecommendationStore:
             rediscovery_eligible=bool(row[20]),
             trial_penalty=float(row[21] or 0.0),
             top_seed_artists=tuple(str(s) for s in top_seed),
+            lastfm_url=str(row[24]) if row[24] else None,
         )
 
     def feedback_history(self, run_id: str, artist_id: int) -> tuple[str, ...]:

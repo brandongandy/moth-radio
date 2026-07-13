@@ -9,7 +9,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Header, Static
+from textual.widgets import DataTable, Footer, Header, Link, Static
 
 from scrobble_recs.models.feedback import record_feedback_event, rerank_recommendation_run
 from scrobble_recs.tui.data import (
@@ -64,6 +64,14 @@ class ScrobbleRecsTui(App[None]):
         border: solid #4e7a98;
         background: #263849;
         padding: 1 2;
+    }
+
+    #detail-content {
+        height: 1fr;
+    }
+
+    #lastfm-link {
+        margin-top: 1;
     }
 
     #score-breakdown {
@@ -379,14 +387,28 @@ class _InspectableStatic(Static):
         super().update(self.renderable, layout=layout)
 
 
-class RecommendationDetailPanel(_InspectableStatic):
+class RecommendationDetailPanel(Vertical):
     """Selected recommendation detail panel."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.renderable = Text("")
+        super().__init__(*args, **kwargs)
+
+    def compose(self) -> ComposeResult:
+        yield _InspectableStatic("", id="detail-content")
+        link = Link("Open on Last.fm", id="lastfm-link")
+        link.display = False
+        yield link
 
     def on_mount(self) -> None:
         self.border_title = "Selected Recommendation"
 
     def update_detail(self, detail: RecommendationDetail | None) -> None:
-        self.update(_detail_text(detail))
+        self.renderable = _detail_text(detail)
+        self.query_one("#detail-content", _InspectableStatic).update(self.renderable)
+        link = self.query_one("#lastfm-link", Link)
+        link.url = detail.lastfm_url if detail and detail.lastfm_url else ""
+        link.display = bool(link.url)
 
 
 class ScoreBreakdownPanel(_InspectableStatic):

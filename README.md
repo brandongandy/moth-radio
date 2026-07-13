@@ -1,62 +1,24 @@
 # Moth Radio
 
-Moth Radio is a local-first artist discovery tool for people who want better
-recommendations from their own listening history. It imports a Last.fm CSV
-export into a local DuckDB database, builds a taste profile, and creates
-inspectable recommendation runs you can browse, export, evaluate, and refine.
+Moth Radio is a local-first artist discovery tool for people who want better recommendations from their own listening history. 
+
+It imports a Last.fm CSV export into a local DuckDB database, builds a taste profile, and generates recommendations you can browse, export, evaluate, and refine.
 
 The package and command-line tool are named `scrobble-recs`.
 
-Your listening history, recommendation runs, feedback, and API cache stay on
-your machine. Moth Radio can enrich its local graph from Last.fm when you ask
-it to, but imports, persisted recommendations, exports, the TUI, feedback, and
-evaluation do not require a live service.
+Your listening history, recommendation runs, feedback, and API cache stay on your machine. Moth Radio can enrich its local graph from Last.fm and MusicBrainz when you ask it to, but all other aspects of the tool do not require a live service.
+
+**AI Disclosure:** This is a purpose-built tool for my own uses written entirely by AI. DeepSeek and Codex were used in the development of this tool.
 
 ## Algorithms
 
-Moth Radio is designed to make its recommendations explainable rather than
-mysterious. Every recommendation run records its inputs, eligibility decision,
-score components, and reranking evidence in DuckDB.
+Moth Radio is a local, graph-based recommender. In essence, it works like this:
 
-### A bounded listening profile
+Listening history → seed artists → graph/tag candidates → eligibility gate → calibrated scoring → novelty penalties/bonuses → diversity rerank → persisted run
 
-Recommendations start from a configurable listening-history window: 12 months
-by default. Use `--since` and `--until` when you want an explicit half-open
-window (`[since, until)`). This keeps recent taste useful without treating your
-entire history as one permanent preference.
+When a recommendation is generated, the inputs, eligibility decision, score components, and reranking evidence are also persisted so you can see the criteria behind the recommendation.
 
-### Direct discovery evidence
-
-Tags alone cannot admit an artist. A discovery candidate must either have
-support from at least two distinct seed artists or have one strong seed edge
-reinforced by tag affinity. This prevents broad tag charts from overwhelming
-the local graph.
-
-### Calibrated relevance and penalties
-
-Positive Last.fm similarity, tag affinity, and feedback components are
-calibrated across the eligible candidates in a run before they are combined.
-Knownness, obviousness, fatigue, and negative feedback remain penalties. The
-result is a ranking based on relative strength in this run, not an accidental
-comparison of incompatible raw scales.
-
-### Serendipity without randomness
-
-Moth Radio builds a small graph from the selected seeds. Candidates that connect
-otherwise separate taste regions can receive a bounded serendipity bonus, while
-deeply clustered candidates receive less. A candidate still needs direct
-evidence before it can receive that bonus.
-
-### Feedback and evaluation
-
-`hide_artist` is a permanent local exclusion. Other recommendation votes have
-a configurable cooldown (30 days by default), so recently saved, rejected, or
-otherwise rated artists do not immediately return.
-
-The `evaluate` command uses a pre-cutoff historical view for seeds, local
-history, feedback, cooldowns, and recommendation fatigue. Outcomes are first
-listens in a later half-open test horizon. Its metrics include precision@50,
-candidate coverage, novelty, and cooldown/repeat rate.
+See the Appendix for a full overview of the recommendation algorithm.
 
 ## Quick start
 
@@ -96,6 +58,10 @@ state without requiring network access.
 
 ### 4. Enrich the local graph (optional, recommended)
 
+Enrichment is cache-first and resumable. It adds persisted similarity edges,
+artist tags, and tag top-artist data; recommendation generation itself remains
+local.
+
 ```bash
 export LASTFM_API_KEY=your-key
 scrobble-recs enrich --config ./config.json --source lastfm
@@ -108,10 +74,6 @@ $env:LASTFM_API_KEY = "your-key"
 scrobble-recs enrich --config ./config.json --source lastfm
 ```
 
-Enrichment is cache-first and resumable. It adds persisted similarity edges,
-artist tags, and tag top-artist data; recommendation generation itself remains
-local.
-
 ### 5. Generate and inspect a run
 
 ```bash
@@ -121,7 +83,9 @@ scrobble-recs tui --config ./config.json
 ```
 
 `recommend` persists a run. `export` and the Textual TUI read that persisted
-run; neither makes live API calls.
+run; neither makes live API calls. When a selected recommendation has a
+persisted Last.fm URL, the TUI provides an **Open on Last.fm** link that opens
+the artist page in your default browser.
 
 ## Operational commands
 
@@ -235,3 +199,87 @@ python -m mypy src
 
 Use deterministic fixtures, temporary DuckDB databases, and behavioral tests.
 Do not commit API keys or machine-specific paths.
+
+## Appendix: Recommendation Algorithm
+
+Moth Radio is a local, graph-based recommender. Each `recommend` run computes candidates and ranks them from your listening history plus the persisted Last.fm graph.
+
+```text
+Listening history → seed artists → graph/tag candidates → eligibility gate
+→ calibrated scoring → novelty penalties/bonuses → diversity rerank → persisted run
+```
+
+### 1. Seed selection
+
+The default balanced mode builds a mix of seed artists from your recent listening, lifetime favorites, old obsessions, and underexplored artists. A seed's listening weight combines:
+
+- `log(1 + play count)`
+- track diversity
+- number of active listening months
+- a recency decay
+
+It normally uses a 12-month history window. Modes change the mix: `explore` favors underexplored artists, `safe` favors lifetime favorites, `rediscovery` favors dormant former favorites, and so on.
+
+### 2. Candidate generation
+
+Candidates are the union of:
+
+- artists reached by persisted Last.fm “similar artist” edges from seeds;
+- artists in persisted top-artist lists for tags connected to your seeds.
+
+Normal discovery excludes artists you have already played, seed artists themselves, hidden artists, and artists in the recent feedback cooldown.
+
+### 3. Discovery evidence gate
+
+A candidate must have direct graph evidence. With the current defaults, it passes if either:
+
+- at least two distinct seeds have an edge to it of at least `0.05`; or
+- one strong seed edge of at least `0.30` is reinforced by tag similarity of at least `0.05`.
+
+This deliberately prevents tag-only recommendations.
+
+### 4. Scoring
+
+For eligible candidates, the main signals are:
+
+- **Last.fm similarity:** weighted average of the candidate's edge strengths from your seeds.
+- **Tag similarity:** cosine similarity between your seed-derived tag profile and the candidate's tags.
+- **Feedback:** direct artist feedback, feedback-derived tag preferences, and similarity-neighborhood effects.
+- **Rediscovery:** only in rediscovery mode; favors artists with 1–20 plays, dormant for at least two years, and not highly known.
+
+Positive similarity/tag/feedback values are then percentile-calibrated within the candidate set, so the run cares more about relative strength than raw Last.fm scale.
+
+With the default config, the base score is:
+
+```text
+0.35 × calibrated Last.fm similarity
++ 0.25 × calibrated tag similarity
++ 0.10 × rediscovery
++ 0.10 × feedback
+```
+
+Then it subtracts:
+
+- excessive knownness above the mode's threshold;
+- obviousness: artists ranked highly in your strongest tags;
+- recommendation fatigue from the last five runs;
+- a small balanced-mode penalty for shallow prior listening.
+
+It multiplies the result by identity confidence, then adds a serendipity bonus.
+
+### 5. Serendipity
+
+A candidate gets up to `0.15` extra when it connects several of your seeds that are themselves weakly connected, or are in separate connected components. In plain terms: it rewards a credible bridge between different parts of your taste, rather than merely another artist in an already dense cluster.
+
+### 6. Diversity rerank
+
+The final selection uses a greedy MMR-style reranker:
+
+```text
+rerank score = λ × candidate score
+             − (1 − λ) × similarity to already selected results
+```
+
+With `λ = 0.75`, relevance dominates but repetition is penalized. It also caps a primary tag at four results in the first 20 recommendations.
+
+One important implementation detail: `personal_cluster_fit` and `metadata_graph` still exist in config but are not currently contributors to the ranking formula. They are legacy/inert weights, not active algorithms.

@@ -2,7 +2,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from textual.widgets import DataTable
+from textual.widgets import DataTable, Link
 
 from scrobble_recs.config import load_config
 from scrobble_recs.db import initialize_database
@@ -102,6 +102,51 @@ async def _test_tui_header_uses_moth_radio_title(tmp_path: Path) -> None:
         async with app.run_test() as pilot:
             await pilot.pause()
             assert app.title == "Moth Radio"
+    finally:
+        conn.close()
+
+
+def test_tui_opens_selected_recommendation_lastfm_url_in_browser(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    asyncio.run(
+        _test_tui_opens_selected_recommendation_lastfm_url_in_browser(tmp_path, monkeypatch)
+    )
+
+
+async def _test_tui_opens_selected_recommendation_lastfm_url_in_browser(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    try:
+        run_id = "00000000-0000-0000-0000-000000000114"
+        lastfm_url = "https://www.last.fm/music/Bauhaus"
+        _insert_run(conn, run_id=run_id, mode="balanced")
+        _insert_artist(conn, artist_id=114, name="Bauhaus")
+        _insert_recommendation(
+            conn,
+            run_id=run_id,
+            artist_id=114,
+            rank=1,
+            final_score=0.84,
+            explanation={"summary": "Gothic rock pioneers."},
+            lastfm_url=lastfm_url,
+        )
+        opened_urls: list[str] = []
+        monkeypatch.setattr(ScrobbleRecsTui, "open_url", lambda _app, url: opened_urls.append(url))
+
+        app = ScrobbleRecsTui(conn)
+        async with app.run_test() as pilot:
+            link = app.query_one("#lastfm-link", Link)
+            assert link.display is True
+            assert link.url == lastfm_url
+
+            await pilot.click(link)
+
+        assert opened_urls == [lastfm_url]
     finally:
         conn.close()
 
@@ -860,6 +905,7 @@ def _insert_recommendation(
     rank: int,
     final_score: float,
     explanation: dict[str, object],
+    lastfm_url: str | None = None,
 ) -> None:
     conn.execute(
         """
@@ -878,11 +924,12 @@ def _insert_recommendation(
             knownness,
             obviousness,
             diversity_penalty,
-            explanation
+            explanation,
+            lastfm_url
         )
-        VALUES (?, ?, ?, ?, ?, 0.1, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ?)
+        VALUES (?, ?, ?, ?, ?, 0.1, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ?, ?)
         """,
-        [run_id, rank, artist_id, final_score, final_score, json.dumps(explanation)],
+        [run_id, rank, artist_id, final_score, final_score, json.dumps(explanation), lastfm_url],
     )
 
 

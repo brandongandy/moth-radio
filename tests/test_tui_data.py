@@ -235,6 +235,30 @@ def test_store_loads_detail_score_breakdown_and_missing_enrichment_statuses(
     conn.close()
 
 
+def test_store_loads_persisted_lastfm_url_for_recommendation_detail(tmp_path: Path) -> None:
+    conn = initialize_database(load_config(write_config(tmp_path)))
+    run_id = "00000000-0000-0000-0000-000000000009"
+    lastfm_url = "https://www.last.fm/music/Cocteau+Twins"
+    _insert_run(conn, run_id=run_id, mode="balanced")
+    _insert_artist(conn, artist_id=45, name="Cocteau Twins")
+    _insert_recommendation(
+        conn,
+        run_id=run_id,
+        artist_id=45,
+        rank=1,
+        final_score=0.75,
+        knownness=0.1,
+        obviousness=0.1,
+        explanation={},
+        lastfm_url=lastfm_url,
+    )
+
+    detail = TuiRecommendationStore(conn).get_detail(run_id, artist_id=45)
+
+    assert detail.lastfm_url == lastfm_url
+    conn.close()
+
+
 def test_store_normalizes_display_scores_without_changing_raw_breakdown(
     tmp_path: Path,
 ) -> None:
@@ -444,6 +468,7 @@ def _insert_recommendation(
     trial_penalty: float = 0.0,
     identity_confidence: float = 0.50,
     identity_warnings: str = "[]",
+    lastfm_url: str | None = None,
 ) -> None:
     conn.execute(
         """
@@ -471,9 +496,10 @@ def _insert_recommendation(
             rediscovery_eligible,
             trial_penalty,
             identity_confidence,
-            identity_warnings
+            identity_warnings,
+            lastfm_url
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             run_id,
@@ -500,6 +526,7 @@ def _insert_recommendation(
             trial_penalty,
             identity_confidence,
             identity_warnings,
+            lastfm_url,
         ],
     )
 

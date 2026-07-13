@@ -22,6 +22,10 @@ See the Appendix for a full overview of the recommendation algorithm.
 
 ## Quick start
 
+### 0. Get your Last.fm History
+
+You need a CSV export of your Last.fm scrobble history. Use a tool like [this one](https://lastfm.ghan.nl/export/) to obtain the file. 
+
 ### 1. Install
 
 ```bash
@@ -29,8 +33,7 @@ python -m pip install -e ".[dev]"
 python -m scrobble_recs --help
 ```
 
-If the installed `scrobble-recs` command is on your `PATH`, you can use it in
-place of `python -m scrobble_recs` throughout this guide.
+If the installed `scrobble-recs` command is on your `PATH`, you can use it in place of `python -m scrobble_recs` throughout this guide.
 
 ### 2. Create and configure a local project
 
@@ -38,12 +41,9 @@ place of `python -m scrobble_recs` throughout this guide.
 scrobble-recs init --config ./config.json
 ```
 
-Set `input.lastfm_csv` in `config.json` to your Last.fm CSV export. The example
-configuration documents the available local paths and recommendation settings;
-use it as a reference when editing the generated file.
+Set `input.lastfm_csv` in `config.json` to your Last.fm CSV export. The example configuration documents the available local paths and recommendation settings; use it as a reference when editing the generated file.
 
-You only need `LASTFM_API_KEY` when you choose to enrich the local graph from
-Last.fm. Do not put a real key in a committed config file.
+You only need `LASTFM_API_KEY` when you choose to enrich the local graph from Last.fm.
 
 ### 3. Import your history
 
@@ -52,15 +52,11 @@ scrobble-recs import --config ./config.json
 scrobble-recs doctor --config ./config.json
 ```
 
-Import creates local normalized artists, tracks, scrobbles, and diagnostics.
-`doctor` checks the configuration, database, import quality, cache, and API-key
-state without requiring network access.
+Import creates local normalized artists, tracks, scrobbles, and diagnostics. `doctor` checks the configuration, database, import quality, cache, and API-key state without requiring network access.
 
 ### 4. Enrich the local graph (optional, recommended)
 
-Enrichment is cache-first and resumable. It adds persisted similarity edges,
-artist tags, and tag top-artist data; recommendation generation itself remains
-local.
+Enrichment is cache-first and resumable. It adds persisted similarity edges, artist tags, and tag top-artist data; recommendation generation itself remains local.
 
 ```bash
 export LASTFM_API_KEY=your-key
@@ -82,10 +78,9 @@ scrobble-recs export --config ./config.json --format csv --output recs.csv
 scrobble-recs tui --config ./config.json
 ```
 
-`recommend` persists a run. `export` and the Textual TUI read that persisted
-run; neither makes live API calls. When a selected recommendation has a
-persisted Last.fm URL, the TUI provides an **Open on Last.fm** link that opens
-the artist page in your default browser.
+`recommend` persists a run. 
+
+`export` and the Textual TUI read that persisted run; neither makes live API calls. When a selected recommendation has a persisted Last.fm URL, the TUI provides an **Open on Last.fm** link that opens the artist page in your default browser.
 
 ## Operational commands
 
@@ -100,10 +95,17 @@ scrobble-recs recommend --config ./config.json --mode rediscovery --limit 100
 scrobble-recs recommend --config ./config.json --mode "tag:post-punk,gothic rock"
 ```
 
-Available modes include `balanced`, `explore`, `safe`, `rediscovery`, `recent`,
-`old`, and `anti-obvious`. Recommendation explanations retain the raw and
-calibrated score components, quality-gate reasons, history window, and
-serendipity evidence.
+Available modes include 
+
+- `balanced`
+- `explore`
+- `safe`
+- `rediscovery`
+- `recent`
+- `old`
+- `anti-obvious`
+
+Recommendation explanations retain the raw and calibrated score components, quality-gate reasons, history window, and serendipity evidence.
 
 ### Inspect and rebuild your local profile
 
@@ -112,8 +114,7 @@ scrobble-recs build-profile --config ./config.json
 scrobble-recs profile-tags --config ./config.json
 ```
 
-This refreshes local listening/profile data and shows the weighted tags that
-currently shape your taste profile.
+This refreshes local listening/profile data and shows the weighted tags that currently shape your taste profile.
 
 ### Plan and manage enrichment
 
@@ -127,9 +128,7 @@ scrobble-recs cache-inspect --config ./config.json --source lastfm
 scrobble-recs cache-expire --config ./config.json --older-than-days 180
 ```
 
-Use these commands to inspect queued work, retry failures, and keep the local
-API cache healthy without treating network calls as part of the recommendation
-loop.
+Use these commands to inspect queued work, retry failures, and keep the local API cache healthy without treating network calls as part of the recommendation loop.
 
 ### Export a persisted run
 
@@ -139,9 +138,7 @@ scrobble-recs export --config ./config.json --format jsonl --output recs.jsonl
 scrobble-recs export --config ./config.json --run-id RUN_ID --include-candidates
 ```
 
-Exports include history-window, quality-gate, serendipity, and explanation
-fields. JSONL output is strict JSON, including when stored diagnostic data is
-malformed.
+Exports include history-window, quality-gate, serendipity, and explanation fields. JSONL output is strict JSON, including when stored diagnostic data is malformed.
 
 ### Browse in the TUI
 
@@ -149,11 +146,11 @@ malformed.
 scrobble-recs tui --config ./config.json
 ```
 
-The TUI browses persisted runs. Use `j`/`k` to move, `?` for help, `e` to show
-score components, `/` to search, and `R` to switch runs. It records feedback
-locally and never initiates live API calls while you browse.
+The TUI browses persisted runs. Use in-app help for navigation and control guidance. It records feedback locally and never initiates live API calls while you browse.
 
 ### Give feedback
+
+Generally prefer the TUI for this, but if you want to, you can call the CLI directly for feedback.
 
 ```bash
 scrobble-recs feedback \
@@ -164,10 +161,9 @@ scrobble-recs feedback \
   --tag post-punk
 ```
 
-Useful actions include `save`, `reject`, `already_know`, `too_obvious`,
-`wrong_genre`, `more_like_this`, `less_like_this`, `hide_artist`, `hide_tag`,
-and `boost_tag`. Feedback reranks the selected persisted run by default; pass
-`--no-rerank` to record it only.
+Useful actions include `save`, `reject`, `already_know`, `too_obvious`, `wrong_genre`, `more_like_this`, `less_like_this`, `hide_artist`, `hide_tag`, and `boost_tag`. 
+
+Feedback reranks the selected persisted run by default; pass `--no-rerank` to record it only.
 
 ### Evaluate historical quality
 
@@ -180,15 +176,11 @@ scrobble-recs evaluate \
   --test-until 2023-04-01
 ```
 
-`--split-date` is one shared boundary: training ends there and the outcome
-horizon begins there. Without `--test-until`, Moth Radio evaluates the next 90
-days. Evaluation uses only the state available before the training cutoff.
+`--split-date` is one shared boundary: training ends there and the outcome horizon begins there. Without `--test-until`, Moth Radio evaluates the next 90 days. Evaluation uses only the state available before the training cutoff.
 
 ## Development
 
-Moth Radio is Python, DuckDB, Typer, Textual, Pydantic, and pytest. Keep work
-local-first, deterministic, and inspectable. Tests must not call real APIs or
-depend on a network connection.
+Moth Radio is Python, DuckDB, Typer, Textual, Pydantic, and pytest. Keep work local-first, deterministic, and inspectable. Tests must not call real APIs or depend on a network connection. 
 
 ```bash
 python -m pytest
@@ -197,8 +189,7 @@ python -m ruff format --check .
 python -m mypy src
 ```
 
-Use deterministic fixtures, temporary DuckDB databases, and behavioral tests.
-Do not commit API keys or machine-specific paths.
+Use deterministic fixtures, temporary DuckDB databases, and behavioral tests. Do not commit API keys or machine-specific paths.
 
 ## Appendix: Recommendation Algorithm
 

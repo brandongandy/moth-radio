@@ -1,3 +1,5 @@
+![](./assets/screenshot.png)
+
 # Moth Radio
 
 Moth Radio is a local-first artist discovery tool for people who want better recommendations from their own listening history. 

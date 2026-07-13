@@ -1,367 +1,230 @@
 # Moth Radio
 
-## What Is This Project?
+Moth Radio is a local-first artist discovery tool for people who want better
+recommendations from their own listening history. It imports a Last.fm CSV
+export into a local DuckDB database, builds a taste profile, and creates
+inspectable recommendation runs you can browse, export, evaluate, and refine.
 
-Moth Radio is a local-first music recommendation tool built from your Last.fm
-listening history. It imports a Last.fm CSV export into DuckDB, normalizes the
-listening data, and builds inspectable artist recommendation data without making
-the app dependent on a remote service.
+The package and command-line tool are named `scrobble-recs`.
 
-The project is designed around a few constraints:
+Your listening history, recommendation runs, feedback, and API cache stay on
+your machine. Moth Radio can enrich its local graph from Last.fm when you ask
+it to, but imports, persisted recommendations, exports, the TUI, feedback, and
+evaluation do not require a live service.
 
-- Your listening history and recommendation data stay local.
-- API integrations are cache-first and resumable.
-- Tests use deterministic fixtures and mocked clients, not live API calls.
-- Recommendation evidence is stored in tables and JSON so results can be
-  inspected instead of treated as a black box.
+## Algorithms
 
-The Python package and CLI are named `scrobble-recs`.
+Moth Radio is designed to make its recommendations explainable rather than
+mysterious. Every recommendation run records its inputs, eligibility decision,
+score components, and reranking evidence in DuckDB.
 
-## How To Use It
+### A bounded listening profile
 
-Install the project with development dependencies:
+Recommendations start from a configurable listening-history window: 12 months
+by default. Use `--since` and `--until` when you want an explicit half-open
+window (`[since, until)`). This keeps recent taste useful without treating your
+entire history as one permanent preference.
+
+### Direct discovery evidence
+
+Tags alone cannot admit an artist. A discovery candidate must either have
+support from at least two distinct seed artists or have one strong seed edge
+reinforced by tag affinity. This prevents broad tag charts from overwhelming
+the local graph.
+
+### Calibrated relevance and penalties
+
+Positive Last.fm similarity, tag affinity, and feedback components are
+calibrated across the eligible candidates in a run before they are combined.
+Knownness, obviousness, fatigue, and negative feedback remain penalties. The
+result is a ranking based on relative strength in this run, not an accidental
+comparison of incompatible raw scales.
+
+### Serendipity without randomness
+
+Moth Radio builds a small graph from the selected seeds. Candidates that connect
+otherwise separate taste regions can receive a bounded serendipity bonus, while
+deeply clustered candidates receive less. A candidate still needs direct
+evidence before it can receive that bonus.
+
+### Feedback and evaluation
+
+`hide_artist` is a permanent local exclusion. Other recommendation votes have
+a configurable cooldown (30 days by default), so recently saved, rejected, or
+otherwise rated artists do not immediately return.
+
+The `evaluate` command uses a pre-cutoff historical view for seeds, local
+history, feedback, cooldowns, and recommendation fatigue. Outcomes are first
+listens in a later half-open test horizon. Its metrics include precision@50,
+candidate coverage, novelty, and cooldown/repeat rate.
+
+## Quick start
+
+### 1. Install
 
 ```bash
 python -m pip install -e ".[dev]"
-```
-
-If PowerShell says `scrobble-recs` is not recognized after installation, the
-console script was installed but its directory is not visible to the current
-shell. With `pyenv-win`, regenerate shims:
-
-```powershell
-pyenv rehash
-scrobble-recs --help
-```
-
-You can also run the CLI through the active Python interpreter without relying
-on the console-script PATH:
-
-```bash
 python -m scrobble_recs --help
 ```
 
-Edit `config.example.json` or create your own config file with paths for:
+If the installed `scrobble-recs` command is on your `PATH`, you can use it in
+place of `python -m scrobble_recs` throughout this guide.
 
-- `app.db_path`: the DuckDB database file.
-- `app.cache_dir`: local cache storage.
-- `app.log_path`: the command log file.
-- `input.lastfm_csv`: your Last.fm CSV export.
-- `apis.lastfm.api_key`: your Last.fm API key (use `${LASTFM_API_KEY}` for env interpolation).
-- `apis.lastfm.timeout_seconds`: HTTP timeout for API calls (default 20).
-- `apis.lastfm.stale_cache_on_error`: serve stale cache on transient failures (default true).
-- `enrichment.seed_artist_limit`: max seed artists for enrichment planning (default 250).
-- `recommendation.run_limit`: max recommendations per run (default 500).
-- `recommendation.knownness.threshold`: knownness suppression threshold (default 0.65).
-
-Create a local config and DuckDB database:
+### 2. Create and configure a local project
 
 ```bash
 scrobble-recs init --config ./config.json
 ```
 
-`init` writes a JSON config skeleton with `${LASTFM_API_KEY}` interpolation,
-creates parent directories, and applies DuckDB migrations. It refuses to
-overwrite an existing config unless `--force` is passed.
+Set `input.lastfm_csv` in `config.json` to your Last.fm CSV export. The example
+configuration documents the available local paths and recommendation settings;
+use it as a reference when editing the generated file.
 
-Import scrobbles:
+You only need `LASTFM_API_KEY` when you choose to enrich the local graph from
+Last.fm. Do not put a real key in a committed config file.
 
-```bash
-scrobble-recs import --config config.example.json
-```
-
-The import command prints the configured log path before it starts, shows a
-terminal spinner while the CSV import is running, and writes import lifecycle
-messages to `app.log_path`.
-
-## Import Completeness
-
-Import keeps both raw rows and cleaned local entities. Each distinct normalized
-artist becomes a provisional `artist`, and each distinct normalized
-artist/track pair becomes a provisional `track`. Supplied MusicBrainz IDs are
-used only when they are consistent across matching local rows; conflicting
-artist or track MBIDs are ignored for provisional identity and recorded as
-local import warnings.
-
-The importer rejects malformed CSV structure, missing `uts`, missing `artist`,
-missing `track`, non-integer `uts`, duplicate header rows inside the file, and
-impossible timestamps. Non-fatal data quality issues such as `utc_time`
-mismatches, conflicting MBIDs, and configured near duplicates are stored in
-DuckDB in `import_warning` and shown by `doctor`.
-
-Near-duplicate marking is disabled by default. Enable the spec's 30-second
-rule by adding this to the config input block:
-
-```json
-"near_duplicate_window_seconds": 30
-```
-
-Near duplicates are marked with `scrobble.is_duplicate = true`; rows are not
-deleted from `raw_scrobble` or `scrobble`.
-
-Check local configuration and imported data:
+### 3. Import your history
 
 ```bash
-scrobble-recs doctor --config config.example.json
+scrobble-recs import --config ./config.json
+scrobble-recs doctor --config ./config.json
 ```
 
-`doctor` validates the config, database path, CSV header, cache path, API key
-state, rate-limit settings, import counts, import warning counts, and API cache
-state. Missing Last.fm keys are warnings because import, local browsing, and
-persisted recommendation runs do not require live APIs.
+Import creates local normalized artists, tracks, scrobbles, and diagnostics.
+`doctor` checks the configuration, database, import quality, cache, and API-key
+state without requiring network access.
 
-Refresh local listening scores and profile tables without generating
-recommendations:
+### 4. Enrich the local graph (optional, recommended)
 
 ```bash
-scrobble-recs build-profile --config config.example.json
+export LASTFM_API_KEY=your-key
+scrobble-recs enrich --config ./config.json --source lastfm
 ```
 
-The command prints a startup line and shows a terminal spinner while local
-profile tables are recomputed.
-
-Inspect your computed tag profile after building it:
-
-```bash
-scrobble-recs profile-tags --config config.example.json
-```
-
-`profile-tags` prints each tag's user weight, artist count, and top seed
-artists, ordered by descending affinity. Broad, generic tags are damped so
-specific taste signals aren't drowned out.
-
-MusicBrainz resolution is intentionally separate from local profile and
-recommendation work:
-
-```bash
-scrobble-recs resolve --config config.example.json --source musicbrainz
-```
-
-Run Last.fm enrichment:
-
-```bash
-set LASTFM_API_KEY=your-key
-scrobble-recs enrich --config config.example.json --source lastfm
-```
-
-Use PowerShell syntax on Windows if needed:
+PowerShell:
 
 ```powershell
 $env:LASTFM_API_KEY = "your-key"
-scrobble-recs enrich --config config.example.json --source lastfm
+scrobble-recs enrich --config ./config.json --source lastfm
 ```
 
-Import and doctor do not require API keys. Live Last.fm enrichment requires
-`LASTFM_API_KEY`; cached responses are reused when they are still fresh. The
-enrich command warns before long runs and shows phase/item progress for seed
-similarity, seed tags, and tag top-artist enrichment while it works.
+Enrichment is cache-first and resumable. It adds persisted similarity edges,
+artist tags, and tag top-artist data; recommendation generation itself remains
+local.
 
-When Last.fm returns a transient `429` or `5xx` response, the client retries up
-to the configured maximum and falls back to a stale successful cache entry when
-one exists. Tests cover this behavior with mocked HTTP; they do not call
-Last.fm.
-
-### Enrichment Queue
-
-For large libraries, plan enrichment work without calling the network, then run
-it in controlled batches:
+### 5. Generate and inspect a run
 
 ```bash
-scrobble-recs enrich-plan --config config.example.json --source lastfm
-scrobble-recs enrich-status --config config.example.json --source lastfm
-scrobble-recs enrich-retry --config config.example.json --source lastfm
+scrobble-recs recommend --config ./config.json --limit 100
+scrobble-recs export --config ./config.json --format csv --output recs.csv
+scrobble-recs tui --config ./config.json
 ```
 
-`enrich-plan` analyzes your seed artists and tag profile, then populates the
-enrichment queue. It prints a summary of what needs fetching vs what is already
-cached. `enrich-status` shows queue counts by status. `enrich-retry` resets
-failed queue entries so they can be retried.
+`recommend` persists a run. `export` and the Textual TUI read that persisted
+run; neither makes live API calls.
 
-### API Cache Management
+## Operational commands
 
-Inspect and manage the local API response cache:
+Use these workflows once the quick start is working.
+
+### Control the listening window and mode
 
 ```bash
-scrobble-recs cache --config config.example.json
-scrobble-recs cache-inspect --config config.example.json --source lastfm
-scrobble-recs cache-expire --config config.example.json --older-than-days 180
+scrobble-recs recommend --config ./config.json --since 2024-01-01 --until 2025-01-01
+scrobble-recs recommend --config ./config.json --mode explore --limit 100
+scrobble-recs recommend --config ./config.json --mode rediscovery --limit 100
+scrobble-recs recommend --config ./config.json --mode "tag:post-punk,gothic rock"
 ```
 
-`cache` prints aggregate statistics (total, fresh, stale, error counts by
-source and endpoint). `cache-inspect` lists individual entries with freshness
-status. `cache-expire` removes stale successful responses older than the
-configured threshold.
+Available modes include `balanced`, `explore`, `safe`, `rediscovery`, `recent`,
+`old`, and `anti-obvious`. Recommendation explanations retain the raw and
+calibrated score components, quality-gate reasons, history window, and
+serendipity evidence.
 
-## Recommendations
-
-`recommend` generates a persisted artist recommendation run from local DuckDB
-data:
-
-- Recomputes local listening weights, knownness, and rediscovery scores.
-- Uses persisted Last.fm similarity edges and tag enrichment as candidate
-  evidence.
-- Penalizes artists that are already well known or obvious top artists for
-  high-affinity tags.
-- Applies local feedback from prior recommendation runs.
-- Persists inspectable JSON explanations for each recommendation.
-- Exports persisted runs with score, evidence, history-window, quality-gate, and
-  explanation fields to CSV or JSONL.
-
-The command shows phase progress while refreshing local scores, selecting seeds,
-building profiles, loading candidates, scoring, reranking, building
-explanations, and persisting the run.
+### Inspect and rebuild your local profile
 
 ```bash
-scrobble-recs recommend --config config.example.json --limit 500
-scrobble-recs recommend --config config.example.json --since 2024-01-01 --until 2025-01-01
-scrobble-recs export --config config.example.json --format csv --output recs.csv
-scrobble-recs export --config config.example.json --format jsonl --output recs.jsonl
+scrobble-recs build-profile --config ./config.json
+scrobble-recs profile-tags --config ./config.json
 ```
 
-`recommend` does not call live APIs. Run `enrich --source lastfm` first to populate the local graph.
-Without `--since` and `--until`, seed selection uses the configured profile window
-(12 calendar months by default) ending at generation time. Explicit `--since` /
-`--until` bounds use the same half-open interval convention: the start is included
-and the end is excluded.
-Persisted `recommendation.final_score` values are raw ranking utility scores,
-so their absolute magnitude can be small. User-facing recommendation lists and
-exports normalize the score within each run so the top recommendation displays
-as `1.000` while detailed score breakdowns keep the raw utility values
-inspectable.
+This refreshes local listening/profile data and shows the weighted tags that
+currently shape your taste profile.
 
-## TUI
-
-Launch the local Textual interface against persisted recommendation runs:
+### Plan and manage enrichment
 
 ```bash
-scrobble-recs tui --config config.example.json
+scrobble-recs enrich-plan --config ./config.json --source lastfm
+scrobble-recs enrich-status --config ./config.json --source lastfm
+scrobble-recs enrich-retry --config ./config.json --source lastfm
+
+scrobble-recs cache --config ./config.json
+scrobble-recs cache-inspect --config ./config.json --source lastfm
+scrobble-recs cache-expire --config ./config.json --older-than-days 180
 ```
 
-The TUI reads local DuckDB recommendation data. It does not call live APIs while
-you browse. Use `recommend` first to create a run, then use the Moth Radio TUI
-to browse ranked artists in a compact table, inspect the selected artist's
-explanation details and score breakdown, switch runs, apply basic filters, and
-record feedback with keybindings.
+Use these commands to inspect queued work, retry failures, and keep the local
+API cache healthy without treating network calls as part of the recommendation
+loop.
 
-Useful keys:
-
-- `j` / `k`: move through recommendations.
-- `?`: show the in-app help modal.
-- `e`: show or hide debug score components.
-- `/`: toggle the simple search filter.
-- `f`: toggle a tag filter from visible rows.
-- `R`: switch to another persisted run.
-- `s`: save the selected artist as worth revisiting.
-- `r`: reject the selected artist for the current run.
-- `a`: mark the selected artist as already known.
-- `o`: mark the selected artist as too obvious.
-- `w`: mark the recommendation as the wrong genre for its shown tags.
-- `m`: ask for more recommendations like this artist.
-- `l`: ask for fewer recommendations like this artist.
-- `h`: hide the selected artist across local recommendations.
-
-Feedback is stored locally and reranks the current persisted run without live API
-calls. The status bar shows the local API cache freshness at startup.
-
-## Evaluation
-
-Evaluate recommendation quality against historical listening data using a
-train/test split:
+### Export a persisted run
 
 ```bash
-scrobble-recs evaluate --config config.example.json --split-date 2023-01-01
-scrobble-recs evaluate --config config.example.json --train-until 2022-12-31 --test-from 2023-01-01 --test-until 2023-04-01
+scrobble-recs export --config ./config.json --format csv --output recs.csv
+scrobble-recs export --config ./config.json --format jsonl --output recs.jsonl
+scrobble-recs export --config ./config.json --run-id RUN_ID --include-candidates
 ```
 
-`evaluate` uses the configured profile window (12 calendar months by default)
-ending at `train_until` for its seed profile, then generates recommendations from
-that pre-cutoff view only. Outcomes are artists first heard in the half-open
-`[test_from, test_until)` horizon, with no earlier non-duplicate local scrobble.
-Specify `--test-until` for an explicit horizon; otherwise the command derives a
-90-day horizon from `test_from`. `--split-date` uses one shared, exclusive
-training boundary: training ends there and outcomes start there.
+Exports include history-window, quality-gate, serendipity, and explanation
+fields. JSONL output is strict JSON, including when stored diagnostic data is
+malformed.
 
-The report includes precision@50, recall, NDCG, eligible-candidate coverage,
-novelty, cooldown/permanent-exclusion rate, tag diversity, knownness,
-obviousness, rediscovery hit rate, and external candidate share. It does not
-call live APIs.
-
-## Recommendation Algorithm
-
-The recommender starts from multiple local taste regions rather than only the
-highest-played artists. Seed artists come from lifetime listening, recent
-listening, older favorites, underexplored artists, and feedback boosts. Those
-seeds pull candidates from the persisted Last.fm similarity graph and tag
-tables.
-
-Each candidate receives component scores for Last.fm similarity, tag fit,
-rediscovery value, and feedback. Knownness suppresses artists that already have
-substantial local listening history. Rediscovery does not act as a standalone
-recommendation source. An old, lightly played artist must still match the
-current profile through seed similarity, tag fit, or positive feedback before
-rediscovery can boost it. Broad Last.fm tags are damped so generic tags such as
-`rock`, `indie`, `soundtrack`, and `spoken word` do not dominate more specific
-taste evidence. Obviousness uses tag top-artist ranks to penalize broad "you
-probably already know this" recommendations without hard-excluding every
-popular artist. Artists shown in recent recommendation runs receive a fatigue
-penalty unless positive feedback says they should remain prominent. A diversity
-reranker keeps the top of the list from collapsing into one tag or similarity
-neighborhood. Discovery recommendations must pass direct persisted graph
-evidence: either support from independent seed artists or a strong seed edge
-with tag reinforcement.
-
-`recommend` supports mode-specific ranking from local data:
+### Browse in the TUI
 
 ```bash
-scrobble-recs recommend --config config.example.json --mode balanced --limit 500
-scrobble-recs recommend --config config.example.json --mode explore --limit 500
-scrobble-recs recommend --config config.example.json --mode safe --limit 500
-scrobble-recs recommend --config config.example.json --mode rediscovery --limit 500
-scrobble-recs recommend --config config.example.json --mode recent --limit 500
-scrobble-recs recommend --config config.example.json --mode old --limit 500
-scrobble-recs recommend --config config.example.json --mode anti-obvious --limit 500
-scrobble-recs recommend --config config.example.json --mode "tag:post-punk,gothic rock" --limit 500
+scrobble-recs tui --config ./config.json
 ```
 
-Mode-specific settings adjust seed weighting, knownness tolerance, obviousness
-behavior, and diversity pressure. `recommend` reads only local DuckDB data; run
-`enrich --source lastfm` when the local graph needs refreshed Last.fm similarity
-or tag data.
+The TUI browses persisted runs. Use `j`/`k` to move, `?` for help, `e` to show
+score components, `/` to search, and `R` to switch runs. It records feedback
+locally and never initiates live API calls while you browse.
 
-## Feedback Loop
-
-Feedback is stored locally in DuckDB and can rerank an existing recommendation
-run without calling live APIs:
+### Give feedback
 
 ```bash
 scrobble-recs feedback \
-  --config config.example.json \
-  --run-id 00000000-0000-0000-0000-000000000001 \
+  --config ./config.json \
+  --run-id RUN_ID \
   --artist-id 42 \
   --action more_like_this \
   --tag post-punk
 ```
 
-Supported actions are `save`, `reject`, `already_know`, `too_obvious`,
+Useful actions include `save`, `reject`, `already_know`, `too_obvious`,
 `wrong_genre`, `more_like_this`, `less_like_this`, `hide_artist`, `hide_tag`,
-`boost_tag`, `rediscovery_good`, `rediscovery_bad`, `opened_link`,
-`played_externally`, and `note`.
+and `boost_tag`. Feedback reranks the selected persisted run by default; pass
+`--no-rerank` to record it only.
 
-By default the command records the event and reranks that persisted run. Use
-`--no-rerank` to record feedback only. `recommend` consumes feedback as artist
-boosts/suppression, tag boosts/suppression, and lightweight
-similarity-neighborhood adjustments. `hide_artist` is permanent local
-suppression. Recent recommendation votes are excluded for the configured
-30-day cooldown (the default), so saved, rejected, already-known, and similar
-feedback does not immediately resurface the same artist.
+### Evaluate historical quality
 
-## How To Contribute
+```bash
+scrobble-recs evaluate --config ./config.json --split-date 2023-01-01
+scrobble-recs evaluate \
+  --config ./config.json \
+  --train-until 2022-12-31 \
+  --test-from 2023-01-01 \
+  --test-until 2023-04-01
+```
 
-Keep changes local-first, testable, and small enough to inspect. Do not add
-required Spotify dependencies, live API calls in tests, committed API keys, or
-machine-specific local paths.
+`--split-date` is one shared boundary: training ends there and the outcome
+horizon begins there. Without `--test-until`, Moth Radio evaluates the next 90
+days. Evaluation uses only the state available before the training cutoff.
 
-Run the standard checks before committing:
+## Development
+
+Moth Radio is Python, DuckDB, Typer, Textual, Pydantic, and pytest. Keep work
+local-first, deterministic, and inspectable. Tests must not call real APIs or
+depend on a network connection.
 
 ```bash
 python -m pytest
@@ -370,13 +233,5 @@ python -m ruff format --check .
 python -m mypy src
 ```
 
-Testing guidelines:
-
-- Use deterministic fixtures under `tests/fixtures`.
-- Mock Last.fm, MusicBrainz, and ListenBrainz clients.
-- Use temporary DuckDB files in database tests.
-- Add behavioral tests for new logic; avoid tests that only prove a file or
-  object exists.
-
-When behavior changes, update the relevant docs and `docs/implementation-log.md`
-with what changed and how it was verified.
+Use deterministic fixtures, temporary DuckDB databases, and behavioral tests.
+Do not commit API keys or machine-specific paths.

@@ -9,6 +9,8 @@ from scrobble_recs.config import (
     EXPECTED_CSV_COLUMNS,
     DiversityConfig,
     QualityGateConfig,
+    RecommendationConfig,
+    ScoringConfig,
     default_config_document,
     load_config,
 )
@@ -625,3 +627,19 @@ def test_full_config_loads_enrichment_and_knownness_sections(tmp_path):
     cfg = load_config(config_path)
     assert cfg.enrichment.seed_artist_limit == 100
     assert cfg.recommendation.knownness.threshold == 0.50
+
+
+def test_scoring_config_defaults_to_legacy_engine_and_zero_idf_alpha() -> None:
+    scoring = RecommendationConfig().scoring
+    assert scoring.engine == "legacy"
+    assert scoring.seed_idf_alpha == 0.0
+
+
+def test_scoring_config_rejects_unknown_engine() -> None:
+    with pytest.raises(ValidationError):
+        ScoringConfig(engine="magic")
+
+
+def test_scoring_config_rejects_negative_idf_alpha() -> None:
+    with pytest.raises(ValidationError):
+        ScoringConfig(seed_idf_alpha=-0.5)

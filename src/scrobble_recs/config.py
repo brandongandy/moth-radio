@@ -6,7 +6,7 @@ import re
 import warnings
 from math import isfinite
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -268,6 +268,46 @@ class RecommendationWeightsConfig(BaseModel):
     feedback_model: float = 0.20
 
 
+class ScoringConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    engine: Literal["legacy", "walk"] = "legacy"
+    seed_idf_alpha: float = 0.0
+
+    @field_validator("seed_idf_alpha")
+    @classmethod
+    def idf_alpha_must_be_non_negative(cls, value: float) -> float:
+        if value < 0.0:
+            raise ValueError("seed_idf_alpha must be non-negative")
+        return value
+
+
+class WalkConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_hops: int = 2
+    max_nodes: int = 250_000
+    symmetrize: bool = False
+    restart: float = 0.15
+    baseline_exponent: float = 1.0
+    min_lift: float = 0.0
+    min_distinct_seeds: int = 2
+
+    @model_validator(mode="after")
+    def validate_walk(self) -> WalkConfig:
+        if self.max_hops < 1:
+            raise ValueError("max_hops must be at least 1")
+        if self.max_nodes < 1:
+            raise ValueError("max_nodes must be at least 1")
+        if not 0.0 < self.restart < 1.0:
+            raise ValueError("restart must be between 0 and 1 (exclusive)")
+        if self.baseline_exponent < 0.0:
+            raise ValueError("baseline_exponent must be non-negative")
+        if self.min_distinct_seeds < 1:
+            raise ValueError("min_distinct_seeds must be at least 1")
+        return self
+
+
 class DiversityConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -443,6 +483,8 @@ class RecommendationConfig(BaseModel):
     feedback_cooldown_days: int = 30
     obviousness: ObviousnessConfig = Field(default_factory=ObviousnessConfig)
     knownness: KnownnessConfig = Field(default_factory=KnownnessConfig)
+    scoring: ScoringConfig = Field(default_factory=ScoringConfig)
+    walk: WalkConfig = Field(default_factory=WalkConfig)
     weights: RecommendationWeightsConfig = Field(default_factory=RecommendationWeightsConfig)
     diversity: DiversityConfig = Field(default_factory=DiversityConfig)
     quality_gate: QualityGateConfig = Field(default_factory=QualityGateConfig)
@@ -557,6 +599,19 @@ def default_config_document() -> dict[str, Any]:
                 "enabled": True,
                 "threshold": 0.65,
                 "penalty_weight": 0.40,
+            },
+            "scoring": {
+                "engine": "legacy",
+                "seed_idf_alpha": 0.0,
+            },
+            "walk": {
+                "max_hops": 2,
+                "max_nodes": 250000,
+                "symmetrize": False,
+                "restart": 0.15,
+                "baseline_exponent": 1.0,
+                "min_lift": 0.0,
+                "min_distinct_seeds": 2,
             },
             "weights": {
                 "lastfm_similarity": 0.35,

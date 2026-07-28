@@ -50,6 +50,7 @@ def run_doctor(
         _lastfm_api_key_check(config),
         _rate_limit_check(config),
         _api_cache_check(conn, resolved_now),
+        _graph_depth_check(conn),
         _import_stats_check(conn),
         _import_warnings_check(conn),
         _musicbrainz_resolution_check(conn),
@@ -129,6 +130,69 @@ def _api_cache_check(conn: DuckDBPyConnection, now: datetime) -> DiagnosticCheck
             f"stale={summary.stale_successes}; errors={summary.error_entries}"
         ),
     )
+
+
+_DANGLING_WARN_FRACTION = 0.5
+
+
+def _graph_depth_check(conn: DuckDBPyConnection) -> DiagnosticCheck:
+    """Report similarity-graph depth so the walk scorer's reliability is visible.
+
+    A graph enriched only one hop out from seeds leaves every frontier node
+    dangling (zero outgoing edges), which collapses a random walk back toward a
+    plain weighted average. When that fraction is high, recommend a deeper enrich.
+    """
+    row = conn.execute(
+        """
+        WITH nodes AS (
+            SELECT source_artist_id AS artist_id
+            FROM artist_similarity_edge
+            WHERE source = 'lastfm'
+            UNION
+            SELECT target_artist_id
+            FROM artist_similarity_edge
+            WHERE source = 'lastfm'
+        ),
+        sources AS (
+            SELECT DISTINCT source_artist_id AS artist_id
+            FROM artist_similarity_edge
+            WHERE source = 'lastfm'
+        )
+        SELECT
+            (SELECT count(*) FROM nodes) AS node_count,
+            (SELECT count(*) FROM artist_similarity_edge WHERE source = 'lastfm') AS edge_count,
+            (SELECT count(*) FROM sources) AS nodes_with_outgoing
+        """
+    ).fetchone()
+    node_count = int(row[0]) if row else 0
+    edge_count = int(row[1]) if row else 0
+    nodes_with_outgoing = int(row[2]) if row else 0
+
+    if node_count == 0:
+        return DiagnosticCheck(
+            "graph_depth",
+            DiagnosticStatus.WARN,
+            "no similarity graph yet; run 'enrich' to build one",
+        )
+
+    dangling = node_count - nodes_with_outgoing
+    dangling_fraction = dangling / node_count
+    mean_out_degree = edge_count / node_count
+    base_message = (
+        f"nodes={node_count}; edges={edge_count}; "
+        f"dangling={dangling} ({dangling_fraction:.0%}); "
+        f"mean_out_degree={mean_out_degree:.2f}"
+    )
+    if dangling_fraction >= _DANGLING_WARN_FRACTION:
+        return DiagnosticCheck(
+            "graph_depth",
+            DiagnosticStatus.WARN,
+            (
+                f"{base_message}; high dangling fraction makes the walk scorer "
+                "unreliable -- run a deeper enrich (e.g. --depth 2)"
+            ),
+        )
+    return DiagnosticCheck("graph_depth", DiagnosticStatus.OK, base_message)
 
 
 def _import_stats_check(conn: DuckDBPyConnection) -> DiagnosticCheck:

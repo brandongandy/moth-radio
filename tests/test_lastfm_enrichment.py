@@ -636,6 +636,73 @@ def test_first_run_similarity_write_failure_rolls_back_rows_and_marker(
     conn.close()
 
 
+def test_enrich_default_depth_does_not_expand_frontier(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    conn = initialize_database(config)
+    import_lastfm_csv(conn, Path("tests/fixtures/tiny_lastfm_export.csv"))
+    client = FakeLastFmClient()
+
+    stats = run_lastfm_enrichment(conn, config, client=client)
+
+    assert client.similar_calls == [("The Cure", 2)]
+    assert stats.frontier_artists == 0
+    conn.close()
+
+
+def test_enrich_depth_two_expands_hop_one_frontier(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    conn = initialize_database(config)
+    import_lastfm_csv(conn, Path("tests/fixtures/tiny_lastfm_export.csv"))
+    client = FakeLastFmClient()
+
+    stats = run_lastfm_enrichment(conn, config, client=client, depth=2)
+
+    # Seed first, then hop-1 frontier ordered by aggregate seed edge strength
+    # (Siouxsie 0.91 before Bauhaus 0.72).
+    assert client.similar_calls == [
+        ("The Cure", 2),
+        ("Siouxsie and the Banshees", 2),
+        ("Bauhaus", 2),
+    ]
+    assert client.tag_calls == ["The Cure", "Siouxsie and the Banshees", "Bauhaus"]
+    assert stats.frontier_artists == 2
+    assert stats.similar_artist_requests == 3
+    conn.close()
+
+
+def test_enrich_max_frontier_artists_caps_expansion(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    conn = initialize_database(config)
+    import_lastfm_csv(conn, Path("tests/fixtures/tiny_lastfm_export.csv"))
+    client = FakeLastFmClient()
+
+    stats = run_lastfm_enrichment(conn, config, client=client, depth=2, max_frontier_artists=1)
+
+    # Only the strongest frontier artist (Siouxsie, 0.91) is enriched.
+    assert client.similar_calls == [
+        ("The Cure", 2),
+        ("Siouxsie and the Banshees", 2),
+    ]
+    assert stats.frontier_artists == 1
+    conn.close()
+
+
+def test_enrich_depth_two_is_resumable(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    conn = initialize_database(config)
+    import_lastfm_csv(conn, Path("tests/fixtures/tiny_lastfm_export.csv"))
+    run_lastfm_enrichment(conn, config, client=FakeLastFmClient(), depth=2)
+    second_client = FakeLastFmClient()
+
+    stats = run_lastfm_enrichment(conn, config, client=second_client, depth=2)
+
+    assert second_client.similar_calls == []
+    assert second_client.tag_calls == []
+    assert stats.similar_artist_requests == 0
+    assert stats.artist_tag_requests == 0
+    conn.close()
+
+
 def test_tag_top_artist_replacement_write_failure_rolls_back_previous_rows(
     tmp_path: Path,
 ) -> None:

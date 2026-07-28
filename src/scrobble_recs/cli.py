@@ -34,6 +34,7 @@ from scrobble_recs.enrichment.queue import (
 )
 from scrobble_recs.export import ExportFormat, export_recommendations
 from scrobble_recs.importers.lastfm_csv import ImportStats, get_import_stats, import_lastfm_csv
+from scrobble_recs.models.compare import ScorerComparison, compare_scorers
 from scrobble_recs.models.evaluate import EvaluationResult, evaluate_recommendations
 from scrobble_recs.models.feedback import record_feedback_event, rerank_recommendation_run
 from scrobble_recs.models.profile_builder import build_profile
@@ -205,9 +206,28 @@ def doctor_command(
 def enrich_command(
     config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
     source: Annotated[str, typer.Option("--source", help="Enrichment source to run.")] = "lastfm",
+    depth: Annotated[
+        int,
+        typer.Option(
+            "--depth",
+            help="Graph depth to enrich. 1 (default) enriches seeds only; "
+            "2 also enriches the hop-1 frontier.",
+        ),
+    ] = 1,
+    max_frontier_artists: Annotated[
+        int | None,
+        typer.Option(
+            "--max-frontier-artists",
+            help="Cap on frontier artists enriched during hop expansion.",
+        ),
+    ] = None,
 ) -> None:
     if source not in ("lastfm", "musicbrainz"):
         raise typer.BadParameter("--source must be 'lastfm' or 'musicbrainz'")
+    if depth < 1:
+        raise typer.BadParameter("--depth must be at least 1")
+    if max_frontier_artists is not None and max_frontier_artists < 0:
+        raise typer.BadParameter("--max-frontier-artists must be non-negative")
 
     resolved_config = load_config(config)
     conn = initialize_database(resolved_config)
@@ -218,7 +238,12 @@ def enrich_command(
                     "Large Last.fm enrichment runs can take some time; "
                     "Last.fm API calls are rate limited, so please be patient."
                 )
-                stats = _run_lastfm_enrichment_with_progress(conn, resolved_config)
+                stats = _run_lastfm_enrichment_with_progress(
+                    conn,
+                    resolved_config,
+                    depth=depth,
+                    max_frontier_artists=max_frontier_artists,
+                )
             except RuntimeError as exc:
                 console.print(f"Error: {exc}")
                 raise typer.Exit(code=1) from exc
@@ -703,6 +728,46 @@ def _run_musicbrainz_enrichment(
     console.print(f"errors: {resolve_stats['errors']}")
 
 
+def _apply_scorer_override(config: ScrobbleRecsConfig, scorer: str | None) -> ScrobbleRecsConfig:
+    """Return a config whose scoring engine is overridden by ``--scorer``."""
+    if scorer is None:
+        return config
+    if scorer not in ("legacy", "walk"):
+        raise typer.BadParameter("--scorer must be 'legacy' or 'walk'")
+    scoring = config.recommendation.scoring.model_copy(update={"engine": scorer})
+    recommendation = config.recommendation.model_copy(update={"scoring": scoring})
+    return config.model_copy(update={"recommendation": recommendation})
+
+
+_WEIGHT_ABLATIONS = {
+    "lastfm_similarity": "lastfm_similarity",
+    "tag_similarity": "tag_similarity",
+    "rediscovery": "rediscovery",
+    "feedback": "feedback_model",
+}
+_TOGGLE_ABLATIONS = ("serendipity", "obviousness")
+
+
+def _apply_ablation(config: ScrobbleRecsConfig, component: str | None) -> ScrobbleRecsConfig:
+    """Return a config with one scoring component zeroed, for A/B ablation."""
+    if component is None:
+        return config
+    recommendation = config.recommendation
+    if component in _WEIGHT_ABLATIONS:
+        weights = recommendation.weights.model_copy(update={_WEIGHT_ABLATIONS[component]: 0.0})
+        recommendation = recommendation.model_copy(update={"weights": weights})
+    elif component == "serendipity":
+        serendipity = recommendation.serendipity.model_copy(update={"enabled": False})
+        recommendation = recommendation.model_copy(update={"serendipity": serendipity})
+    elif component == "obviousness":
+        obviousness = recommendation.obviousness.model_copy(update={"enabled": False})
+        recommendation = recommendation.model_copy(update={"obviousness": obviousness})
+    else:
+        allowed = ", ".join([*_WEIGHT_ABLATIONS, *_TOGGLE_ABLATIONS])
+        raise typer.BadParameter(f"--ablate must be one of: {allowed}")
+    return config.model_copy(update={"recommendation": recommendation})
+
+
 @app.command("recommend")
 def recommend_command(
     config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
@@ -711,6 +776,10 @@ def recommend_command(
         typer.Option("--limit", help="Number of recommendations to persist."),
     ] = 500,
     mode: Annotated[str | None, typer.Option("--mode", help="Recommendation mode.")] = None,
+    scorer: Annotated[
+        str | None,
+        typer.Option("--scorer", help="Scoring engine: 'legacy' or 'walk'."),
+    ] = None,
     since: Annotated[
         str | None,
         typer.Option("--since", help="Start of listening history (ISO timestamp)."),
@@ -724,7 +793,7 @@ def recommend_command(
         console.print("Error: limit must be at least 1")
         raise typer.Exit(code=1)
 
-    resolved_config = load_config(config)
+    resolved_config = _apply_scorer_override(load_config(config), scorer)
     try:
         history_window = resolve_listening_window(
             as_of=datetime.now(tz=UTC).replace(tzinfo=None),
@@ -826,11 +895,19 @@ def evaluate_command(
         str | None,
         typer.Option("--test-until", help="End of test period (YYYY-MM-DD or ISO timestamp)."),
     ] = None,
+    scorer: Annotated[
+        str | None,
+        typer.Option("--scorer", help="Scoring engine: 'legacy' or 'walk'."),
+    ] = None,
+    ablate: Annotated[
+        str | None,
+        typer.Option("--ablate", help="Zero one scoring component and re-run."),
+    ] = None,
 ) -> None:
     """Evaluate recommendation quality using a train/test split."""
     from datetime import timedelta
 
-    resolved_config = load_config(config)
+    resolved_config = _apply_ablation(_apply_scorer_override(load_config(config), scorer), ablate)
     conn = initialize_database(resolved_config)
     try:
         # Resolve split dates.
@@ -865,6 +942,9 @@ def evaluate_command(
     console.print("")
     console.print("Evaluation")
     console.print("")
+    console.print(f"scoring_engine: {result.scoring_engine}")
+    if ablate:
+        console.print(f"ablated_component: {ablate}")
     console.print(f"train_until: {result.train_until}")
     console.print(f"test_from: {result.test_from}")
     console.print(f"test_until: {result.test_until}")
@@ -881,6 +961,95 @@ def evaluate_command(
     console.print(f"eligible_candidate_coverage: {result.eligible_candidate_coverage:.3f}")
     console.print(f"novelty_rate: {result.novelty_rate:.3f}")
     console.print(f"cooldown_or_repeat_rate: {result.cooldown_or_repeat_rate:.3f}")
+
+
+@app.command("compare")
+def compare_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    split_date: Annotated[
+        str | None,
+        typer.Option("--split-date", help="Date to split train/test (YYYY-MM-DD)."),
+    ] = None,
+    train_until: Annotated[
+        str | None,
+        typer.Option("--train-until", help="End of training period (YYYY-MM-DD or ISO timestamp)."),
+    ] = None,
+    test_from: Annotated[
+        str | None,
+        typer.Option("--test-from", help="Start of test period (YYYY-MM-DD or ISO timestamp)."),
+    ] = None,
+    test_until: Annotated[
+        str | None,
+        typer.Option("--test-until", help="End of test period (YYYY-MM-DD or ISO timestamp)."),
+    ] = None,
+    scorers: Annotated[
+        str,
+        typer.Option("--scorers", help="Comma-separated engines to compare."),
+    ] = "legacy,walk",
+) -> None:
+    """Run several scoring engines over one identical split and print deltas."""
+    from datetime import timedelta
+
+    resolved_config = load_config(config)
+    scorer_list = [item.strip() for item in scorers.split(",") if item.strip()]
+    for scorer in scorer_list:
+        if scorer not in ("legacy", "walk"):
+            raise typer.BadParameter("--scorers may only contain 'legacy' and 'walk'")
+
+    conn = initialize_database(resolved_config)
+    try:
+        if train_until and test_from:
+            train_dt = _parse_timestamp(train_until)
+            test_dt = _parse_timestamp(test_from)
+        elif split_date:
+            train_dt = _parse_timestamp(split_date)
+            test_dt = train_dt
+        else:
+            console.print("Error: provide --split-date or both --train-until and --test-from")
+            raise typer.Exit(code=1)
+        test_end_dt = _parse_timestamp(test_until) if test_until else test_dt + timedelta(days=90)
+
+        console.print("Comparing scorers over identical split...")
+        results = compare_scorers(
+            conn,
+            resolved_config,
+            train_until=train_dt,
+            test_from=test_dt,
+            test_until=test_end_dt,
+            scorers=scorer_list,
+        )
+    finally:
+        conn.close()
+
+    _print_comparison(results)
+
+
+def _print_comparison(results: list[ScorerComparison]) -> None:
+    def fmt(value: float | None) -> str:
+        return "n/a" if value is None else f"{value:.3f}"
+
+    metrics: list[tuple[str, list[float | None]]] = [
+        ("recommendations", [float(r.recommendations) for r in results]),
+        ("hit_rate@10", [r.hit_rate_at_10 for r in results]),
+        ("hit_rate@25", [r.hit_rate_at_25 for r in results]),
+        ("hit_rate@100", [r.hit_rate_at_100 for r in results]),
+        ("catalog_coverage", [r.catalog_coverage for r in results]),
+        ("knownness_mean", [r.knownness_mean for r in results]),
+        ("knownness_median", [r.knownness_median for r in results]),
+        ("tag_entropy", [r.tag_entropy for r in results]),
+        ("mean_hop_distance", [r.mean_hop_distance for r in results]),
+    ]
+    header = "metric".ljust(20) + "".join(r.scorer.rjust(12) for r in results)
+    delta_header = "delta".rjust(12) if len(results) == 2 else ""
+    console.print("")
+    console.print("Scorer comparison")
+    console.print("")
+    console.print(header + delta_header)
+    for name, values in metrics:
+        line = name.ljust(20) + "".join(fmt(value).rjust(12) for value in values)
+        if len(results) == 2 and values[0] is not None and values[1] is not None:
+            line += fmt(values[1] - values[0]).rjust(12)
+        console.print(line)
 
 
 @app.command("feedback")
@@ -999,6 +1168,7 @@ def _print_diagnostic_check(check: DiagnosticCheck) -> None:
 
 def _print_enrichment_stats(stats: LastFmEnrichmentStats) -> None:
     console.print(f"seed artists: {stats.seed_artists}")
+    console.print(f"frontier artists: {stats.frontier_artists}")
     console.print(f"similar artist requests: {stats.similar_artist_requests}")
     console.print(f"artist tag requests: {stats.artist_tag_requests}")
     console.print(f"tag top artist requests: {stats.tag_top_artist_requests}")
@@ -1011,6 +1181,9 @@ def _print_enrichment_stats(stats: LastFmEnrichmentStats) -> None:
 def _run_lastfm_enrichment_with_progress(
     conn: DuckDBPyConnection,
     resolved_config: ScrobbleRecsConfig,
+    *,
+    depth: int = 1,
+    max_frontier_artists: int | None = None,
 ) -> LastFmEnrichmentStats:
     task_ids: dict[str, TaskID] = {}
     with Progress(
@@ -1037,7 +1210,13 @@ def _run_lastfm_enrichment_with_progress(
                 description=_format_enrichment_progress_description(event),
             )
 
-        return run_lastfm_enrichment(conn, resolved_config, progress_callback=on_progress)
+        return run_lastfm_enrichment(
+            conn,
+            resolved_config,
+            depth=depth,
+            max_frontier_artists=max_frontier_artists,
+            progress_callback=on_progress,
+        )
 
 
 def _format_enrichment_progress_description(event: LastFmEnrichmentProgress) -> str:

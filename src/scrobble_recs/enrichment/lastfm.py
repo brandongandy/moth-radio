@@ -55,6 +55,7 @@ class LastFmEnrichmentStats:
     similarity_edges: int
     artist_tags: int
     tag_top_artists: int
+    frontier_artists: int = 0
 
 
 @dataclass(frozen=True)
@@ -71,8 +72,14 @@ def run_lastfm_enrichment(
     config: ScrobbleRecsConfig,
     *,
     client: LastFmClientProtocol | None = None,
+    depth: int = 1,
+    max_frontier_artists: int | None = None,
     progress_callback: LastFmEnrichmentProgressCallback | None = None,
 ) -> LastFmEnrichmentStats:
+    if depth < 1:
+        raise ValueError("depth must be at least 1")
+    if max_frontier_artists is not None and max_frontier_artists < 0:
+        raise ValueError("max_frontier_artists must be non-negative")
     owns_client = client is None
     if owns_client and not config.apis.lastfm.enabled:
         raise RuntimeError("Last.fm enrichment is disabled")
@@ -91,26 +98,42 @@ def run_lastfm_enrichment(
         )
         stats = _MutableStats(seed_artists=len(seeds))
 
-        for index, seed in enumerate(seeds):
-            _enrich_seed_similarity(
+        _enrich_artist_batch(
+            conn,
+            resolved_client,
+            seeds,
+            config,
+            stats,
+            progress_callback=progress_callback,
+        )
+
+        # Hop expansion: enrich the frontier reached from the already-enriched
+        # core, reusing the same cache-first, resumable machinery. ``depth`` counts
+        # the seed layer, so ``depth - 1`` expansion hops follow.
+        processed_ids = {seed.artist_id for seed in seeds}
+        remaining_budget = max_frontier_artists
+        for _hop in range(depth - 1):
+            if remaining_budget is not None and remaining_budget <= 0:
+                break
+            frontier = _select_frontier_artists(
+                conn,
+                processed_ids,
+                limit=remaining_budget,
+            )
+            if not frontier:
+                break
+            _enrich_artist_batch(
                 conn,
                 resolved_client,
-                seed,
+                frontier,
                 config,
                 stats,
                 progress_callback=progress_callback,
-                current=index,
-                total=len(seeds),
             )
-            _enrich_seed_tags(
-                conn,
-                resolved_client,
-                seed,
-                stats,
-                progress_callback=progress_callback,
-                current=index,
-                total=len(seeds),
-            )
+            stats.frontier_artists += len(frontier)
+            processed_ids.update(artist.artist_id for artist in frontier)
+            if remaining_budget is not None:
+                remaining_budget -= len(frontier)
 
         _enrich_tag_top_artists(conn, resolved_client, config, stats, progress_callback)
 
@@ -120,6 +143,89 @@ def run_lastfm_enrichment(
             close = getattr(resolved_client, "close", None)
             if callable(close):
                 close()
+
+
+def _enrich_artist_batch(
+    conn: DuckDBPyConnection,
+    client: LastFmClientProtocol,
+    artists: list[SeedArtist],
+    config: ScrobbleRecsConfig,
+    stats: _MutableStats,
+    *,
+    progress_callback: LastFmEnrichmentProgressCallback | None,
+) -> None:
+    total = len(artists)
+    for index, artist in enumerate(artists):
+        _enrich_seed_similarity(
+            conn,
+            client,
+            artist,
+            config,
+            stats,
+            progress_callback=progress_callback,
+            current=index,
+            total=total,
+        )
+        _enrich_seed_tags(
+            conn,
+            client,
+            artist,
+            stats,
+            progress_callback=progress_callback,
+            current=index,
+            total=total,
+        )
+
+
+def _select_frontier_artists(
+    conn: DuckDBPyConnection,
+    processed_ids: set[int],
+    *,
+    limit: int | None,
+) -> list[SeedArtist]:
+    """Return unenriched artists reachable from the enriched core.
+
+    Prioritized by aggregate incoming edge strength from already-enriched
+    artists (for the first hop this is exactly the seed set), so a bounded
+    crawl spends its budget on the artists most likely to matter.
+    """
+    if not processed_ids:
+        return []
+    limit_clause = "" if limit is None else "LIMIT ?"
+    params: list[object] = [sorted(processed_ids), sorted(processed_ids)]
+    if limit is not None:
+        params.append(limit)
+    rows = conn.execute(
+        f"""
+        SELECT
+            a.artist_id,
+            a.canonical_name,
+            a.artist_key,
+            coalesce(nullif(a.lastfm_name, ''), a.canonical_name) AS lastfm_name,
+            sum(e.normalized_score) AS aggregate_strength
+        FROM artist_similarity_edge e
+        JOIN artist a ON a.artist_id = e.target_artist_id
+        WHERE e.source = 'lastfm'
+          AND e.source_artist_id IN (SELECT unnest(?))
+          AND e.target_artist_id NOT IN (SELECT unnest(?))
+        GROUP BY a.artist_id, a.canonical_name, a.artist_key, a.lastfm_name
+        ORDER BY aggregate_strength DESC, a.artist_id ASC
+        {limit_clause}
+        """,
+        params,
+    ).fetchall()
+    return [
+        SeedArtist(
+            artist_id=int(row[0]),
+            name=str(row[1]),
+            artist_key=str(row[2]),
+            lastfm_name=str(row[3]),
+            play_count=0,
+            seed_weight=0.0,
+            regions=("frontier",),
+        )
+        for row in rows
+    ]
 
 
 @dataclass
@@ -132,6 +238,7 @@ class _MutableStats:
     similarity_edges: int = 0
     artist_tags: int = 0
     tag_top_artists: int = 0
+    frontier_artists: int = 0
 
     def snapshot(self) -> LastFmEnrichmentStats:
         return LastFmEnrichmentStats(
@@ -143,6 +250,7 @@ class _MutableStats:
             similarity_edges=self.similarity_edges,
             artist_tags=self.artist_tags,
             tag_top_artists=self.tag_top_artists,
+            frontier_artists=self.frontier_artists,
         )
 
 

@@ -299,6 +299,7 @@ def test_enrich_command_dispatches_lastfm_source(tmp_path: Path, monkeypatch) ->
         similarity_edges = 2
         artist_tags = 2
         tag_top_artists = 4
+        frontier_artists = 0
 
     class FakeProgress:
         phase = "seed_similarity"
@@ -307,7 +308,15 @@ def test_enrich_command_dispatches_lastfm_source(tmp_path: Path, monkeypatch) ->
         subject = "The Cure"
         status = "processing"
 
-    def fake_enrich(conn, config, *, client=None, progress_callback=None):
+    def fake_enrich(
+        conn,
+        config,
+        *,
+        client=None,
+        depth=1,
+        max_frontier_artists=None,
+        progress_callback=None,
+    ):
         calls.append(config.app.name)
         assert progress_callback is not None
         progress_callback(FakeProgress())
@@ -897,6 +906,7 @@ def test_evaluate_command_runs_and_prints_metrics(monkeypatch, tmp_path):
         train_until="2021-01-02T23:59:59",
         test_from="2021-01-03T00:00:00",
         test_until="2021-04-03T00:00:00",
+        scoring_engine="legacy",
         recommendations_generated=5,
         precision_at_50=0.042,
         recall_at_50=0.042,
@@ -956,6 +966,7 @@ def test_evaluate_command_passes_explicit_horizon(monkeypatch, tmp_path) -> None
         train_until="2021-01-01T00:00:00",
         test_from="2021-01-02T00:00:00",
         test_until="2021-01-10T00:00:00",
+        scoring_engine="legacy",
         recommendations_generated=0,
         precision_at_50=0.0,
         recall_at_50=0.0,
@@ -1013,6 +1024,7 @@ def test_evaluate_command_normalizes_offset_bounds_and_derived_horizon(
         train_until="2021-01-01T00:00:00",
         test_from="2021-01-02T00:00:00",
         test_until="2021-04-02T00:00:00",
+        scoring_engine="legacy",
         recommendations_generated=0,
         precision_at_50=0.0,
         recall_at_50=0.0,
@@ -1256,3 +1268,151 @@ def test_enrich_status_command_prints_counts(monkeypatch, tmp_path):
     assert "50" in result.stdout
     assert "45" in result.stdout
     assert "failed" in result.stdout
+
+
+def test_evaluate_command_scorer_and_ablate_override_config(tmp_path: Path, monkeypatch) -> None:
+    config_path = write_config(tmp_path)
+    runner = CliRunner()
+    runner.invoke(app, ["import", "--config", str(config_path)])
+
+    import scrobble_recs.cli as cli_module
+    from scrobble_recs.models.evaluate import EvaluationResult
+
+    captured = {}
+
+    def fake_evaluate(conn, config, *, train_until, test_from, test_until):
+        captured["engine"] = config.recommendation.scoring.engine
+        captured["lastfm_weight"] = config.recommendation.weights.lastfm_similarity
+        return EvaluationResult(
+            train_until="2021-01-03T00:00:00",
+            test_from="2021-01-03T00:00:00",
+            test_until="2021-04-03T00:00:00",
+            scoring_engine=config.recommendation.scoring.engine,
+            recommendations_generated=0,
+            precision_at_50=0.0,
+            recall_at_50=0.0,
+            recall_at_100=0.0,
+            ndcg_at_50=0.0,
+            knownness_median=0.0,
+            obviousness_median=0.0,
+            tag_diversity_at_20=0.0,
+            rediscovery_hit_rate=0.0,
+            external_candidate_share=0.0,
+            eligible_candidate_coverage=0.0,
+            novelty_rate=0.0,
+            cooldown_or_repeat_rate=0.0,
+        )
+
+    monkeypatch.setattr(cli_module, "evaluate_recommendations_from_config", fake_evaluate)
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluate",
+            "--config",
+            str(config_path),
+            "--split-date",
+            "2021-01-03",
+            "--scorer",
+            "walk",
+            "--ablate",
+            "lastfm_similarity",
+        ],
+    )
+    assert result.exit_code == 0
+    assert captured["engine"] == "walk"
+    assert captured["lastfm_weight"] == 0.0
+    assert "scoring_engine: walk" in result.stdout
+    assert "ablated_component: lastfm_similarity" in result.stdout
+
+
+def test_evaluate_command_rejects_unknown_ablation(tmp_path: Path) -> None:
+    config_path = write_config(tmp_path)
+    runner = CliRunner()
+    runner.invoke(app, ["import", "--config", str(config_path)])
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluate",
+            "--config",
+            str(config_path),
+            "--split-date",
+            "2021-01-03",
+            "--ablate",
+            "nope",
+        ],
+    )
+    assert result.exit_code != 0
+
+
+def test_compare_command_prints_delta_table(tmp_path: Path, monkeypatch) -> None:
+    config_path = write_config(tmp_path)
+    runner = CliRunner()
+    runner.invoke(app, ["import", "--config", str(config_path)])
+
+    import scrobble_recs.cli as cli_module
+    from scrobble_recs.models.compare import ScorerComparison
+
+    def fake_compare(conn, config, *, train_until, test_from, test_until, scorers):
+        return [
+            ScorerComparison(
+                scorer="legacy",
+                recommendations=10,
+                hit_rate_at_10=0.10,
+                hit_rate_at_25=0.20,
+                hit_rate_at_100=0.30,
+                catalog_coverage=0.40,
+                knownness_mean=0.50,
+                knownness_median=0.45,
+                tag_entropy=1.2,
+                mean_hop_distance=None,
+            ),
+            ScorerComparison(
+                scorer="walk",
+                recommendations=12,
+                hit_rate_at_10=0.15,
+                hit_rate_at_25=0.25,
+                hit_rate_at_100=0.35,
+                catalog_coverage=0.42,
+                knownness_mean=0.40,
+                knownness_median=0.38,
+                tag_entropy=1.5,
+                mean_hop_distance=1.8,
+            ),
+        ]
+
+    monkeypatch.setattr(cli_module, "compare_scorers", fake_compare)
+
+    result = runner.invoke(
+        app,
+        ["compare", "--config", str(config_path), "--split-date", "2021-01-03"],
+    )
+    assert result.exit_code == 0
+    assert "Scorer comparison" in result.stdout
+    assert "legacy" in result.stdout
+    assert "walk" in result.stdout
+    assert "hit_rate@10" in result.stdout
+    assert "mean_hop_distance" in result.stdout
+    # Delta column present for a 2-scorer comparison.
+    assert "delta" in result.stdout
+
+
+def test_compare_command_rejects_unknown_scorer(tmp_path: Path) -> None:
+    config_path = write_config(tmp_path)
+    runner = CliRunner()
+    runner.invoke(app, ["import", "--config", str(config_path)])
+
+    result = runner.invoke(
+        app,
+        [
+            "compare",
+            "--config",
+            str(config_path),
+            "--split-date",
+            "2021-01-03",
+            "--scorers",
+            "legacy,bogus",
+        ],
+    )
+    assert result.exit_code != 0

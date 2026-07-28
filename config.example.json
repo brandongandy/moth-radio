@@ -72,6 +72,19 @@
       "threshold": 0.65,
       "penalty_weight": 0.40
     },
+    "scoring": {
+      "engine": "legacy",
+      "seed_idf_alpha": 0.0
+    },
+    "walk": {
+      "max_hops": 2,
+      "max_nodes": 250000,
+      "symmetrize": false,
+      "restart": 0.15,
+      "baseline_exponent": 1.0,
+      "min_lift": 0.0,
+      "min_distinct_seeds": 2
+    },
     "weights": {
       "lastfm_similarity": 0.35,
       "tag_similarity": 0.25,

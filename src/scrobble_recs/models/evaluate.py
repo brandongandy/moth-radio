@@ -17,6 +17,7 @@ class EvaluationResult:
     train_until: str
     test_from: str
     test_until: str
+    scoring_engine: str
     recommendations_generated: int
     precision_at_50: float
     recall_at_50: float
@@ -110,6 +111,7 @@ def evaluate_recommendations(
         train_until=train_until.isoformat(),
         test_from=test_from.isoformat(),
         test_until=test_until.isoformat(),
+        scoring_engine=config.recommendation.scoring.engine,
         recommendations_generated=stats.recommendations,
         precision_at_50=precision_50,
         recall_at_50=recall_50,

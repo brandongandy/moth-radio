@@ -5,14 +5,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
-from math import log, sqrt
+from math import isfinite, log, sqrt
 from typing import Literal, TypeAlias
 from urllib.parse import quote
 from uuid import uuid4
 
 from duckdb import DuckDBPyConnection
 
-from scrobble_recs.config import RecommendationWeightsConfig, ScrobbleRecsConfig
+from scrobble_recs.config import RecommendationWeightsConfig, ScrobbleRecsConfig, WalkConfig
 from scrobble_recs.export import _display_score
 from scrobble_recs.models.feedback import (
     FeedbackProfile,
@@ -31,7 +31,9 @@ from scrobble_recs.models.recommendation_quality import (
     calibrate_positive_components,
     evaluate_discovery_evidence,
 )
+from scrobble_recs.models.seed_weighting import SeedIdfWeights, compute_seed_idf_weights
 from scrobble_recs.models.serendipity import SerendipityEvidence, score_serendipity
+from scrobble_recs.models.walk import WalkNode, WalkResult, build_walk_result, top_paths
 
 RecommendationProgressPhase: TypeAlias = Literal[
     "refresh_listening",
@@ -99,6 +101,8 @@ class _CandidateScore:
     rediscovery_eligible: bool = False
     identity_confidence: float = 0.50
     identity_warnings: tuple[str, ...] = ()
+    hop_distance: int | None = None
+    walk_node: WalkNode | None = None
 
 
 @dataclass(frozen=True)
@@ -152,6 +156,8 @@ class _EligibleCandidate:
     rediscovery_eligible: bool
     identity_confidence: float
     identity_warnings: tuple[str, ...]
+    hop_distance: int | None = None
+    walk_node: WalkNode | None = None
 
 
 @dataclass(frozen=True)
@@ -240,6 +246,11 @@ def generate_recommendations(
     )
     seeds = _add_feedback_seed_artists(conn, seeds, feedback_profile)
     seed_ids = {seed.artist_id for seed in seeds}
+    idf_weights = compute_seed_idf_weights(
+        {seed.artist_id: seed.seed_weight for seed in seeds},
+        _load_seed_popularity(conn, seed_ids),
+        alpha=config.recommendation.scoring.seed_idf_alpha,
+    )
     _report_progress(
         progress_callback,
         phase="select_seeds",
@@ -303,16 +314,28 @@ def generate_recommendations(
         status="completed",
     )
     run_id = str(uuid4())
+    walk_result = (
+        build_walk_result(
+            scoring_data.similarity_by_target,
+            seed_ids=seed_ids,
+            seed_weights=idf_weights.effective_weight_by_seed,
+            config=config.recommendation.walk,
+        )
+        if config.recommendation.scoring.engine == "walk"
+        else None
+    )
     scores, candidate_diagnostics = _score_candidates(
         config,
         mode_settings,
         seeds,
         seed_ids,
+        idf_weights,
         effective_tag_profile,
         scoring_data,
         feedback_profile,
         fatigue_by_artist,
         cooldown_artist_ids,
+        walk_result,
         as_of=resolved_as_of,
         progress_callback=progress_callback,
     )
@@ -369,7 +392,10 @@ def generate_recommendations(
                 score,
                 scoring_data,
                 seed_weight_by_id={seed.artist_id: seed.seed_weight for seed in seeds},
+                idf_weights=idf_weights,
                 tag_profile=effective_tag_profile,
+                walk_result=walk_result,
+                seed_ids=seed_ids,
             ),
         )
         for score in banded
@@ -399,6 +425,8 @@ def generate_recommendations(
         mode_settings,
         seeds,
         ranked,
+        idf_weights=idf_weights,
+        walk_result=walk_result,
         history_window=resolved_history_window,
         history_window_source=history_window_source,
     )
@@ -551,6 +579,36 @@ def _load_user_tag_profile(
     if max_weight <= 0:
         return {}
     return {tag: weight / max_weight for tag, weight in profile.items()}
+
+
+def _load_seed_popularity(
+    conn: DuckDBPyConnection,
+    seed_ids: set[int],
+) -> dict[int, float]:
+    """World-popularity proxy for seeds from ``tag_top_artist`` ranks.
+
+    An artist that ranks highly across many tags is globally popular. We sum
+    rank affinity across a seed's ``tag.getTopArtists`` placements; seeds with no
+    placements are absent from the result and treated as neutral (median idf)
+    downstream. This is the same signal family the obviousness penalty reads and
+    requires no additional API call.
+    """
+    if not seed_ids:
+        return {}
+    popularity: dict[int, float] = {}
+    for artist_id, tag_rank in conn.execute(
+        """
+        SELECT artist_id, tag_rank
+        FROM tag_top_artist
+        WHERE source = 'lastfm'
+          AND artist_id IN (SELECT unnest(?))
+        """,
+        [sorted(seed_ids)],
+    ).fetchall():
+        popularity[int(artist_id)] = popularity.get(int(artist_id), 0.0) + _rank_affinity(
+            int(tag_rank)
+        )
+    return popularity
 
 
 def _load_scoring_data(
@@ -828,17 +886,23 @@ def _score_candidates(
     mode: RecommendationModeSettings,
     seeds: list[SeedArtist],
     seed_ids: set[int],
+    idf_weights: SeedIdfWeights,
     tag_profile: dict[str, float],
     scoring_data: _ScoringData,
     feedback_profile: FeedbackProfile,
     fatigue_by_artist: dict[int, _FatiguePenalty],
     cooldown_artist_ids: set[int],
+    walk_result: WalkResult | None,
     *,
     as_of: datetime | None = None,
     progress_callback: RecommendationProgressCallback | None = None,
 ) -> tuple[list[_CandidateScore], list[_CandidateDiagnostic]]:
-    seed_weight_by_id = {seed.artist_id: seed.seed_weight for seed in seeds}
+    # Inverse-popularity weighting is applied at aggregation only. At
+    # ``seed_idf_alpha == 0`` these equal the raw seed weights exactly, so the
+    # legacy path is preserved byte-for-byte.
+    seed_weight_by_id = idf_weights.effective_weight_by_seed
     total_seed_weight = sum(seed_weight_by_id.values()) or 1.0
+    walk_engine = config.recommendation.scoring.engine == "walk"
     scores: list[_CandidateScore] = []
     candidate_only_scores: list[_CandidateScore] = []
     eligible_candidates: list[_EligibleCandidate] = []
@@ -916,12 +980,22 @@ def _score_candidates(
                 _excluded_candidate_diagnostic(artist_id, "rediscovery_not_eligible")
             )
             continue
-        lastfm_score = _lastfm_similarity_score(
-            artist_id,
-            seed_weight_by_id,
-            total_seed_weight,
-            scoring_data.similarity_by_target,
-        )
+        walk_node: WalkNode | None = None
+        if walk_engine:
+            assert walk_result is not None
+            walk_node = walk_result.nodes.get(artist_id)
+            if walk_node is None or walk_node.hop_distance < 0 or not isfinite(walk_node.lift):
+                diagnostics.append(_excluded_candidate_diagnostic(artist_id, "walk_unreachable"))
+                continue
+            # Lift replaces the weighted-average similarity as the graph signal.
+            lastfm_score = walk_node.lift
+        else:
+            lastfm_score = _lastfm_similarity_score(
+                artist_id,
+                seed_weight_by_id,
+                total_seed_weight,
+                scoring_data.similarity_by_target,
+            )
         tag_score = _tag_similarity_score(artist_id, tag_profile, scoring_data)
         obviousness = (
             min(
@@ -950,19 +1024,23 @@ def _score_candidates(
             "tag_similarity": tag_score,
             "feedback": feedback.score,
         }
-        quality_gate = _quality_gate_decision(
-            config,
-            mode,
-            edges=tuple(
-                (source_artist_id, similarity)
-                for source_artist_id, similarity in scoring_data.similarity_by_target.get(
-                    artist_id, []
-                )
-                if source_artist_id in seed_weight_by_id
-            ),
-            tag_score=tag_score,
-            rediscovery_score=scored_rediscovery,
-        )
+        if walk_engine:
+            assert walk_node is not None
+            quality_gate = _walk_gate_decision(walk_node, config.recommendation.walk)
+        else:
+            quality_gate = _quality_gate_decision(
+                config,
+                mode,
+                edges=tuple(
+                    (source_artist_id, similarity)
+                    for source_artist_id, similarity in scoring_data.similarity_by_target.get(
+                        artist_id, []
+                    )
+                    if source_artist_id in seed_weight_by_id
+                ),
+                tag_score=tag_score,
+                rediscovery_score=scored_rediscovery,
+            )
         if not quality_gate.passed:
             diagnostics.append(
                 _CandidateDiagnostic(
@@ -1007,6 +1085,8 @@ def _score_candidates(
                 rediscovery_eligible=rediscovery_eligible,
                 identity_confidence=identity_conf,
                 identity_warnings=identity_warnings,
+                hop_distance=None if walk_node is None else walk_node.hop_distance,
+                walk_node=walk_node,
             )
         )
         if processed % report_interval == 0:
@@ -1127,6 +1207,8 @@ def _score_candidates(
             rediscovery_eligible=candidate.rediscovery_eligible,
             identity_confidence=candidate.identity_confidence,
             identity_warnings=candidate.identity_warnings,
+            hop_distance=candidate.hop_distance,
+            walk_node=candidate.walk_node,
         )
         if final_score <= 0.0:
             candidate_only_scores.append(score)
@@ -1518,6 +1600,37 @@ def _quality_gate_decision(
     )
 
 
+def _walk_gate_decision(walk_node: WalkNode, walk_config: WalkConfig) -> _QualityGateDecision:
+    """Replace the two-branch discovery gate with a lift floor plus a minimum
+    number of distinct seeds reaching the candidate within ``max_hops``."""
+    lift_ok = walk_node.lift >= walk_config.min_lift
+    seeds_ok = walk_node.distinct_seed_count >= walk_config.min_distinct_seeds
+    passed = lift_ok and seeds_ok
+    reasons: list[str] = []
+    if passed:
+        reasons.append("walk_lift_and_reachability")
+    else:
+        if not lift_ok:
+            reasons.append("walk_below_min_lift")
+        if not seeds_ok:
+            reasons.append("walk_insufficient_distinct_seeds")
+    evidence = DirectEvidence(
+        distinct_seed_count=walk_node.distinct_seed_count,
+        strongest_edge=walk_node.lift,
+        qualifying_edges=(),
+    )
+    thresholds = {
+        "min_lift": walk_config.min_lift,
+        "min_distinct_seeds": float(walk_config.min_distinct_seeds),
+    }
+    return _QualityGateDecision(
+        passed=passed,
+        reasons=tuple(reasons),
+        thresholds=thresholds,
+        evidence=evidence,
+    )
+
+
 def _excluded_candidate_diagnostic(artist_id: int, reason: str) -> _CandidateDiagnostic:
     return _CandidateDiagnostic(
         artist_id=artist_id,
@@ -1564,14 +1677,18 @@ def _explanation(
     scoring_data: _ScoringData,
     *,
     seed_weight_by_id: dict[int, float],
+    idf_weights: SeedIdfWeights,
     tag_profile: dict[str, float],
+    walk_result: WalkResult | None,
+    seed_ids: set[int],
 ) -> dict[str, object]:
+    effective_weight_by_id = idf_weights.effective_weight_by_seed
     seed_rows = [
         (
             source_artist_id,
             scoring_data.artist_names.get(source_artist_id, ""),
             similarity,
-            seed_weight_by_id[source_artist_id] * similarity,
+            effective_weight_by_id.get(source_artist_id, 0.0) * similarity,
         )
         for source_artist_id, similarity in scoring_data.similarity_by_target.get(
             score.artist_id, []
@@ -1621,7 +1738,8 @@ def _explanation(
         f" Caution: {caution_str}."
     )
 
-    return {
+    walk_block = _walk_explanation(score, scoring_data, walk_result, seed_ids, idf_weights)
+    explanation: dict[str, object] = {
         "summary": summary,
         "top_seed_artists": top_seed_names,
         "top_seed_edge_scores": top_seed_scores,
@@ -1671,6 +1789,7 @@ def _explanation(
             {
                 "artist": seed_name,
                 "seed_weight": seed_weight_by_id[source_artist_id],
+                "idf_weight": idf_weights.idf_by_seed.get(source_artist_id, 1.0),
                 "source": "lastfm_artist_similarity",
                 "similarity": similarity,
             }
@@ -1708,6 +1827,59 @@ def _explanation(
             "rediscovery_eligible": score.rediscovery_eligible,
         },
     }
+    if walk_block is not None:
+        explanation["walk"] = walk_block
+    return explanation
+
+
+def _walk_explanation(
+    score: _CandidateScore,
+    scoring_data: _ScoringData,
+    walk_result: WalkResult | None,
+    seed_ids: set[int],
+    idf_weights: SeedIdfWeights,
+) -> dict[str, object] | None:
+    """Human-readable walk evidence: top weighted paths, contributing seeds with
+    their IDF weights, hop distance, lift, and raw/baseline mass.
+
+    PPR mass is not itself an explanation, so paths from seeds are the primary
+    artifact here.
+    """
+    if walk_result is None or score.walk_node is None:
+        return None
+    node = score.walk_node
+    paths = top_paths(walk_result, target=score.artist_id, seed_ids=seed_ids, max_paths=3)
+    contributing_seeds = sorted(
+        {seed_id for path in paths for seed_id in path.node_ids if seed_id in seed_ids}
+    )
+    return {
+        "lift": node.lift,
+        "personalized_mass": node.ppr_personalized,
+        "baseline_mass": node.ppr_uniform,
+        "hop_distance": node.hop_distance,
+        "distinct_seed_count": node.distinct_seed_count,
+        "node_cap_bound": walk_result.diagnostics.node_cap_bound,
+        "iteration_cap_bound": walk_result.diagnostics.iteration_cap_bound,
+        "top_paths": [
+            {
+                "artists": [
+                    scoring_data.artist_names.get(node_id, str(node_id))
+                    for node_id in path.node_ids
+                ],
+                "artist_ids": list(path.node_ids),
+                "weight": path.weight,
+            }
+            for path in paths
+        ],
+        "contributing_seeds": [
+            {
+                "artist": scoring_data.artist_names.get(seed_id, str(seed_id)),
+                "artist_id": seed_id,
+                "idf_weight": idf_weights.idf_by_seed.get(seed_id, 1.0),
+            }
+            for seed_id in contributing_seeds
+        ],
+    }
 
 
 def _seed_region_counts(
@@ -1724,6 +1896,20 @@ def _seed_region_counts(
             if region not in configured_regions:
                 counts[region] = counts.get(region, 0) + 1
     return counts
+
+
+def _walk_run_summary(walk_result: WalkResult | None) -> dict[str, object] | None:
+    if walk_result is None:
+        return None
+    diagnostics = walk_result.diagnostics
+    return {
+        "node_count": diagnostics.node_count,
+        "edge_count": diagnostics.edge_count,
+        "iterations": diagnostics.iterations,
+        "final_delta": diagnostics.final_delta,
+        "node_cap_bound": diagnostics.node_cap_bound,
+        "iteration_cap_bound": diagnostics.iteration_cap_bound,
+    }
 
 
 def _persist_candidates(
@@ -1776,6 +1962,8 @@ def _persist_run(
     seeds: list[SeedArtist],
     ranked: list[_CandidateScore],
     *,
+    idf_weights: SeedIdfWeights,
+    walk_result: WalkResult | None,
     history_window: ListeningWindow,
     history_window_source: str,
 ) -> None:
@@ -1787,16 +1975,18 @@ def _persist_run(
                 run_id,
                 config_hash,
                 mode,
+                scoring_engine,
                 seed_summary,
                 scoring_weights,
                 notes
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 run_id,
                 _config_hash(config),
                 mode,
+                config.recommendation.scoring.engine,
                 json.dumps(
                     {
                         "seed_count": len(seeds),
@@ -1806,10 +1996,17 @@ def _persist_run(
                             "source": history_window_source,
                         },
                         "regions": _seed_region_counts(seeds, mode_settings),
+                        "idf": {
+                            "alpha": idf_weights.alpha,
+                            "missing_seed_count": len(idf_weights.missing_seed_ids),
+                            "missing_fraction": idf_weights.missing_fraction,
+                        },
+                        "walk": _walk_run_summary(walk_result),
                         "top_seeds": [
                             {
                                 "artist": seed.name,
                                 "seed_weight": seed.seed_weight,
+                                "idf_weight": idf_weights.idf_by_seed.get(seed.artist_id, 1.0),
                                 "regions": list(seed.regions),
                             }
                             for seed in seeds[:10]
@@ -1906,13 +2103,14 @@ def _persist_run(
                     lastfm_url,
                     musicbrainz_url,
                     identity_confidence,
-                    identity_warnings
+                    identity_warnings,
+                    hop_distance
                 )
                 VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?
+                    ?, ?
                 )
                 """,
                 [
@@ -1947,6 +2145,7 @@ def _persist_run(
                     musicbrainz_url_val,
                     identity[2],
                     identity[3],
+                    score.hop_distance,
                 ],
             )
         conn.execute("COMMIT")

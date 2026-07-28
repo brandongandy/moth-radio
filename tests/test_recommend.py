@@ -131,6 +131,7 @@ def test_recommendation_migration_creates_run_and_result_tables(tmp_path: Path) 
             "created_at": "TIMESTAMP",
             "config_hash": "VARCHAR",
             "mode": "VARCHAR",
+            "scoring_engine": "VARCHAR",
             "seed_summary": "JSON",
             "scoring_weights": "JSON",
             "notes": "VARCHAR",
@@ -168,6 +169,7 @@ def test_recommendation_migration_creates_run_and_result_tables(tmp_path: Path) 
             "musicbrainz_url": "VARCHAR",
             "identity_confidence": "DOUBLE",
             "identity_warnings": "VARCHAR",
+            "hop_distance": "INTEGER",
         }
 
         conn.execute(
@@ -278,6 +280,42 @@ class RecommendationFakeLastFmClient:
             ],
         }
         return rows[tag][:limit]
+
+
+def _legacy_run_fingerprint(conn, run_id: str) -> list[tuple[object, ...]]:
+    return conn.execute(
+        """
+        SELECT rank, artist_id, final_score, raw_score, lastfm_similarity_score,
+               tag_similarity_score, knownness, obviousness, explanation
+        FROM recommendation
+        WHERE run_id = ?
+        ORDER BY rank, artist_id
+        """,
+        [run_id],
+    ).fetchall()
+
+
+def test_legacy_run_is_byte_identical_for_same_config_and_db(tmp_path: Path) -> None:
+    fingerprints = []
+    for name in ("a", "b"):
+        base = tmp_path / name
+        base.mkdir()
+        config = load_config(write_config(base))
+        conn = initialize_database(config)
+        import_lastfm_csv(conn, Path("tests/fixtures/tiny_lastfm_export.csv"))
+        run_lastfm_enrichment(conn, config, client=RecommendationFakeLastFmClient())
+        stats = generate_recommendations(
+            conn,
+            config,
+            limit=10,
+            mode="balanced",
+            as_of=datetime(2026, 6, 4),
+            history_window=_FIXTURE_HISTORY_WINDOW,
+        )
+        fingerprints.append(_legacy_run_fingerprint(conn, stats.run_id))
+        conn.close()
+
+    assert fingerprints[0] == fingerprints[1]
 
 
 def test_generate_recommendations_persists_ranked_run_with_explanations(

@@ -15,6 +15,7 @@ dependencies = [
   "pydantic>=2.0",
   "python-dotenv>=1.0",
   "rapidfuzz>=3.0",
+  "scipy>=1.11",
   "rich>=13.0",
   "textual>=0.80",
   "typer>=0.12",
@@ -48,7 +49,13 @@ target-version = "py311"
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.mypy]
-python_version = "3.11"
+# 3.12 target is required to parse numpy>=2.3 inline stubs (PEP 695 `type`
+# syntax); the runtime still supports 3.11 (see requires-python / ruff target).
+python_version = "3.12"
 strict = true
 mypy_path = "src"
 packages = ["scrobble_recs"]
+
+[[tool.mypy.overrides]]
+module = ["scipy", "scipy.*"]
+ignore_missing_imports = true

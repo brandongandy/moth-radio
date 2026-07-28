@@ -65,6 +65,63 @@ def test_run_doctor_reports_ok_local_state(tmp_path: Path) -> None:
     assert checks["import_warnings"].message == "warnings=0"
 
 
+def test_run_doctor_reports_graph_depth_with_high_dangling_fraction(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path))
+    conn = initialize_database(config)
+    try:
+        conn.execute(
+            """
+            INSERT INTO artist (artist_id, canonical_name, artist_key)
+            VALUES (1, 'A', 'a'), (2, 'B', 'b'), (3, 'C', 'c')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO artist_similarity_edge
+                (source_artist_id, target_artist_id, source, source_score, normalized_score)
+            VALUES (1, 2, 'lastfm', 0.9, 0.9), (1, 3, 'lastfm', 0.7, 0.7)
+            """
+        )
+        result = run_doctor(config, conn)
+    finally:
+        conn.close()
+
+    checks = {check.name: check for check in result.checks}
+    assert "graph_depth" in checks
+    # 3 graph nodes, 2 edges, 2 dangling (B, C) -> 0.67 dangling -> WARN.
+    assert checks["graph_depth"].status is DiagnosticStatus.WARN
+    assert "nodes=3" in checks["graph_depth"].message
+    assert "edges=2" in checks["graph_depth"].message
+    assert "dangling" in checks["graph_depth"].message.lower()
+    assert "enrich" in checks["graph_depth"].message.lower()
+
+
+def test_run_doctor_graph_depth_ok_when_frontier_enriched(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path))
+    conn = initialize_database(config)
+    try:
+        conn.execute(
+            """
+            INSERT INTO artist (artist_id, canonical_name, artist_key)
+            VALUES (1, 'A', 'a'), (2, 'B', 'b')
+            """
+        )
+        # Both nodes have outgoing edges -> zero dangling.
+        conn.execute(
+            """
+            INSERT INTO artist_similarity_edge
+                (source_artist_id, target_artist_id, source, source_score, normalized_score)
+            VALUES (1, 2, 'lastfm', 0.9, 0.9), (2, 1, 'lastfm', 0.8, 0.8)
+            """
+        )
+        result = run_doctor(config, conn)
+    finally:
+        conn.close()
+
+    checks = {check.name: check for check in result.checks}
+    assert checks["graph_depth"].status is DiagnosticStatus.OK
+
+
 def test_run_doctor_reports_missing_csv_as_error(tmp_path: Path) -> None:
     config = load_config(_write_config(tmp_path, csv_path=str(tmp_path / "missing.csv")))
     conn = initialize_database(config)

@@ -65,6 +65,7 @@ _RECOMMENDATION_PHASE_LABELS = {
     "score_candidates": "Score candidates",
     "rerank_diversity": "Rerank diversity",
     "build_explanations": "Build explanations",
+    "persist_candidates": "Persist candidates",
     "persist_run": "Persist run",
 }
 

@@ -11,6 +11,7 @@ from scrobble_recs.config import RecommendationConfig, load_config
 from scrobble_recs.db import initialize_database
 from scrobble_recs.enrichment.lastfm import run_lastfm_enrichment
 from scrobble_recs.importers.lastfm_csv import import_lastfm_csv
+from scrobble_recs.models import recommend as recommend_model
 from scrobble_recs.models.feedback import record_feedback_event
 from scrobble_recs.models.profile_window import ListeningWindow
 from scrobble_recs.models.recommend import (
@@ -485,6 +486,8 @@ def test_generate_recommendations_reports_phase_progress(tmp_path: Path) -> None
         ("build_explanations", 0, 2, "recommendations", "processing"),
         ("build_explanations", 2, 2, "recommendations", "completed"),
         ("persist_run", 0, 2, "recommendation rows", "processing"),
+        ("persist_candidates", 0, 3, "candidate rows", "processing"),
+        ("persist_candidates", 3, 3, "candidate rows", "completed"),
         ("persist_run", 2, 2, "recommendation rows", "completed"),
     ]
     conn.close()
@@ -2970,6 +2973,45 @@ def test_generate_recommendations_persists_candidates(tmp_path: Path) -> None:
             [stats.run_id],
         ).fetchone()
         assert int(rows[0]) > 0
+    finally:
+        conn.close()
+
+
+def test_generate_recommendations_rolls_back_candidates_when_persistence_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    try:
+        import_lastfm_csv(conn, Path("tests/fixtures/tiny_lastfm_export.csv"))
+        run_lastfm_enrichment(conn, config, client=RecommendationFakeLastFmClient())
+        persist_candidates = recommend_model._persist_candidates
+
+        def fail_after_persist(*args: object, **kwargs: object) -> None:
+            persist_candidates(*args, **kwargs)  # type: ignore[arg-type]
+            persisted = conn.execute("SELECT count(*) FROM recommendation_candidate").fetchone()
+            assert persisted is not None
+            assert persisted[0] > 0
+            raise RuntimeError("simulated persistence failure")
+
+        monkeypatch.setattr(recommend_model, "_persist_candidates", fail_after_persist)
+
+        with pytest.raises(RuntimeError, match="simulated persistence failure"):
+            generate_recommendations(
+                conn,
+                config,
+                limit=3,
+                mode="balanced",
+                as_of=datetime(2026, 6, 4),
+            )
+
+        persisted_candidates = conn.execute(
+            "SELECT count(*) FROM recommendation_candidate"
+        ).fetchone()
+        assert persisted_candidates == (0,)
+        persisted_runs = conn.execute("SELECT count(*) FROM recommendation_run").fetchone()
+        assert persisted_runs == (0,)
     finally:
         conn.close()
 

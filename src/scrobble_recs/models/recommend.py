@@ -43,6 +43,7 @@ RecommendationProgressPhase: TypeAlias = Literal[
     "score_candidates",
     "rerank_diversity",
     "build_explanations",
+    "persist_candidates",
     "persist_run",
 ]
 RecommendationProgressStatus: TypeAlias = Literal["processing", "completed"]
@@ -339,7 +340,6 @@ def generate_recommendations(
         as_of=resolved_as_of,
         progress_callback=progress_callback,
     )
-    _persist_candidates(conn, run_id, scoring_data, candidate_diagnostics)
     _report_progress(
         progress_callback,
         phase="rerank_diversity",
@@ -429,6 +429,9 @@ def generate_recommendations(
         walk_result=walk_result,
         history_window=resolved_history_window,
         history_window_source=history_window_source,
+        scoring_data=scoring_data,
+        candidate_diagnostics=candidate_diagnostics,
+        progress_callback=progress_callback,
     )
     _report_progress(
         progress_callback,
@@ -1917,13 +1920,41 @@ def _persist_candidates(
     run_id: str,
     scoring_data: _ScoringData,
     diagnostics: list[_CandidateDiagnostic],
+    *,
+    progress_callback: RecommendationProgressCallback | None,
 ) -> None:
     """Persist candidate artists for the current recommendation run."""
-    for diagnostic in diagnostics:
-        artist_id = diagnostic.artist_id
-        sources = scoring_data.similarity_by_target.get(artist_id, [])
-        tags = scoring_data.tag_ranks_by_artist.get(artist_id, [])
-        conn.execute(
+    total = len(diagnostics)
+    _report_progress(
+        progress_callback,
+        phase="persist_candidates",
+        current=0,
+        total=total,
+        subject="candidate rows",
+        status="processing",
+    )
+    batch_size = 1_000
+    for start in range(0, total, batch_size):
+        batch = diagnostics[start : start + batch_size]
+        rows: list[list[object]] = []
+        for diagnostic in batch:
+            artist_id = diagnostic.artist_id
+            sources = scoring_data.similarity_by_target.get(artist_id, [])
+            tags = scoring_data.tag_ranks_by_artist.get(artist_id, [])
+            rows.append(
+                [
+                    run_id,
+                    artist_id,
+                    json.dumps([int(source[0]) for source in sources]),
+                    float(max((source[1] for source in sources), default=0.0)),
+                    len(sources),
+                    len(tags),
+                    diagnostic.state,
+                    json.dumps(list(diagnostic.reasons)),
+                    json.dumps(diagnostic.quality_gate, sort_keys=True),
+                ]
+            )
+        conn.executemany(
             """
             INSERT INTO recommendation_candidate
                 (run_id, artist_id, candidate_sources, max_source_score,
@@ -1939,17 +1970,25 @@ def _persist_candidates(
                 eligibility_reasons = excluded.eligibility_reasons,
                 quality_gate = excluded.quality_gate
             """,
-            [
-                run_id,
-                artist_id,
-                json.dumps([int(s[0]) for s in sources]),
-                float(max((s[1] for s in sources), default=0.0)),
-                len(sources),
-                len(tags),
-                diagnostic.state,
-                json.dumps(list(diagnostic.reasons)),
-                json.dumps(diagnostic.quality_gate, sort_keys=True),
-            ],
+            rows,
+        )
+        persisted = start + len(batch)
+        _report_progress(
+            progress_callback,
+            phase="persist_candidates",
+            current=persisted,
+            total=total,
+            subject="candidate rows",
+            status="completed" if persisted == total else "processing",
+        )
+    if total == 0:
+        _report_progress(
+            progress_callback,
+            phase="persist_candidates",
+            current=0,
+            total=0,
+            subject="candidate rows",
+            status="completed",
         )
 
 
@@ -1966,6 +2005,9 @@ def _persist_run(
     walk_result: WalkResult | None,
     history_window: ListeningWindow,
     history_window_source: str,
+    scoring_data: _ScoringData,
+    candidate_diagnostics: list[_CandidateDiagnostic],
+    progress_callback: RecommendationProgressCallback | None,
 ) -> None:
     conn.execute("BEGIN TRANSACTION")
     try:
@@ -2041,6 +2083,13 @@ def _persist_run(
                 ),
                 "offline lastfm/tag first recommender",
             ],
+        )
+        _persist_candidates(
+            conn,
+            run_id,
+            scoring_data,
+            candidate_diagnostics,
+            progress_callback=progress_callback,
         )
         candidate_only_offset = 999900
         artist_identity = {

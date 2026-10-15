@@ -1,0 +1,124 @@
+{
+  "legacy": {
+    "recommendations": [
+      {
+        "artist_id": 5,
+        "score_band": "strong",
+        "components": {
+          "final_score": 0.39636553,
+          "raw_score": 0.56598737,
+          "lastfm_similarity_score": 0.91,
+          "tag_similarity_score": 0.98994949,
+          "cluster_fit_score": 0.0,
+          "rediscovery_score": 0.0,
+          "metadata_graph_score": 0.0,
+          "feedback_score": 0.0,
+          "knownness": 0.0,
+          "obviousness": 0.15,
+          "diversity_penalty": 0.0,
+          "trial_penalty": 0.0
+        },
+        "explanation_keys": [
+          "calibrated_components", "candidate_sources", "classification", "fatigue",
+          "fatigue_penalty", "feedback", "feedback_score", "identity_confidence",
+          "identity_warnings", "knownness_penalty", "lastfm_similarity_score", "matching_tags",
+          "obviousness_penalty", "penalties", "quality_gate", "raw_components",
+          "rediscovery_score", "seed_artists", "serendipity", "summary", "tag_fit_score",
+          "tags", "top_seed_artists", "top_seed_edge_scores", "trial_penalty"
+        ]
+      },
+      {
+        "artist_id": 6,
+        "score_band": "weak",
+        "components": {
+          "final_score": 0.01525142,
+          "raw_score": 0.43831033,
+          "lastfm_similarity_score": 0.72,
+          "tag_similarity_score": 0.74524131,
+          "cluster_fit_score": 0.0,
+          "rediscovery_score": 0.0,
+          "metadata_graph_score": 0.0,
+          "feedback_score": 0.0,
+          "knownness": 0.0,
+          "obviousness": 0.5625,
+          "diversity_penalty": 0.20801257,
+          "trial_penalty": 0.0
+        },
+        "explanation_keys": [
+          "calibrated_components", "candidate_sources", "classification", "fatigue",
+          "fatigue_penalty", "feedback", "feedback_score", "identity_confidence",
+          "identity_warnings", "knownness_penalty", "lastfm_similarity_score", "matching_tags",
+          "obviousness_penalty", "penalties", "quality_gate", "raw_components",
+          "rediscovery_score", "seed_artists", "serendipity", "summary", "tag_fit_score",
+          "tags", "top_seed_artists", "top_seed_edge_scores", "trial_penalty"
+        ]
+      }
+    ],
+    "candidates": [
+      {"artist_id": 5, "state": "eligible", "reasons": ["eligible"]},
+      {"artist_id": 6, "state": "eligible", "reasons": ["eligible"]},
+      {"artist_id": 7, "state": "excluded", "reasons": ["obvious_candidate"]}
+    ]
+  },
+  "walk": {
+    "recommendations": [
+      {
+        "artist_id": 5,
+        "score_band": "plausible",
+        "components": {
+          "final_score": 0.05437664,
+          "raw_score": 0.11000219,
+          "lastfm_similarity_score": -0.39281482,
+          "tag_similarity_score": 0.98994949,
+          "cluster_fit_score": 0.0,
+          "rediscovery_score": 0.0,
+          "metadata_graph_score": 0.0,
+          "feedback_score": 0.0,
+          "knownness": 0.0,
+          "obviousness": 0.15,
+          "diversity_penalty": 0.0,
+          "trial_penalty": 0.0
+        },
+        "explanation_keys": [
+          "calibrated_components", "candidate_sources", "classification", "fatigue",
+          "fatigue_penalty", "feedback", "feedback_score", "identity_confidence",
+          "identity_warnings", "knownness_penalty", "lastfm_similarity_score", "matching_tags",
+          "obviousness_penalty", "penalties", "quality_gate", "raw_components",
+          "rediscovery_score", "seed_artists", "serendipity", "summary", "tag_fit_score",
+          "tags", "top_seed_artists", "top_seed_edge_scores", "trial_penalty", "walk"
+        ]
+      },
+      {
+        "artist_id": 6,
+        "score_band": "candidate_only",
+        "components": {
+          "final_score": -0.20801257,
+          "raw_score": -0.01379796,
+          "lastfm_similarity_score": -0.57173796,
+          "tag_similarity_score": 0.74524131,
+          "cluster_fit_score": 0.0,
+          "rediscovery_score": 0.0,
+          "metadata_graph_score": 0.0,
+          "feedback_score": 0.0,
+          "knownness": 0.0,
+          "obviousness": 0.5625,
+          "diversity_penalty": 0.20801257,
+          "trial_penalty": 0.0
+        },
+        "explanation_keys": [
+          "calibrated_components", "candidate_sources", "classification", "fatigue",
+          "fatigue_penalty", "feedback", "feedback_score", "identity_confidence",
+          "identity_warnings", "knownness_penalty", "lastfm_similarity_score", "matching_tags",
+          "obviousness_penalty", "penalties", "quality_gate", "raw_components",
+          "rediscovery_score", "seed_artists", "serendipity", "summary", "tag_fit_score",
+          "tags", "top_seed_artists", "top_seed_edge_scores", "trial_penalty", "walk"
+        ]
+      }
+    ],
+    "candidates": [
+      {"artist_id": 5, "state": "eligible", "reasons": ["eligible"]},
+      {"artist_id": 6, "state": "eligible", "reasons": ["eligible"]},
+      {"artist_id": 7, "state": "excluded", "reasons": ["obvious_candidate"]}
+    ]
+  }
+}

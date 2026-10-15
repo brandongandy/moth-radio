@@ -180,6 +180,20 @@ scrobble-recs evaluate \
 
 `--split-date` is one shared boundary: training ends there and the outcome horizon begins there. Without `--test-until`, Moth Radio evaluates the next 90 days. Evaluation uses only the state available before the training cutoff.
 
+Replay several historical cutoffs with a shared outcome horizon:
+
+```bash
+scrobble-recs evaluate-rolling \
+  --config ./config.json \
+  --cutoff 2023-01-01 \
+  --cutoff 2023-04-01 \
+  --horizon-days 90
+```
+
+`--cutoff` is required and repeatable. Cutoffs accept dates or ISO timestamps, normalize to UTC, and are sorted and deduplicated. Each window trains strictly before its cutoff and evaluates first listens in the following `--horizon-days` days (90 by default; must be positive). The command prints each window followed by unweighted mean recall@50, recall@100, ndcg@50, and identity resolution coverage. Each replay persists a local recommendation run and uses that window's historical listening and feedback cutoff.
+
+The Python evaluation results also include candidate and future-hit counts for `lastfm` (seed similarity evidence) and `lastfm_tag` (tag evidence). A candidate with both kinds of evidence counts in both groups, including candidates excluded from the final recommendations. Legacy `candidate_sources` stores seed IDs, so these diagnostics use the persisted seed/tag evidence counts. Identity rates cover all candidate artists: `resolved_musicbrainz` counts as resolved; `ambiguous_musicbrainz` and `provisional_mbid_conflict` count as ambiguous. Provisional MBIDs alone do not establish resolution. Empty candidate populations report zero rates.
+
 ## Development
 
 Moth Radio is Python, DuckDB, Typer, Textual, Pydantic, and pytest. Keep work local-first, deterministic, and inspectable. Tests must not call real APIs or depend on a network connection. 

@@ -4,11 +4,14 @@ import json
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from scrobble_recs.apis.lastfm import LastFmArtistTag, LastFmSimilarArtist, LastFmTagTopArtist
 from scrobble_recs.config import load_config
 from scrobble_recs.db import initialize_database
 from scrobble_recs.enrichment.lastfm import run_lastfm_enrichment
 from scrobble_recs.importers.lastfm_csv import import_lastfm_csv
+from scrobble_recs.models import evaluate as evaluate_model
 from scrobble_recs.models.evaluate import EvaluationResult, evaluate_recommendations
 from scrobble_recs.models.feedback import record_feedback_event
 
@@ -480,5 +483,276 @@ def test_evaluation_normalizes_offset_aware_bounds_to_naive_utc(tmp_path: Path) 
         assert result.train_until == "2024-01-03T00:00:00"
         assert result.test_from == "2024-01-03T00:00:00"
         assert result.test_until == "2024-04-03T00:00:00"
+    finally:
+        conn.close()
+
+
+def test_rolling_evaluation_preserves_window_order_and_aggregates_metrics(tmp_path: Path) -> None:
+    conn, config = _setup_db(tmp_path)
+    config.recommendation.profile_window_months = 24
+    try:
+        conn.execute("UPDATE scrobble SET played_at = played_at - INTERVAL 2 YEAR")
+        conn.execute(
+            """
+            INSERT INTO artist (artist_id, canonical_name, artist_key)
+            VALUES (9500, 'Unreachable', 'unreachable')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO scrobble (scrobble_id, played_at, artist_key, track_key, is_duplicate)
+            VALUES
+                (9501, '2023-01-15', 'siouxsie and the banshees', 'discovery-one', false),
+                (9502, '2023-01-15', 'unreachable', 'miss', false),
+                (9503, '2023-04-15', 'bauhaus', 'discovery-two', false)
+            """
+        )
+        windows = [
+            evaluate_model.EvaluationWindow(
+                datetime(2023, 1, 1), datetime(2023, 1, 1), datetime(2023, 4, 1)
+            ),
+            evaluate_model.EvaluationWindow(
+                datetime(2023, 4, 1), datetime(2023, 4, 1), datetime(2023, 7, 1)
+            ),
+        ]
+        report = evaluate_model.evaluate_rolling_recommendations(conn, config, windows=windows)
+
+        assert isinstance(report.windows, tuple)
+        assert [item.train_until for item in report.windows] == [
+            "2023-01-01T00:00:00",
+            "2023-04-01T00:00:00",
+        ]
+        assert report.window_count == 2
+        assert [item.recall_at_50 for item in report.windows] == [0.5, 1.0]
+        assert report.mean_recall_at_50 == pytest.approx(0.75)
+        assert report.mean_recall_at_100 == pytest.approx(0.75)
+        assert report.mean_ndcg_at_50 == pytest.approx((0.6131471927654584 + 1.0) / 2)
+        assert report.mean_identity_resolved_rate == 0.0
+
+        reverse = evaluate_model.evaluate_rolling_recommendations(
+            conn, config, windows=list(reversed(windows))
+        )
+        assert [item.train_until for item in reverse.windows] == [
+            "2023-04-01T00:00:00",
+            "2023-01-01T00:00:00",
+        ]
+    finally:
+        conn.close()
+
+
+def test_rolling_evaluation_requires_at_least_one_window(tmp_path: Path) -> None:
+    conn, config = _setup_db(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="^at least one evaluation window is required$"):
+            evaluate_model.evaluate_rolling_recommendations(conn, config, windows=[])
+    finally:
+        conn.close()
+
+
+def test_rolling_evaluation_averages_identity_coverage_across_windows(tmp_path: Path) -> None:
+    conn, config = _setup_db(tmp_path)
+    try:
+        conn.execute(
+            "UPDATE artist SET resolution_status = 'resolved_musicbrainz' WHERE artist_id = 4"
+        )
+        report = evaluate_model.evaluate_rolling_recommendations(
+            conn,
+            config,
+            windows=[
+                evaluate_model.EvaluationWindow(cutoff, cutoff, cutoff + timedelta(days=90))
+                for cutoff in [datetime(2020, 1, 1), datetime(2024, 1, 3)]
+            ],
+        )
+        assert [item.identity_resolved_rate for item in report.windows] == [0.25, 0.0]
+        assert report.mean_identity_resolved_rate == pytest.approx(0.125)
+    finally:
+        conn.close()
+
+
+def test_evaluation_reports_source_and_identity_coverage(tmp_path: Path) -> None:
+    conn, config = _setup_db(tmp_path)
+    try:
+        conn.execute("DELETE FROM tag_top_artist")
+        conn.execute("UPDATE artist SET resolution_status = 'resolved_musicbrainz'")
+        conn.execute(
+            """
+            INSERT INTO artist (artist_id, canonical_name, artist_key, resolution_status)
+            VALUES (9504, 'Tag Only', 'tag-only', 'ambiguous_musicbrainz')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO tag_top_artist (tag, artist_id, source, tag_rank, tag_count)
+            VALUES ('post-punk', 9504, 'lastfm', 5, 1.0)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO scrobble (scrobble_id, played_at, artist_key, track_key, is_duplicate)
+            VALUES (9505, '2024-01-10', 'siouxsie and the banshees', 'future-hit', false)
+            """
+        )
+        result = evaluate_recommendations(
+            conn,
+            config,
+            train_until=datetime(2024, 1, 3),
+            test_from=datetime(2024, 1, 3),
+            test_until=datetime(2024, 4, 3),
+        )
+
+        assert result.candidate_count_by_source == {"lastfm": 3, "lastfm_tag": 1}
+        assert result.future_hit_count_by_source == {"lastfm": 1, "lastfm_tag": 0}
+        assert result.identity_resolved_rate == pytest.approx(0.75)
+        assert result.identity_ambiguous_rate == pytest.approx(0.25)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    ("status", "resolved", "ambiguous"),
+    [
+        ("resolved_musicbrainz", 1.0, 0.0),
+        ("ambiguous_musicbrainz", 0.0, 1.0),
+        ("provisional_mbid_conflict", 0.0, 1.0),
+        ("provisional_mbid", 0.0, 0.0),
+        ("lastfm_enriched", 0.0, 0.0),
+        (None, 0.0, 0.0),
+    ],
+)
+def test_evaluation_identity_coverage_uses_resolution_status(
+    tmp_path: Path, status: str | None, resolved: float, ambiguous: float
+) -> None:
+    conn, config = _setup_db(tmp_path)
+    try:
+        conn.execute("UPDATE artist SET resolution_status = ?, identity_confidence = 1.0", [status])
+        result = evaluate_recommendations(
+            conn,
+            config,
+            train_until=datetime(2024, 1, 3),
+            test_from=datetime(2024, 1, 3),
+            test_until=datetime(2024, 4, 3),
+        )
+        assert result.identity_resolved_rate == resolved
+        assert result.identity_ambiguous_rate == ambiguous
+        assert result.candidate_count_by_source == {"lastfm": 3, "lastfm_tag": 3}
+    finally:
+        conn.close()
+
+
+def test_evaluation_diagnostics_handle_empty_candidates(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path))
+    conn = initialize_database(config)
+    try:
+        result = evaluate_recommendations(
+            conn,
+            config,
+            train_until=datetime(2020, 1, 1),
+            test_from=datetime(2020, 1, 1),
+            test_until=datetime(2020, 4, 1),
+        )
+        assert result.candidate_count_by_source == {"lastfm": 0, "lastfm_tag": 0}
+        assert result.future_hit_count_by_source == {"lastfm": 0, "lastfm_tag": 0}
+        assert result.identity_resolved_rate == 0.0
+        assert result.identity_ambiguous_rate == 0.0
+    finally:
+        conn.close()
+
+
+def test_evaluation_source_coverage_does_not_parse_legacy_candidate_sources(
+    tmp_path: Path, monkeypatch
+) -> None:
+    conn, config = _setup_db(tmp_path)
+    original_generate = evaluate_model.generate_recommendations
+
+    def generate_with_corrupt_legacy_sources(conn, config, **kwargs):
+        stats = original_generate(conn, config, **kwargs)
+        conn.execute("UPDATE recommendation_candidate SET candidate_sources = 'not-json'")
+        return stats
+
+    try:
+        # Simulate legacy corruption that the current JSON column normally prevents.
+        conn.execute("ALTER TABLE recommendation_candidate ALTER candidate_sources TYPE VARCHAR")
+        conn.execute(
+            """
+            INSERT INTO scrobble (scrobble_id, played_at, artist_key, track_key, is_duplicate)
+            VALUES (9505, '2024-01-10', 'joy division', 'excluded-future-hit', false)
+            """
+        )
+        monkeypatch.setattr(
+            evaluate_model, "generate_recommendations", generate_with_corrupt_legacy_sources
+        )
+        result = evaluate_recommendations(
+            conn,
+            config,
+            train_until=datetime(2024, 1, 3),
+            test_from=datetime(2024, 1, 3),
+            test_until=datetime(2024, 4, 3),
+        )
+        assert result.candidate_count_by_source == {"lastfm": 3, "lastfm_tag": 3}
+        assert result.future_hit_count_by_source == {"lastfm": 1, "lastfm_tag": 1}
+    finally:
+        conn.close()
+
+
+def test_rolling_evaluation_uses_each_historical_cutoff(tmp_path: Path) -> None:
+    conn, config = _setup_db(tmp_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO artist (artist_id, canonical_name, artist_key)
+            VALUES (9600, 'Later Seed', 'later-seed')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO scrobble (scrobble_id, played_at, artist_key, track_key, is_duplicate)
+            VALUES (9601, '2024-01-04', 'later-seed', 'later-one', false),
+                   (9602, '2024-01-05', 'later-seed', 'later-two', false)
+            """
+        )
+        feedback_run = "00000000-0000-0000-0000-000000009600"
+        _insert_historical_recommendation_run(
+            conn, run_id=feedback_run, created_at=datetime(2024, 1, 4)
+        )
+        record_feedback_event(
+            conn,
+            run_id=feedback_run,
+            artist_id=5,
+            action="hide_artist",
+            created_at=datetime(2024, 1, 4),
+            feedback_id="00000000-0000-0000-0000-000000009601",
+        )
+        report = evaluate_model.evaluate_rolling_recommendations(
+            conn,
+            config,
+            windows=[
+                evaluate_model.EvaluationWindow(cutoff, cutoff, cutoff + timedelta(days=90))
+                for cutoff in [datetime(2024, 1, 3), datetime(2024, 1, 6)]
+            ],
+        )
+        rows = conn.execute(
+            """
+            SELECT rr.seed_summary, c.eligibility_reasons
+            FROM recommendation_run rr JOIN recommendation_candidate c USING (run_id)
+            WHERE c.artist_id = 5
+            """
+        ).fetchall()
+        by_cutoff = {
+            json.loads(summary)["history_window"]["end"]: (
+                {seed["artist"] for seed in json.loads(summary)["top_seeds"]},
+                json.loads(reasons),
+            )
+            for summary, reasons in rows
+        }
+        first_seeds, first_reasons = by_cutoff["2024-01-03T00:00:00"]
+        later_seeds, later_reasons = by_cutoff["2024-01-06T00:00:00"]
+        assert "Later Seed" not in first_seeds
+        assert "Later Seed" in later_seeds
+        assert "hidden_artist" not in first_reasons
+        assert "hidden_artist" in later_reasons
+        assert (
+            report.windows[0].recommendations_generated
+            > report.windows[1].recommendations_generated
+        )
     finally:
         conn.close()

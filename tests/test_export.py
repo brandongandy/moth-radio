@@ -113,6 +113,48 @@ def test_export_recommendations_writes_jsonl(tmp_path: Path) -> None:
     conn.close()
 
 
+@pytest.mark.parametrize("historical", [False, True])
+def test_export_includes_optional_persisted_query_provenance(
+    tmp_path: Path, historical: bool
+) -> None:
+    conn, run_id = _prepared_run(tmp_path)
+    try:
+        if historical:
+            conn.execute(
+                """UPDATE recommendation_run SET query_context = NULL,
+                evidence_snapshot_id = NULL, feature_schema_version = NULL, fusion_version = NULL,
+                ranker_version = NULL, slate_policy_version = NULL WHERE run_id = ?""",
+                [run_id],
+            )
+        output = tmp_path / "provenance.jsonl"
+        export_recommendations(conn, output, format_name="jsonl", run_id=run_id)
+        row = json.loads(output.read_text(encoding="utf-8"))
+        assert row["query_kind"] == "general"
+        assert row["target_artist_id"] is None
+        assert row["ranker_version"] == (None if historical else "legacy-v1")
+        if historical:
+            assert row["query_context"] is None
+            assert row["evidence_snapshot_id"] is None
+        else:
+            persisted = conn.execute(
+                "SELECT query_context FROM recommendation_run WHERE run_id = ?", [run_id]
+            ).fetchone()[0]
+            assert row["query_context"] == json.loads(persisted)
+            assert row["evidence_snapshot_id"] == row["query_context"]["evidence_snapshot_id"]
+            assert row["feature_schema_version"] == "legacy-features-v1"
+            assert row["fusion_version"] == "legacy-direct-v1"
+            assert row["slate_policy_version"] == "legacy-mmr-v1"
+        csv_output = tmp_path / "provenance.csv"
+        export_recommendations(conn, csv_output, format_name="csv", run_id=run_id)
+        with csv_output.open(encoding="utf-8", newline="") as file:
+            csv_row = next(csv.DictReader(file))
+        assert "query_context" not in csv_row
+        assert csv_row["query_kind"] == "general"
+        assert csv_row["ranker_version"] == ("" if historical else "legacy-v1")
+    finally:
+        conn.close()
+
+
 def test_export_recommendations_normalizes_user_score_per_run(tmp_path: Path) -> None:
     config = load_config(write_config(tmp_path))
     conn = initialize_database(config)

@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from scrobble_recs.apis.lastfm import LastFmArtistTag, LastFmSimilarArtist, LastFmTagTopArtist
 from scrobble_recs.config import RecommendationConfig, load_config
-from scrobble_recs.db import initialize_database
+from scrobble_recs.db import apply_migrations, connect_database, initialize_database
 from scrobble_recs.enrichment.lastfm import run_lastfm_enrichment
 from scrobble_recs.importers.lastfm_csv import import_lastfm_csv
 from scrobble_recs.models import recommend as recommend_model
@@ -21,6 +21,7 @@ from scrobble_recs.models.recommend import (
     compute_identity_confidence,
     generate_recommendations,
 )
+from scrobble_recs.models.recommendation_query import RecommendationRequest
 
 _FIXTURE_HISTORY_WINDOW = ListeningWindow(datetime(2023, 1, 1), datetime(2025, 1, 1))
 
@@ -136,6 +137,14 @@ def test_recommendation_migration_creates_run_and_result_tables(tmp_path: Path) 
             "seed_summary": "JSON",
             "scoring_weights": "JSON",
             "notes": "VARCHAR",
+            "query_kind": "VARCHAR",
+            "target_artist_id": "UBIGINT",
+            "query_context": "JSON",
+            "evidence_snapshot_id": "VARCHAR",
+            "feature_schema_version": "VARCHAR",
+            "fusion_version": "VARCHAR",
+            "ranker_version": "VARCHAR",
+            "slate_policy_version": "VARCHAR",
         }
         assert _column_types(conn, "recommendation") == {
             "run_id": "UUID",
@@ -347,6 +356,7 @@ def _control_recommendation_fingerprint(conn, run_id: str) -> dict[str, object]:
 
 def test_control_recommendation_fingerprint_matches_fixture(tmp_path: Path) -> None:
     fingerprints = {}
+    explanations = {}
     for engine in ("legacy", "walk"):
         base = tmp_path / engine
         base.mkdir()
@@ -367,11 +377,153 @@ def test_control_recommendation_fingerprint_matches_fixture(tmp_path: Path) -> N
                 history_window=_FIXTURE_HISTORY_WINDOW,
             )
             fingerprints[engine] = _control_recommendation_fingerprint(conn, stats.run_id)
+            explanations[engine] = [
+                {"artist_id": artist_id, "explanation": json.loads(explanation)}
+                for artist_id, explanation in conn.execute(
+                    """SELECT artist_id, explanation FROM recommendation
+                       WHERE run_id = ? ORDER BY rank, artist_id""",
+                    [stats.run_id],
+                ).fetchall()
+            ]
+            row = conn.execute(
+                """SELECT query_kind, query_context, evidence_snapshot_id,
+                          feature_schema_version, fusion_version, ranker_version,
+                          slate_policy_version, scoring_engine, config_hash
+                   FROM recommendation_run WHERE run_id = ?""",
+                [stats.run_id],
+            ).fetchone()
+            context = json.loads(row[1])
+            assert row[0] == "general"
+            assert context["versions"] == {
+                "query_schema": "query-v1",
+                "feature_schema": "legacy-features-v1",
+                "fusion": "legacy-direct-v1",
+                "ranker": f"{engine}-v1",
+                "slate_policy": "legacy-mmr-v1",
+            }
+            assert row[2] == context["evidence_snapshot_id"]
+            assert row[3:8] == (
+                "legacy-features-v1",
+                "legacy-direct-v1",
+                f"{engine}-v1",
+                "legacy-mmr-v1",
+                engine,
+            )
+            assert context["config_hash"] == row[8]
+            assert "target_artist_id" not in context
+            assert context["history_cutoff"] is None
+            assert context["feedback_cutoff"] is None
+            repeated = generate_recommendations(
+                conn,
+                config,
+                limit=10,
+                mode="balanced",
+                as_of=datetime(2026, 6, 4),
+                history_window=_FIXTURE_HISTORY_WINDOW,
+                request=RecommendationRequest(),
+            )
+            assert (
+                conn.execute(
+                    "SELECT query_context FROM recommendation_run WHERE run_id = ?",
+                    [repeated.run_id],
+                ).fetchone()[0]
+                == row[1]
+            )
         finally:
             conn.close()
 
     fixture = Path("tests/fixtures/control_recommendation_fingerprint.json")
     assert fingerprints == json.loads(fixture.read_text(encoding="utf-8"))
+    explanation_fixture = Path("tests/fixtures/control_recommendation_explanations.json")
+    assert explanations == json.loads(explanation_fixture.read_text(encoding="utf-8"))
+
+
+def test_query_migration_backfills_historical_row_and_is_idempotent(tmp_path: Path) -> None:
+    conn = connect_database(tmp_path / "historical.duckdb")
+    try:
+        conn.execute("""CREATE TABLE recommendation_run (
+            run_id UUID, created_at TIMESTAMP DEFAULT current_timestamp, config_hash VARCHAR,
+            mode VARCHAR, seed_summary JSON, scoring_weights JSON, notes VARCHAR)""")
+        conn.execute("""INSERT INTO recommendation_run (run_id, mode)
+            VALUES ('00000000-0000-0000-0000-000000000001', 'balanced')""")
+        apply_migrations(conn)
+        apply_migrations(conn)
+        assert conn.execute("""SELECT query_kind, target_artist_id, query_context,
+            evidence_snapshot_id, feature_schema_version, fusion_version, ranker_version,
+            slate_policy_version FROM recommendation_run""").fetchone() == (
+            "general",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    ("mode", "intent"),
+    [
+        ("balanced", "mixed"),
+        ("safe", "discover"),
+        ("explore", "discover"),
+        ("rediscovery", "rediscover"),
+        ("old", "rediscover"),
+        ("recent", "discover"),
+        ("anti-obvious", "discover"),
+        ("tag:gothic rock", "discover"),
+    ],
+)
+def test_mode_persists_product_regions_and_intent_with_same_engine(
+    tmp_path: Path, mode: str, intent: str
+) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    try:
+        import_lastfm_csv(conn, Path("tests/fixtures/tiny_lastfm_export.csv"))
+        cutoff = datetime(2026, 1, 1)
+        stats = generate_recommendations(
+            conn,
+            config,
+            limit=10,
+            mode=mode,
+            as_of=datetime(2026, 6, 4),
+            history_window=ListeningWindow(datetime(2023, 1, 1), cutoff),
+            local_history_end=cutoff,
+            historical_cutoff=cutoff,
+        )
+        row = conn.execute(
+            """SELECT query_context, scoring_engine, ranker_version
+            FROM recommendation_run WHERE run_id = ?""",
+            [stats.run_id],
+        ).fetchone()
+        context = json.loads(row[0])
+        assert context["novelty_intent"] == intent
+        assert context["history_cutoff"] == "2026-01-01T00:00:00"
+        assert context["feedback_cutoff"] == "2026-01-01T00:00:00"
+        assert row[1:] == ("legacy", "legacy-v1")
+        regions = {region for seed in context["taste_region_seeds"] for region in seed["regions"]}
+        assert regions <= {"core", "current", "dormant", "curiosity", "feedback"}
+        if mode == "balanced":
+            assert regions == {"core", "current", "dormant", "curiosity"}
+    finally:
+        conn.close()
+
+
+def test_artist_request_fails_before_creating_a_run(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    try:
+        with pytest.raises(ValueError, match="artist.*not yet implemented"):
+            generate_recommendations(
+                conn, config, limit=10, request=RecommendationRequest("artist", 7)
+            )
+        assert conn.execute("SELECT count(*) FROM recommendation_run").fetchone() == (0,)
+    finally:
+        conn.close()
 
 
 def test_legacy_run_is_byte_identical_for_same_config_and_db(tmp_path: Path) -> None:

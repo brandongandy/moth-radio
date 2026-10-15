@@ -105,6 +105,39 @@ def test_store_loads_latest_run_recommendations_with_compact_columns(tmp_path: P
     conn.close()
 
 
+def test_store_exposes_persisted_query_provenance_and_null_historical_context(
+    tmp_path: Path,
+) -> None:
+    conn = initialize_database(load_config(write_config(tmp_path)))
+    try:
+        old_id = "00000000-0000-0000-0000-000000000001"
+        new_id = "00000000-0000-0000-0000-000000000002"
+        _insert_run(conn, run_id=old_id, mode="balanced", created_at="2026-06-04 09:00:00")
+        _insert_run(conn, run_id=new_id, mode="balanced", created_at="2026-06-04 10:00:00")
+        conn.execute(
+            """UPDATE recommendation_run SET query_context = '{"query_kind":"general"}',
+            evidence_snapshot_id = 'snapshot', feature_schema_version = 'legacy-features-v1',
+            fusion_version = 'legacy-direct-v1', ranker_version = 'walk-v1',
+            slate_policy_version = 'legacy-mmr-v1' WHERE run_id = ?""",
+            [new_id],
+        )
+        new, old = TuiRecommendationStore(conn).list_runs()
+        assert new.query_kind == old.query_kind == "general"
+        assert new.target_artist_id is old.target_artist_id is None
+        assert new.query_context == {"query_kind": "general"}
+        assert new.evidence_snapshot_id == "snapshot"
+        assert new.feature_schema_version == "legacy-features-v1"
+        assert new.fusion_version == "legacy-direct-v1"
+        assert new.ranker_version == "walk-v1"
+        assert new.slate_policy_version == "legacy-mmr-v1"
+        assert old.query_context is None
+        assert old.evidence_snapshot_id is None
+        assert old.ranker_version is None
+        assert old.recommendations == new.recommendations == 0
+    finally:
+        conn.close()
+
+
 def test_store_filters_by_search_tag_knownness_and_obviousness(tmp_path: Path) -> None:
     conn = initialize_database(load_config(write_config(tmp_path)))
     run_id = "00000000-0000-0000-0000-000000000002"

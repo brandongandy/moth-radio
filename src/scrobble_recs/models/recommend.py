@@ -31,6 +31,15 @@ from scrobble_recs.models.recommendation_quality import (
     calibrate_positive_components,
     evaluate_discovery_evidence,
 )
+from scrobble_recs.models.recommendation_query import (
+    NoveltyIntent,
+    QueryContext,
+    RecommendationRequest,
+    RecommendationVersions,
+    TasteRegionSeed,
+    build_evidence_snapshot_id,
+    load_evidence_freshness,
+)
 from scrobble_recs.models.seed_weighting import SeedIdfWeights, compute_seed_idf_weights
 from scrobble_recs.models.serendipity import SerendipityEvidence, score_serendipity
 from scrobble_recs.models.walk import WalkNode, WalkResult, build_walk_result, top_paths
@@ -186,10 +195,14 @@ def generate_recommendations(
     history_window: ListeningWindow | None = None,
     local_history_end: datetime | None = None,
     historical_cutoff: datetime | None = None,
+    request: RecommendationRequest | None = None,
     progress_callback: RecommendationProgressCallback | None = None,
 ) -> RecommendationStats:
     if limit < 1:
         raise ValueError("limit must be at least 1")
+    resolved_request = request or RecommendationRequest()
+    if resolved_request.query_kind == "artist":
+        raise ValueError("artist recommendation queries are not yet implemented")
 
     mode_settings = resolve_recommendation_mode(mode, config)
     resolved_mode = mode_settings.name
@@ -246,6 +259,39 @@ def generate_recommendations(
         window=resolved_history_window,
     )
     seeds = _add_feedback_seed_artists(conn, seeds, feedback_profile)
+    product_regions = {
+        "lifetime": "core",
+        "recent": "current",
+        "old_obsession": "dormant",
+        "underexplored": "curiosity",
+    }
+    novelty_intent: NoveltyIntent = (
+        "mixed"
+        if resolved_mode == "balanced"
+        else "rediscover"
+        if resolved_mode in ("rediscovery", "old")
+        else "discover"
+    )
+    query_context = QueryContext(
+        query_kind=resolved_request.query_kind,
+        history_window=resolved_history_window,
+        history_cutoff=local_history_end,
+        feedback_cutoff=historical_cutoff,
+        mode=resolved_mode,
+        novelty_intent=novelty_intent,
+        taste_region_seeds=tuple(
+            TasteRegionSeed(
+                seed.artist_id,
+                seed.seed_weight,
+                tuple(product_regions.get(region, region) for region in seed.regions),
+            )
+            for seed in seeds
+        ),
+        evidence_snapshot_id=build_evidence_snapshot_id(conn, historical_cutoff=historical_cutoff),
+        evidence_freshness=load_evidence_freshness(conn, historical_cutoff=historical_cutoff),
+        versions=RecommendationVersions(ranker=f"{config.recommendation.scoring.engine}-v1"),
+        config_hash=_config_hash(config),
+    )
     seed_ids = {seed.artist_id for seed in seeds}
     idf_weights = compute_seed_idf_weights(
         {seed.artist_id: seed.seed_weight for seed in seeds},
@@ -431,6 +477,7 @@ def generate_recommendations(
         history_window_source=history_window_source,
         scoring_data=scoring_data,
         candidate_diagnostics=candidate_diagnostics,
+        query_context=query_context,
         progress_callback=progress_callback,
     )
     _report_progress(
@@ -2007,6 +2054,7 @@ def _persist_run(
     history_window_source: str,
     scoring_data: _ScoringData,
     candidate_diagnostics: list[_CandidateDiagnostic],
+    query_context: QueryContext,
     progress_callback: RecommendationProgressCallback | None,
 ) -> None:
     conn.execute("BEGIN TRANSACTION")
@@ -2020,9 +2068,11 @@ def _persist_run(
                 scoring_engine,
                 seed_summary,
                 scoring_weights,
-                notes
+                notes,
+                query_kind, target_artist_id, query_context, evidence_snapshot_id,
+                feature_schema_version, fusion_version, ranker_version, slate_policy_version
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 run_id,
@@ -2082,6 +2132,14 @@ def _persist_run(
                     sort_keys=True,
                 ),
                 "offline lastfm/tag first recommender",
+                query_context.query_kind,
+                query_context.target_artist_id,
+                json.dumps(query_context.to_json_dict(), sort_keys=True, allow_nan=False),
+                query_context.evidence_snapshot_id,
+                query_context.versions.feature_schema,
+                query_context.versions.fusion,
+                query_context.versions.ranker,
+                query_context.versions.slate_policy,
             ],
         )
         _persist_candidates(

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from duckdb import DuckDBPyConnection
@@ -10,6 +11,13 @@ from duckdb import DuckDBPyConnection
 from scrobble_recs.config import ScrobbleRecsConfig
 from scrobble_recs.models.profile_window import normalize_timestamp, resolve_listening_window
 from scrobble_recs.models.recommend import generate_recommendations
+
+
+@dataclass(frozen=True)
+class EvaluationWindow:
+    train_until: datetime
+    test_from: datetime
+    test_until: datetime
 
 
 @dataclass(frozen=True)
@@ -31,6 +39,50 @@ class EvaluationResult:
     eligible_candidate_coverage: float
     novelty_rate: float
     cooldown_or_repeat_rate: float
+    candidate_count_by_source: dict[str, int] = field(default_factory=dict)
+    future_hit_count_by_source: dict[str, int] = field(default_factory=dict)
+    identity_resolved_rate: float = 0.0
+    identity_ambiguous_rate: float = 0.0
+
+
+@dataclass(frozen=True)
+class RollingEvaluationReport:
+    windows: tuple[EvaluationResult, ...]
+    window_count: int
+    mean_recall_at_50: float
+    mean_recall_at_100: float
+    mean_ndcg_at_50: float
+    mean_identity_resolved_rate: float
+
+
+def evaluate_rolling_recommendations(
+    conn: DuckDBPyConnection,
+    config: ScrobbleRecsConfig,
+    *,
+    windows: Sequence[EvaluationWindow],
+) -> RollingEvaluationReport:
+    """Replay each historical window in input order using the single-window evaluator."""
+    if not windows:
+        raise ValueError("at least one evaluation window is required")
+    results = tuple(
+        evaluate_recommendations(
+            conn,
+            config,
+            train_until=window.train_until,
+            test_from=window.test_from,
+            test_until=window.test_until,
+        )
+        for window in windows
+    )
+    count = len(results)
+    return RollingEvaluationReport(
+        windows=results,
+        window_count=count,
+        mean_recall_at_50=sum(item.recall_at_50 for item in results) / count,
+        mean_recall_at_100=sum(item.recall_at_100 for item in results) / count,
+        mean_ndcg_at_50=sum(item.ndcg_at_50 for item in results) / count,
+        mean_identity_resolved_rate=sum(item.identity_resolved_rate for item in results) / count,
+    )
 
 
 def evaluate_recommendations(
@@ -106,6 +158,8 @@ def evaluate_recommendations(
     eligible_coverage = _eligible_candidate_coverage(conn, run_id, test_artists)
     novelty_rate = _novelty_rate(conn, rec_artist_ids, train_until)
     cooldown_or_repeat_rate = _cooldown_or_repeat_rate(conn, run_id)
+    candidate_counts, future_hit_counts = _source_coverage(conn, run_id, test_artists)
+    identity_resolved_rate, identity_ambiguous_rate = _identity_coverage(conn, run_id)
 
     return EvaluationResult(
         train_until=train_until.isoformat(),
@@ -125,7 +179,54 @@ def evaluate_recommendations(
         eligible_candidate_coverage=eligible_coverage,
         novelty_rate=novelty_rate,
         cooldown_or_repeat_rate=cooldown_or_repeat_rate,
+        candidate_count_by_source=candidate_counts,
+        future_hit_count_by_source=future_hit_counts,
+        identity_resolved_rate=identity_resolved_rate,
+        identity_ambiguous_rate=identity_ambiguous_rate,
     )
+
+
+def _source_coverage(
+    conn: DuckDBPyConnection, run_id: str, test_artists: set[int]
+) -> tuple[dict[str, int], dict[str, int]]:
+    # Legacy candidate_sources contains seed IDs, not provider labels. The counts
+    # explicitly record seed/tag evidence and do not require parsing that JSON.
+    rows = conn.execute(
+        """
+        SELECT artist_id, appeared_from_seed_count, appeared_from_tag_count
+        FROM recommendation_candidate WHERE run_id = ?
+        """,
+        [run_id],
+    ).fetchall()
+    candidate_counts = {"lastfm": 0, "lastfm_tag": 0}
+    future_hit_counts = {"lastfm": 0, "lastfm_tag": 0}
+    for artist_id, seed_count, tag_count in rows:
+        for source, evidence_count in (("lastfm", seed_count), ("lastfm_tag", tag_count)):
+            if evidence_count is not None and evidence_count > 0:
+                candidate_counts[source] += 1
+                if int(artist_id) in test_artists:
+                    future_hit_counts[source] += 1
+    return candidate_counts, future_hit_counts
+
+
+def _identity_coverage(conn: DuckDBPyConnection, run_id: str) -> tuple[float, float]:
+    row = conn.execute(
+        """
+        SELECT count(DISTINCT c.artist_id),
+               count(DISTINCT CASE WHEN a.resolution_status = 'resolved_musicbrainz'
+                     THEN c.artist_id END),
+               count(DISTINCT CASE WHEN a.resolution_status IN (
+                     'ambiguous_musicbrainz', 'provisional_mbid_conflict'
+               ) THEN c.artist_id END)
+        FROM recommendation_candidate c
+        LEFT JOIN artist a ON a.artist_id = c.artist_id
+        WHERE c.run_id = ?
+        """,
+        [run_id],
+    ).fetchone()
+    if row is None or row[0] == 0:
+        return 0.0, 0.0
+    return int(row[1]) / int(row[0]), int(row[2]) / int(row[0])
 
 
 def _first_listened_artist_ids(

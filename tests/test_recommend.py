@@ -296,6 +296,84 @@ def _legacy_run_fingerprint(conn, run_id: str) -> list[tuple[object, ...]]:
     ).fetchall()
 
 
+def _control_recommendation_fingerprint(conn, run_id: str) -> dict[str, object]:
+    component_names = (
+        "final_score",
+        "raw_score",
+        "lastfm_similarity_score",
+        "tag_similarity_score",
+        "cluster_fit_score",
+        "rediscovery_score",
+        "metadata_graph_score",
+        "feedback_score",
+        "knownness",
+        "obviousness",
+        "diversity_penalty",
+        "trial_penalty",
+    )
+    rows = conn.execute(
+        f"""
+        SELECT artist_id, score_band, {", ".join(component_names)}, explanation
+        FROM recommendation WHERE run_id = ? ORDER BY rank, artist_id
+        """,
+        [run_id],
+    ).fetchall()
+    candidates = conn.execute(
+        """
+        SELECT artist_id, eligibility_state, eligibility_reasons
+        FROM recommendation_candidate WHERE run_id = ? ORDER BY artist_id
+        """,
+        [run_id],
+    ).fetchall()
+    return {
+        "recommendations": [
+            {
+                "artist_id": row[0],
+                "score_band": row[1],
+                "components": {
+                    name: round(float(value), 8)
+                    for name, value in zip(component_names, row[2:-1], strict=True)
+                },
+                "explanation_keys": sorted(json.loads(row[-1])),
+            }
+            for row in rows
+        ],
+        "candidates": [
+            {"artist_id": artist_id, "state": state, "reasons": sorted(json.loads(reasons))}
+            for artist_id, state, reasons in candidates
+        ],
+    }
+
+
+def test_control_recommendation_fingerprint_matches_fixture(tmp_path: Path) -> None:
+    fingerprints = {}
+    for engine in ("legacy", "walk"):
+        base = tmp_path / engine
+        base.mkdir()
+        config = load_config(write_config(base))
+        config.recommendation.scoring.engine = engine
+        config.recommendation.walk.min_distinct_seeds = 1
+        config.recommendation.walk.min_lift = -100.0
+        conn = initialize_database(config)
+        try:
+            import_lastfm_csv(conn, Path("tests/fixtures/tiny_lastfm_export.csv"))
+            run_lastfm_enrichment(conn, config, client=RecommendationFakeLastFmClient())
+            stats = generate_recommendations(
+                conn,
+                config,
+                limit=10,
+                mode="balanced",
+                as_of=datetime(2026, 6, 4),
+                history_window=_FIXTURE_HISTORY_WINDOW,
+            )
+            fingerprints[engine] = _control_recommendation_fingerprint(conn, stats.run_id)
+        finally:
+            conn.close()
+
+    fixture = Path("tests/fixtures/control_recommendation_fingerprint.json")
+    assert fingerprints == json.loads(fixture.read_text(encoding="utf-8"))
+
+
 def test_legacy_run_is_byte_identical_for_same_config_and_db(tmp_path: Path) -> None:
     fingerprints = []
     for name in ("a", "b"):

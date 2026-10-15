@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, cast
 
@@ -35,7 +35,12 @@ from scrobble_recs.enrichment.queue import (
 from scrobble_recs.export import ExportFormat, export_recommendations
 from scrobble_recs.importers.lastfm_csv import ImportStats, get_import_stats, import_lastfm_csv
 from scrobble_recs.models.compare import ScorerComparison, compare_scorers
-from scrobble_recs.models.evaluate import EvaluationResult, evaluate_recommendations
+from scrobble_recs.models.evaluate import (
+    EvaluationResult,
+    EvaluationWindow,
+    evaluate_recommendations,
+    evaluate_rolling_recommendations,
+)
 from scrobble_recs.models.feedback import record_feedback_event, rerank_recommendation_run
 from scrobble_recs.models.profile_builder import build_profile
 from scrobble_recs.models.profile_window import (
@@ -962,6 +967,45 @@ def evaluate_command(
     console.print(f"eligible_candidate_coverage: {result.eligible_candidate_coverage:.3f}")
     console.print(f"novelty_rate: {result.novelty_rate:.3f}")
     console.print(f"cooldown_or_repeat_rate: {result.cooldown_or_repeat_rate:.3f}")
+
+
+@app.command("evaluate-rolling")
+def evaluate_rolling_command(
+    config: Annotated[Path, typer.Option("--config", "-c", help="Path to JSON config file.")],
+    cutoff: Annotated[
+        list[str],
+        typer.Option("--cutoff", help="Training cutoff (YYYY-MM-DD or ISO timestamp); repeatable."),
+    ],
+    horizon_days: Annotated[
+        int,
+        typer.Option("--horizon-days", min=1, help="Outcome horizon in days after each cutoff."),
+    ] = 90,
+) -> None:
+    """Replay historical recommendation windows and report their mean quality."""
+    cutoffs = sorted({_parse_timestamp(value) for value in cutoff})
+    windows = [
+        EvaluationWindow(value, value, value + timedelta(days=horizon_days)) for value in cutoffs
+    ]
+    resolved_config = load_config(config)
+    conn = initialize_database(resolved_config)
+    try:
+        report = evaluate_rolling_recommendations(conn, resolved_config, windows=windows)
+    finally:
+        conn.close()
+
+    console.print("Rolling evaluation")
+    console.print(f"windows: {report.window_count}")
+    console.print("cutoff | test_until | recall@50 | recall@100 | ndcg@50 | identity_resolved_rate")
+    for result in report.windows:
+        console.print(
+            f"{result.train_until} | {result.test_until} | "
+            f"{result.recall_at_50:.3f} | {result.recall_at_100:.3f} | "
+            f"{result.ndcg_at_50:.3f} | {result.identity_resolved_rate:.3f}"
+        )
+    console.print(f"mean recall@50: {report.mean_recall_at_50:.3f}")
+    console.print(f"mean recall@100: {report.mean_recall_at_100:.3f}")
+    console.print(f"mean ndcg@50: {report.mean_ndcg_at_50:.3f}")
+    console.print(f"mean identity_resolved_rate: {report.mean_identity_resolved_rate:.3f}")
 
 
 @app.command("compare")

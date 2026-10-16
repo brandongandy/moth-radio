@@ -10,7 +10,7 @@ The package and command-line tool are named `scrobble-recs`.
 
 Your listening history, recommendation runs, feedback, and API cache stay on your machine. Moth Radio can enrich its local graph from Last.fm and MusicBrainz when you ask it to, but all other aspects of the tool do not require a live service.
 
-**AI Disclosure:** This is a purpose-built tool for my own uses written entirely by AI. DeepSeek and Codex were used in the development of this tool.
+**AI Disclosure:** This is a purpose-built tool for my own uses, designed by me and written entirely by AI. DeepSeek and Codex were used in the development of this tool.
 
 ## Algorithms
 

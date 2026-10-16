@@ -8,6 +8,16 @@ from typing import Any, Literal
 
 from duckdb import DuckDBPyConnection
 
+_QUERY_PROVENANCE_FIELDS = (
+    "query_kind",
+    "target_artist_id",
+    "evidence_snapshot_id",
+    "feature_schema_version",
+    "fusion_version",
+    "ranker_version",
+    "slate_policy_version",
+)
+
 ExportFormat = Literal["csv", "jsonl"]
 
 
@@ -29,6 +39,9 @@ def export_recommendations(
         history_window=history_window,
         include_candidates=include_candidates,
     )
+    provenance = _load_query_provenance(conn, resolved_run_id)
+    for row in rows:
+        row.update(provenance)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if format_name == "csv":
         _write_csv(output_path, rows)
@@ -58,6 +71,20 @@ def _load_history_window(conn: DuckDBPyConnection, run_id: str) -> dict[str, Any
     ).fetchone()
     seed_summary = _as_mapping(row[0] if row else None)
     return _as_mapping(seed_summary.get("history_window"))
+
+
+def _load_query_provenance(conn: DuckDBPyConnection, run_id: str) -> dict[str, object]:
+    row = conn.execute(
+        f"SELECT {', '.join(_QUERY_PROVENANCE_FIELDS)}, query_context "
+        "FROM recommendation_run WHERE run_id = ?",
+        [run_id],
+    ).fetchone()
+    if row is None:
+        return {**dict.fromkeys(_QUERY_PROVENANCE_FIELDS), "query_context": None}
+    return {
+        **dict(zip(_QUERY_PROVENANCE_FIELDS, row[:-1], strict=True)),
+        "query_context": _as_mapping(row[-1]) if row[-1] is not None else None,
+    }
 
 
 def _load_rows(
@@ -239,6 +266,7 @@ def _write_csv(output_path: Path, rows: list[dict[str, object]]) -> None:
         "serendipity_bonus",
         "serendipity_cohesion",
         "serendipity_bridge",
+        *_QUERY_PROVENANCE_FIELDS,
     ]
     with output_path.open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)

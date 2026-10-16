@@ -23,6 +23,14 @@ class RunSummary:
     created_at: str
     mode: str
     recommendations: int
+    query_kind: str | None = "general"
+    target_artist_id: int | None = None
+    query_context: dict[str, Any] | None = None
+    evidence_snapshot_id: str | None = None
+    feature_schema_version: str | None = None
+    fusion_version: str | None = None
+    ranker_version: str | None = None
+    slate_policy_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -113,21 +121,34 @@ class TuiRecommendationStore:
                 CAST(rr.run_id AS VARCHAR),
                 CAST(rr.created_at AS VARCHAR),
                 rr.mode,
-                count(r.artist_id)
+                count(r.artist_id),
+                rr.query_kind, rr.target_artist_id, rr.query_context, rr.evidence_snapshot_id,
+                rr.feature_schema_version, rr.fusion_version, rr.ranker_version,
+                rr.slate_policy_version
             FROM recommendation_run rr
             LEFT JOIN recommendation r ON r.run_id = rr.run_id
-            GROUP BY rr.run_id, rr.created_at, rr.mode
+            GROUP BY rr.run_id, rr.created_at, rr.mode, rr.query_kind, rr.target_artist_id,
+                     rr.query_context, rr.evidence_snapshot_id, rr.feature_schema_version,
+                     rr.fusion_version, rr.ranker_version, rr.slate_policy_version
             ORDER BY rr.created_at DESC, rr.run_id DESC
             """
         ).fetchall()
         return [
             RunSummary(
-                run_id=str(run_id),
-                created_at=str(created_at),
-                mode=str(mode),
-                recommendations=int(count),
+                run_id=str(row[0]),
+                created_at=str(row[1]),
+                mode=str(row[2]),
+                recommendations=int(row[3]),
+                query_kind=row[4],
+                target_artist_id=row[5],
+                query_context=_parse_json(row[6]) if row[6] is not None else None,
+                evidence_snapshot_id=row[7],
+                feature_schema_version=row[8],
+                fusion_version=row[9],
+                ranker_version=row[10],
+                slate_policy_version=row[11],
             )
-            for run_id, created_at, mode, count in rows
+            for row in rows
         ]
 
     def latest_run_id(self) -> str:

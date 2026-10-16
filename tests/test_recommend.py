@@ -11,7 +11,7 @@ from scrobble_recs.config import RecommendationConfig, load_config
 from scrobble_recs.db import apply_migrations, connect_database, initialize_database
 from scrobble_recs.enrichment.lastfm import run_lastfm_enrichment
 from scrobble_recs.importers.lastfm_csv import import_lastfm_csv
-from scrobble_recs.models import recommend as recommend_model
+from scrobble_recs.models import recommendation_store as recommendation_store_model
 from scrobble_recs.models.feedback import record_feedback_event
 from scrobble_recs.models.profile_window import ListeningWindow
 from scrobble_recs.models.recommend import (
@@ -3216,7 +3216,7 @@ def test_generate_recommendations_rolls_back_candidates_when_persistence_fails(
     try:
         import_lastfm_csv(conn, Path("tests/fixtures/tiny_lastfm_export.csv"))
         run_lastfm_enrichment(conn, config, client=RecommendationFakeLastFmClient())
-        persist_candidates = recommend_model._persist_candidates
+        persist_candidates = recommendation_store_model._persist_candidates
 
         def fail_after_persist(*args: object, **kwargs: object) -> None:
             persist_candidates(*args, **kwargs)  # type: ignore[arg-type]
@@ -3225,7 +3225,7 @@ def test_generate_recommendations_rolls_back_candidates_when_persistence_fails(
             assert persisted[0] > 0
             raise RuntimeError("simulated persistence failure")
 
-        monkeypatch.setattr(recommend_model, "_persist_candidates", fail_after_persist)
+        monkeypatch.setattr(recommendation_store_model, "_persist_candidates", fail_after_persist)
 
         with pytest.raises(RuntimeError, match="simulated persistence failure"):
             generate_recommendations(
@@ -3242,6 +3242,7 @@ def test_generate_recommendations_rolls_back_candidates_when_persistence_fails(
         assert persisted_candidates == (0,)
         persisted_runs = conn.execute("SELECT count(*) FROM recommendation_run").fetchone()
         assert persisted_runs == (0,)
+        assert conn.execute("SELECT count(*) FROM recommendation").fetchone() == (0,)
     finally:
         conn.close()
 

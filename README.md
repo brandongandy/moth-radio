@@ -2,13 +2,15 @@
 
 # Moth Radio
 
-Moth Radio is a local-first artist discovery tool for people who want better recommendations from their own listening history. 
+## What this is
 
-It imports a Last.fm CSV export into a local DuckDB database, builds a taste profile, and generates recommendations you can browse, export, evaluate, and refine.
+Moth Radio is a single-listener artist recommendation workbench. It is for getting better recommendations from your own listening history without friends, follows, shared playlists, public profiles, or other social-platform features.
 
-The package and command-line tool are named `scrobble-recs`.
+It imports a Last.fm CSV export into DuckDB, builds long-term and recent taste regions, and optionally enriches the local catalog with cache-first Last.fm and MusicBrainz data. Recommendation runs consume persisted local evidence rather than live APIs. Each run records its immutable query context, evidence snapshot, admission decisions, feature values, ranking scores, and slate-policy effects so results can be inspected, exported, replayed, and compared.
 
-Your listening history, recommendation runs, feedback, and API cache stay on your machine. Moth Radio can enrich its local graph from Last.fm and MusicBrainz when you ask it to, but all other aspects of the tool do not require a live service.
+The current CLI produces general artist discovery and rediscovery lists. Its source-aware pipeline is designed to accept additional persisted evidence without comparing unrelated providers' raw scores. Acquisition may use the network when you explicitly run enrichment; recommendation generation, evaluation, export, and TUI browsing use local data.
+
+The Python package and command-line tool are named `scrobble-recs`. Your listening history, recommendation runs, feedback, evidence, and API cache stay on your machine.
 
 **AI Disclosure:** This is a purpose-built tool for my own uses written entirely by AI. DeepSeek and Codex were used in the development of this tool.
 
@@ -31,11 +33,22 @@ You need a CSV export of your Last.fm scrobble history. Use a tool like [this on
 ### 1. Install
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 python -m pip install -e ".[dev]"
-python -m scrobble_recs --help
+scrobble-recs --help
 ```
 
-If the installed `scrobble-recs` command is on your `PATH`, you can use it in place of `python -m scrobble_recs` throughout this guide.
+PowerShell activation:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+scrobble-recs --help
+```
+
+You can use `python -m scrobble_recs` instead if the installed `scrobble-recs` command is not on your `PATH`.
 
 ### 2. Create and configure a local project
 
@@ -43,9 +56,9 @@ If the installed `scrobble-recs` command is on your `PATH`, you can use it in pl
 scrobble-recs init --config ./config.json
 ```
 
-Set `input.lastfm_csv` in `config.json` to your Last.fm CSV export. The example configuration documents the available local paths and recommendation settings; use it as a reference when editing the generated file.
+`init` refuses to overwrite an existing file; add `--force` only when you intentionally want to replace it. Set `input.lastfm_csv` in `config.json` to your Last.fm CSV export. The generated file documents local paths, API settings, evidence thresholds, and recommendation settings.
 
-You only need `LASTFM_API_KEY` when you choose to enrich the local graph from Last.fm.
+You only need `LASTFM_API_KEY` for Last.fm enrichment. MusicBrainz does not require an API key, but you must set `apis.musicbrainz.enabled` to `true` before using its commands and should configure an identifying user agent.
 
 ### 3. Import your history
 
@@ -56,31 +69,43 @@ scrobble-recs doctor --config ./config.json
 
 Import creates local normalized artists, tracks, scrobbles, and diagnostics. `doctor` checks the configuration, database, import quality, cache, and API-key state without requiring network access.
 
-### 4. Enrich the local graph (optional, recommended)
+### 4. Enrich persisted evidence (optional, recommended)
 
-Enrichment is cache-first and resumable. It adds persisted similarity edges, artist tags, and tag top-artist data; recommendation generation itself remains local.
+Plan first if you want to see the amount of work without making network calls. Last.fm enrichment is cache-first and resumable; it persists similarity edges, artist tags, and tag top-artist data. `--depth 2` also enriches the hop-one frontier and can be bounded with `--max-frontier-artists`.
 
 ```bash
 export LASTFM_API_KEY=your-key
+scrobble-recs enrich-plan --config ./config.json --source lastfm
 scrobble-recs enrich --config ./config.json --source lastfm
+# Optional broader graph acquisition:
+scrobble-recs enrich --config ./config.json --source lastfm --depth 2 --max-frontier-artists 250
 ```
 
 PowerShell:
 
 ```powershell
 $env:LASTFM_API_KEY = "your-key"
+scrobble-recs enrich-plan --config ./config.json --source lastfm
 scrobble-recs enrich --config ./config.json --source lastfm
 ```
+
+After enabling MusicBrainz in `config.json`, resolve ambiguous local artist identities separately:
+
+```bash
+scrobble-recs resolve --config ./config.json --source musicbrainz
+```
+
+`enrich --source musicbrainz` currently runs the same bounded identity-resolution workflow. MBIDs remain evidence, not automatic proof that two artists are identical; ambiguous results stay separate.
 
 ### 5. Generate and inspect a run
 
 ```bash
 scrobble-recs recommend --config ./config.json --limit 100
-scrobble-recs export --config ./config.json --format csv --output recs.csv
+scrobble-recs export --config ./config.json --output recs.csv --format csv
 scrobble-recs tui --config ./config.json
 ```
 
-`recommend` persists a run. 
+`recommend` reads the current local evidence snapshot and persists the run, including considered candidates and inspectable evidence/admission/ranking/policy data. It does not call Last.fm or MusicBrainz.
 
 `export` and the Textual TUI read that persisted run; neither makes live API calls. When a selected recommendation has a persisted Last.fm URL, the TUI provides an **Open on Last.fm** link that opens the artist page in your default browser.
 
@@ -95,6 +120,7 @@ scrobble-recs recommend --config ./config.json --since 2024-01-01 --until 2025-0
 scrobble-recs recommend --config ./config.json --mode explore --limit 100
 scrobble-recs recommend --config ./config.json --mode rediscovery --limit 100
 scrobble-recs recommend --config ./config.json --mode "tag:post-punk,gothic rock"
+scrobble-recs recommend --config ./config.json --scorer walk --limit 100
 ```
 
 Available modes include 
@@ -107,7 +133,7 @@ Available modes include
 - `old`
 - `anti-obvious`
 
-Recommendation explanations retain the raw and calibrated score components, quality-gate reasons, history window, and serendipity evidence.
+`--since` and `--until` accept ISO dates or timestamps. `--scorer` accepts `legacy` or `walk`. Recommendation runs retain the query window, evidence snapshot, source-aware admission record, missing signals, raw and calibrated components, policy effects, and serendipity evidence.
 
 ### Inspect and rebuild your local profile
 
@@ -125,22 +151,26 @@ scrobble-recs enrich-plan --config ./config.json --source lastfm
 scrobble-recs enrich-status --config ./config.json --source lastfm
 scrobble-recs enrich-retry --config ./config.json --source lastfm
 
+scrobble-recs enrich-plan --config ./config.json --source musicbrainz
+scrobble-recs enrich-status --config ./config.json --source musicbrainz
+scrobble-recs enrich-retry --config ./config.json --source musicbrainz
+
 scrobble-recs cache --config ./config.json
 scrobble-recs cache-inspect --config ./config.json --source lastfm
 scrobble-recs cache-expire --config ./config.json --older-than-days 180
 ```
 
-Use these commands to inspect queued work, retry failures, and keep the local API cache healthy without treating network calls as part of the recommendation loop.
+`enrich-plan` is local-only. Use `enrich-status` and `enrich-retry` to inspect or reset queued work. Cache commands inspect or expire persisted HTTP responses; `cache-expire` defaults to 180 days and accepts an optional `--source` filter. None of these commands runs as part of recommendation generation.
 
 ### Export a persisted run
 
 ```bash
-scrobble-recs export --config ./config.json --format csv --output recs.csv
-scrobble-recs export --config ./config.json --format jsonl --output recs.jsonl
-scrobble-recs export --config ./config.json --run-id RUN_ID --include-candidates
+scrobble-recs export --config ./config.json --output recs.csv --format csv
+scrobble-recs export --config ./config.json --output recs.jsonl --format jsonl
+scrobble-recs export --config ./config.json --output recs.jsonl --format jsonl --run-id RUN_ID --include-candidates
 ```
 
-Exports include history-window, quality-gate, serendipity, and explanation fields. JSONL output is strict JSON, including when stored diagnostic data is malformed.
+Without `--run-id`, export uses the latest persisted run. CSV contains stable scalar query/version fields; JSONL also contains the full query context and nested explanation data. `--include-candidates` includes `candidate_only` rows, not every rejected/excluded diagnostic candidate. JSONL output is strict JSON, including when stored diagnostic data is malformed.
 
 ### Browse in the TUI
 
@@ -152,7 +182,7 @@ The TUI browses persisted runs. Use in-app help for navigation and control guida
 
 ### Give feedback
 
-Generally prefer the TUI for this, but if you want to, you can call the CLI directly for feedback.
+Generally prefer the TUI, but the CLI can record the same local feedback. `--tag` is repeatable, `--value` changes the strength multiplier, and `--note` stores an optional private note.
 
 ```bash
 scrobble-recs feedback \
@@ -171,6 +201,8 @@ Feedback reranks the selected persisted run by default; pass `--no-rerank` to re
 
 ```bash
 scrobble-recs evaluate --config ./config.json --split-date 2023-01-01
+scrobble-recs evaluate --config ./config.json --split-date 2023-01-01 --scorer walk
+scrobble-recs evaluate --config ./config.json --split-date 2023-01-01 --ablate serendipity
 scrobble-recs evaluate \
   --config ./config.json \
   --train-until 2022-12-31 \
@@ -178,7 +210,18 @@ scrobble-recs evaluate \
   --test-until 2023-04-01
 ```
 
-`--split-date` is one shared boundary: training ends there and the outcome horizon begins there. Without `--test-until`, Moth Radio evaluates the next 90 days. Evaluation uses only the state available before the training cutoff.
+`--split-date` is one shared boundary: training ends there and the outcome horizon begins there. Otherwise provide both `--train-until` and `--test-from`. Without `--test-until`, Moth Radio evaluates the next 90 days. `--scorer` selects `legacy` or `walk`; `--ablate` can disable one supported weight or toggle. Evaluation uses listening, feedback, and provider evidence available at the historical cutoff.
+
+Compare the two scoring engines over exactly the same split:
+
+```bash
+scrobble-recs compare \
+  --config ./config.json \
+  --split-date 2023-01-01 \
+  --scorers legacy,walk
+```
+
+`compare` accepts the same explicit train/test window options as `evaluate`. Its default scorer list is `legacy,walk`.
 
 Replay several historical cutoffs with a shared outcome horizon:
 
@@ -196,13 +239,13 @@ The Python evaluation results also include candidate and future-hit counts for `
 
 ## Development
 
-Moth Radio is Python, DuckDB, Typer, Textual, Pydantic, and pytest. Keep work local-first, deterministic, and inspectable. Tests must not call real APIs or depend on a network connection. 
+Moth Radio is Python 3.11+, DuckDB, Typer, Textual, Pydantic, and pytest. Install the development extra first. Keep work local-first, deterministic, and inspectable; tests must not call real APIs or depend on a network connection.
 
 ```bash
-python -m pytest
-python -m ruff check .
-python -m ruff format --check .
-python -m mypy src
+.venv/bin/python -m pytest
+.venv/bin/python -m ruff check .
+.venv/bin/python -m ruff format --check .
+.venv/bin/python -m mypy src
 ```
 
 Use deterministic fixtures, temporary DuckDB databases, and behavioral tests. Do not commit API keys or machine-specific paths.

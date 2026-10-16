@@ -116,6 +116,7 @@ def test_initialize_database_applies_initial_migration(tmp_path: Path) -> None:
     assert tables == {
         "api_cache",
         "artist",
+        "artist_evidence_observation",
         "artist_identity_resolution",
         "artist_listening_fact",
         "artist_similarity_edge",
@@ -483,6 +484,10 @@ def test_checked_in_config_example_loads_warning_free_with_task_4_defaults() -> 
         "rediscovery_requires_taste_match": True,
     }
     assert config.recommendation.discovery_evidence.model_dump() == {
+        "minimum_independent_families": 2,
+        "identity_safety_threshold": 0.80,
+        "low_confidence_identity_threshold": 0.50,
+        "catalog_relationships_enabled": False,
         "minimum_seed_edge": 0.05,
         "strong_seed_edge": 0.30,
         "minimum_seed_count": 2,
@@ -643,3 +648,19 @@ def test_scoring_config_rejects_unknown_engine() -> None:
 def test_scoring_config_rejects_negative_idf_alpha() -> None:
     with pytest.raises(ValidationError):
         ScoringConfig(seed_idf_alpha=-0.5)
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"minimum_independent_families": 0},
+        {"identity_safety_threshold": 1.1},
+        {"low_confidence_identity_threshold": -0.1},
+        {"identity_safety_threshold": 0.4, "low_confidence_identity_threshold": 0.5},
+    ],
+)
+def test_source_aware_evidence_config_rejects_unsafe_bounds(settings):
+    from scrobble_recs.config import DiscoveryEvidenceConfig
+
+    with pytest.raises(ValueError):
+        DiscoveryEvidenceConfig(**settings)

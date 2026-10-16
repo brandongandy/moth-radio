@@ -62,6 +62,7 @@ def _setup(tmp_path: Path) -> tuple[DuckDBPyConnection, ScrobbleRecsConfig]:
     conn = initialize_database(config)
     import_lastfm_csv(conn, tmp_path / "seeds.csv")
     _build_graph(conn)
+    conn.execute("UPDATE artist_similarity_edge SET fetched_at = '2000-01-01'")
     return conn, config
 
 

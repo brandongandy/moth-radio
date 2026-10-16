@@ -27,7 +27,7 @@ from scrobble_recs.models.retrieval import (
     _ScoringData,
 )
 from scrobble_recs.models.serendipity import SerendipityEvidence
-from scrobble_recs.models.walk import WalkNode
+from scrobble_recs.models.walk import WalkNode, WalkResult
 
 if TYPE_CHECKING:
     from scrobble_recs.models.ranking import RankedCandidate
@@ -149,6 +149,64 @@ class PolicyDecision:
     def __post_init__(self) -> None:
         object.__setattr__(self, "reasons", tuple(self.reasons))
         object.__setattr__(self, "legacy_score", deepcopy(self.legacy_score))
+
+
+@dataclass(frozen=True)
+class CandidateEligibility:
+    """The shared pre-calibration mode/safety view used by retrieval and ranking."""
+
+    artist_id: int
+    exclusion_reason: str | None
+    rediscovery_score: float
+    rediscovery_eligible: bool
+    walk_node: WalkNode | None
+
+    @property
+    def eligible(self) -> bool:
+        return self.exclusion_reason is None
+
+
+def candidate_eligibility(
+    artist_id: int,
+    *,
+    seed_ids: set[int],
+    feedback_profile: FeedbackProfile,
+    cooldown_artist_ids: set[int],
+    scoring_data: _ScoringData,
+    mode: RecommendationModeSettings,
+    config: ScrobbleRecsConfig,
+    tag_profile: dict[str, float],
+    walk_result: WalkResult | None,
+) -> CandidateEligibility:
+    listening = scoring_data.listening_by_artist.get(artist_id, (0.0, 0.0, 0, 0, None, None))
+    rediscovery = listening[1] if mode.name == "rediscovery" else 0.0
+    rediscovery_eligible = _is_rediscovery_eligible(
+        play_count=listening[2],
+        active_days=listening[3],
+        has_positive_feedback=artist_id in feedback_profile.boosted_seed_artist_ids,
+    )
+    node = walk_result.nodes.get(artist_id) if walk_result is not None else None
+    reason = _admission_exclusion_reason(
+        artist_id,
+        seed_ids=seed_ids,
+        feedback_profile=feedback_profile,
+        cooldown_artist_ids=cooldown_artist_ids,
+        scoring_data=scoring_data,
+        mode=mode,
+    )
+    if reason is None:
+        reason = _evidence_exclusion_reason(
+            artist_id,
+            mode=mode,
+            rediscovery=rediscovery,
+            rediscovery_eligible=rediscovery_eligible,
+            walk_engine=config.recommendation.scoring.engine == "walk",
+            walk_node=node,
+            obviousness_enabled=config.recommendation.obviousness.enabled,
+            tag_profile=tag_profile,
+            scoring_data=scoring_data,
+        )
+    return CandidateEligibility(artist_id, reason, rediscovery, rediscovery_eligible, node)
 
 
 def _admission_exclusion_reason(

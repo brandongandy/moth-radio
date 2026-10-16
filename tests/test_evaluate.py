@@ -94,6 +94,8 @@ def _setup_db(tmp_path: Path) -> tuple:
     conn = initialize_database(config)
     import_lastfm_csv(conn, Path("tests/fixtures/tiny_lastfm_export.csv"))
     run_lastfm_enrichment(conn, config, client=_FakeLastFmClient())
+    for table in ("artist_similarity_edge", "artist_tag", "tag_top_artist"):
+        conn.execute(f"UPDATE {table} SET fetched_at = '2000-01-01'")
     return conn, config
 
 
@@ -238,7 +240,7 @@ def test_evaluation_uses_pre_cutoff_history_without_refreshing_future_artist_fac
                 source_artist_id, target_artist_id, source,
                 source_score, normalized_score, evidence, fetched_at
             )
-            VALUES (?, 9001, 'lastfm', 0.95, 0.95, '{}', current_timestamp)
+            VALUES (?, 9001, 'lastfm', 0.95, 0.95, '{}', TIMESTAMP '2000-01-01')
             """,
             [seed_artist_id],
         )
@@ -582,8 +584,8 @@ def test_evaluation_reports_source_and_identity_coverage(tmp_path: Path) -> None
         )
         conn.execute(
             """
-            INSERT INTO tag_top_artist (tag, artist_id, source, tag_rank, tag_count)
-            VALUES ('post-punk', 9504, 'lastfm', 5, 1.0)
+            INSERT INTO tag_top_artist (tag, artist_id, source, tag_rank, tag_count, fetched_at)
+            VALUES ('post-punk', 9504, 'lastfm', 5, 1.0, TIMESTAMP '2000-01-01')
             """
         )
         conn.execute(

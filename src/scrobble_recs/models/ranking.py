@@ -5,11 +5,12 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from math import isfinite, sqrt
+from math import isfinite
 
 from duckdb import DuckDBPyConnection
 
 from scrobble_recs.config import RecommendationWeightsConfig, ScrobbleRecsConfig
+from scrobble_recs.models.evidence import AdmissionDecision, CandidateEvidence
 from scrobble_recs.models.feedback import (
     FeedbackProfile,
     feedback_obviousness_for_candidate,
@@ -18,21 +19,19 @@ from scrobble_recs.models.feedback import (
 from scrobble_recs.models.modes import RecommendationModeSettings
 from scrobble_recs.models.policy import (
     PolicyDecision,
-    _admission_exclusion_reason,
     _CandidateDiagnostic,
     _CandidateScore,
     _compute_trial_penalty,
     _EligibleCandidate,
-    _evidence_exclusion_reason,
     _excluded_candidate_diagnostic,
     _FatiguePenalty,
     _FeedbackScore,
-    _is_rediscovery_eligible,
     _legacy_policy_adjustments,
     _load_fatigue_by_artist,
     _quality_gate_decision,
     _quality_gate_payload,
     _walk_gate_decision,
+    candidate_eligibility,
 )
 from scrobble_recs.models.profile import SeedArtist
 from scrobble_recs.models.recommendation_quality import calibrate_positive_components
@@ -46,6 +45,7 @@ from scrobble_recs.models.retrieval import (
     _rank_affinity,
     _report_progress,
     _ScoringData,
+    _tag_similarity_score,
 )
 from scrobble_recs.models.seed_weighting import SeedIdfWeights
 from scrobble_recs.models.serendipity import score_serendipity
@@ -83,10 +83,13 @@ class RankedCandidate:
     features: RelevanceFeatureRecord
     explanation: dict[str, object]
     legacy: LegacyRankingDetails | None = field(default=None, repr=False)
+    evidence: CandidateEvidence | None = None
+    admission: AdmissionDecision | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "features", deepcopy(self.features))
         object.__setattr__(self, "explanation", deepcopy(self.explanation))
+        object.__setattr__(self, "evidence", deepcopy(self.evidence))
 
 
 def _score_candidates(
@@ -104,6 +107,7 @@ def _score_candidates(
     *,
     as_of: datetime | None = None,
     progress_callback: RecommendationProgressCallback | None = None,
+    admissions: dict[int, AdmissionDecision] | None = None,
 ) -> tuple[list[_CandidateScore], list[_CandidateDiagnostic]]:
     # Inverse-popularity weighting is applied at aggregation only. At
     # ``seed_idf_alpha == 0`` these equal the raw seed weights exactly, so the
@@ -129,23 +133,28 @@ def _score_candidates(
     )
     for artist_id in scoring_data.candidates:
         processed += 1
-        reason = _admission_exclusion_reason(
+        eligibility = candidate_eligibility(
             artist_id,
             seed_ids=seed_ids,
             feedback_profile=feedback_profile,
             cooldown_artist_ids=cooldown_artist_ids,
             scoring_data=scoring_data,
             mode=mode,
+            config=config,
+            tag_profile=tag_profile,
+            walk_result=walk_result,
         )
-        if reason is not None:
-            diagnostics.append(_excluded_candidate_diagnostic(artist_id, reason))
+        if eligibility.exclusion_reason is not None:
+            diagnostics.append(
+                _excluded_candidate_diagnostic(artist_id, eligibility.exclusion_reason)
+            )
             continue
         artist_name = scoring_data.artist_names[artist_id]
         listening = scoring_data.listening_by_artist.get(artist_id, (0.0, 0.0, 0, 0, None, None))
         knownness, rediscovery, local_play_count, local_active_days, first_played, last_played = (
             listening
         )
-        scored_rediscovery = rediscovery if mode.name == "rediscovery" else 0.0
+        scored_rediscovery = eligibility.rediscovery_score
         candidate_tags = _candidate_tag_vector(artist_id, scoring_data)
         feedback_neighborhood_score = _feedback_neighborhood_score(
             artist_id,
@@ -168,32 +177,13 @@ def _score_candidates(
         years_since_last_listen = 0.0
         if as_of is not None and last_played is not None:
             years_since_last_listen = max(0.0, (as_of - last_played).days / 365.25)
-        has_positive_feedback = artist_id in feedback_profile.boosted_seed_artist_ids
         trial_penalty = _compute_trial_penalty(
             play_count=local_play_count,
             active_days=local_active_days,
             years_since_last_listen=years_since_last_listen,
         )
-        rediscovery_eligible = _is_rediscovery_eligible(
-            play_count=local_play_count,
-            active_days=local_active_days,
-            has_positive_feedback=has_positive_feedback,
-        )
-        walk_node = None if walk_result is None else walk_result.nodes.get(artist_id)
-        reason = _evidence_exclusion_reason(
-            artist_id,
-            mode=mode,
-            rediscovery=scored_rediscovery,
-            rediscovery_eligible=rediscovery_eligible,
-            walk_engine=walk_engine,
-            walk_node=walk_node,
-            obviousness_enabled=False,
-            tag_profile=tag_profile,
-            scoring_data=scoring_data,
-        )
-        if reason is not None:
-            diagnostics.append(_excluded_candidate_diagnostic(artist_id, reason))
-            continue
+        rediscovery_eligible = eligibility.rediscovery_eligible
+        walk_node = eligibility.walk_node
         if walk_engine:
             assert walk_node is not None
             lastfm_score = walk_node.lift
@@ -217,21 +207,6 @@ def _score_candidates(
             if obviousness_enabled
             else 0.0
         )
-        reason = _evidence_exclusion_reason(
-            artist_id,
-            mode=mode,
-            rediscovery=scored_rediscovery,
-            rediscovery_eligible=rediscovery_eligible,
-            walk_engine=False,
-            walk_node=walk_node,
-            obviousness_enabled=obviousness_enabled,
-            tag_profile=tag_profile,
-            scoring_data=scoring_data,
-        )
-        if reason is not None:
-            diagnostics.append(_excluded_candidate_diagnostic(artist_id, reason))
-            continue
-
         raw_components = {
             "lastfm_similarity": lastfm_score,
             "tag_similarity": tag_score,
@@ -253,6 +228,11 @@ def _score_candidates(
                 ),
                 tag_score=tag_score,
                 rediscovery_score=scored_rediscovery,
+            )
+        admission = (admissions or {}).get(artist_id)
+        if admission is not None and admission.admitted != quality_gate.passed:
+            quality_gate = replace(
+                quality_gate, passed=admission.admitted, reasons=admission.reasons
             )
         if not quality_gate.passed:
             diagnostics.append(
@@ -449,30 +429,6 @@ def _lastfm_similarity_score(
         )
         / total_seed_weight
     )
-
-
-def _tag_similarity_score(
-    artist_id: int,
-    tag_profile: dict[str, float],
-    scoring_data: _ScoringData,
-) -> float:
-    if not tag_profile:
-        return 0.0
-    direct_tags = scoring_data.direct_tags_by_artist.get(artist_id, {})
-    ranked_tags = {
-        tag: _rank_affinity(rank)
-        for tag, rank in scoring_data.tag_ranks_by_artist.get(artist_id, [])
-    }
-    candidate = {**ranked_tags, **direct_tags}
-    if not candidate:
-        return 0.0
-
-    dot = sum(tag_profile.get(tag, 0.0) * weight for tag, weight in candidate.items())
-    profile_norm = sqrt(sum(weight * weight for weight in tag_profile.values()))
-    candidate_norm = sqrt(sum(weight * weight for weight in candidate.values()))
-    if profile_norm == 0.0 or candidate_norm == 0.0:
-        return 0.0
-    return dot / (profile_norm * candidate_norm)
 
 
 def _obviousness(
@@ -829,6 +785,7 @@ def rank_candidates(
         details.walk_result,
         as_of=inputs.as_of,
         progress_callback=progress_callback,
+        admissions=retrieval.admissions,
     )
     score_by_id = {score.artist_id: score for score in scores}
     result = []
@@ -874,6 +831,22 @@ def rank_candidates(
                 RelevanceFeatureRecord(context.versions.feature_schema, values, missing),
                 explanation,
                 LegacyRankingDetails(score, diagnostic, order, details),
+                retrieval.evidence.get(
+                    diagnostic.artist_id, CandidateEvidence(diagnostic.artist_id, ())
+                ),
+                (
+                    replace(
+                        retrieval.admissions[diagnostic.artist_id],
+                        admitted=False,
+                        reasons=diagnostic.reasons,
+                    )
+                    if diagnostic.state == "excluded"
+                    and diagnostic.artist_id in retrieval.admissions
+                    else retrieval.admissions.get(
+                        diagnostic.artist_id,
+                        AdmissionDecision(score is not None, 0, diagnostic.reasons),
+                    )
+                ),
             )
         )
     return tuple(sorted(result, key=lambda item: (-item.relevance_score, item.artist_id)))

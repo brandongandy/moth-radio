@@ -360,6 +360,10 @@ class DiscoveryEvidenceConfig(BaseModel):
     strong_seed_edge: float = 0.30
     minimum_seed_count: int = 2
     minimum_tag_reinforcement: float = 0.05
+    minimum_independent_families: int = 2
+    identity_safety_threshold: float = 0.80
+    low_confidence_identity_threshold: float = 0.50
+    catalog_relationships_enabled: bool = False
 
     @model_validator(mode="after")
     def validate_thresholds(self) -> DiscoveryEvidenceConfig:
@@ -367,6 +371,8 @@ class DiscoveryEvidenceConfig(BaseModel):
             "minimum_seed_edge",
             "strong_seed_edge",
             "minimum_tag_reinforcement",
+            "identity_safety_threshold",
+            "low_confidence_identity_threshold",
         ):
             value = float(getattr(self, field_name))
             if not 0.0 <= value <= 1.0:
@@ -375,6 +381,10 @@ class DiscoveryEvidenceConfig(BaseModel):
             raise ValueError("strong_seed_edge must be >= minimum_seed_edge")
         if self.minimum_seed_count < 1:
             raise ValueError("minimum_seed_count must be at least 1")
+        if self.minimum_independent_families < 1:
+            raise ValueError("minimum_independent_families must be at least 1")
+        if self.low_confidence_identity_threshold > self.identity_safety_threshold:
+            raise ValueError("low confidence threshold must not exceed identity safety threshold")
         return self
 
 

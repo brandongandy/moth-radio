@@ -1,0 +1,596 @@
+{
+  "legacy": [
+    {
+      "artist_id": 5,
+      "explanation": {
+        "calibrated_components": {
+          "feedback": 0.0,
+          "lastfm_similarity": 0.91,
+          "tag_similarity": 0.9899494936611665
+        },
+        "candidate_sources": [
+          "last.fm similarity",
+          "tag similarity"
+        ],
+        "classification": {
+          "is_new": true,
+          "is_obvious": false,
+          "is_rediscovery": false,
+          "rediscovery_eligible": false,
+          "score_band": "strong"
+        },
+        "fatigue": {
+          "latest_run_rank": null,
+          "penalty": 0.0,
+          "prior_run_appearances": 0
+        },
+        "fatigue_penalty": 0.0,
+        "feedback": {
+          "contributions": {
+            "artist": 0.0,
+            "neighborhood": 0.0,
+            "tag": 0.0
+          },
+          "effects": [],
+          "score": 0.0
+        },
+        "feedback_score": 0.0,
+        "identity_confidence": 0.5,
+        "identity_warnings": [],
+        "knownness_penalty": 0.0,
+        "lastfm_similarity_score": 0.91,
+        "matching_tags": [
+          "post-punk",
+          "gothic rock"
+        ],
+        "obviousness_penalty": 0.0375,
+        "penalties": {
+          "diversity": 0.0,
+          "knownness": 0.0,
+          "obviousness": 0.0375
+        },
+        "quality_gate": {
+          "calibrated_components": {
+            "feedback": 0.0,
+            "lastfm_similarity": 0.91,
+            "tag_similarity": 0.9899494936611665
+          },
+          "direct_evidence": {
+            "distinct_seed_count": 1,
+            "qualifying_edges": [
+              [
+                4,
+                0.91
+              ]
+            ],
+            "strongest_edge": 0.91
+          },
+          "passed": true,
+          "raw_components": {
+            "feedback": 0.0,
+            "lastfm_similarity": 0.91,
+            "tag_similarity": 0.9899494936611665
+          },
+          "reasons": [
+            "independent_seed_support"
+          ],
+          "scores": {
+            "feedback_score": 0.0,
+            "lastfm_similarity_score": 0.91,
+            "rediscovery_score": 0.0,
+            "tag_similarity_score": 0.9899494936611665
+          },
+          "thresholds": {
+            "minimum_seed_count": 1.0,
+            "minimum_seed_edge": 0.05,
+            "minimum_tag_reinforcement": 0.05,
+            "strong_seed_edge": 0.3
+          }
+        },
+        "raw_components": {
+          "feedback": 0.0,
+          "lastfm_similarity": 0.91,
+          "tag_similarity": 0.9899494936611665
+        },
+        "rediscovery_score": 0.0,
+        "seed_artists": [
+          {
+            "artist": "The Cure",
+            "idf_weight": 1.0,
+            "seed_weight": 3.3927845534992036,
+            "similarity": 0.91,
+            "source": "lastfm_artist_similarity"
+          }
+        ],
+        "serendipity": {
+          "calibrated_bonus": 0.0,
+          "cohesion": 0.0,
+          "component_ids": [],
+          "is_bridge": false,
+          "neighbors": [
+            4
+          ],
+          "raw_bonus": 0.0
+        },
+        "summary": "Matched tags: 2. Nearest seeds: 1. Evidence: last.fm similarity, tag similarity. Caution: obvious (0.04).",
+        "tag_fit_score": 0.9899494936611665,
+        "tags": [
+          {
+            "candidate_rank_for_tag": 55,
+            "candidate_weight": 0.15,
+            "tag": "post-punk",
+            "user_weight": 1.0
+          },
+          {
+            "candidate_rank_for_tag": 30,
+            "candidate_weight": 0.15,
+            "tag": "gothic rock",
+            "user_weight": 0.7499999999999998
+          }
+        ],
+        "top_seed_artists": [
+          "The Cure"
+        ],
+        "top_seed_edge_scores": [
+          0.91
+        ],
+        "trial_penalty": 0.0
+      }
+    },
+    {
+      "artist_id": 6,
+      "explanation": {
+        "calibrated_components": {
+          "feedback": 0.0,
+          "lastfm_similarity": 0.7199999999999999,
+          "tag_similarity": 0.7452413135250993
+        },
+        "candidate_sources": [
+          "last.fm similarity",
+          "tag similarity"
+        ],
+        "classification": {
+          "is_new": true,
+          "is_obvious": false,
+          "is_rediscovery": false,
+          "rediscovery_eligible": false,
+          "score_band": "weak"
+        },
+        "fatigue": {
+          "latest_run_rank": null,
+          "penalty": 0.0,
+          "prior_run_appearances": 0
+        },
+        "fatigue_penalty": 0.0,
+        "feedback": {
+          "contributions": {
+            "artist": 0.0,
+            "neighborhood": 0.0,
+            "tag": 0.0
+          },
+          "effects": [],
+          "score": 0.0
+        },
+        "feedback_score": 0.0,
+        "identity_confidence": 0.5,
+        "identity_warnings": [],
+        "knownness_penalty": 0.0,
+        "lastfm_similarity_score": 0.7199999999999999,
+        "matching_tags": [
+          "post-punk",
+          "gothic rock"
+        ],
+        "obviousness_penalty": 0.14062499999999994,
+        "penalties": {
+          "diversity": 0.2080125735844609,
+          "knownness": 0.0,
+          "obviousness": 0.14062499999999994
+        },
+        "quality_gate": {
+          "calibrated_components": {
+            "feedback": 0.0,
+            "lastfm_similarity": 0.7199999999999999,
+            "tag_similarity": 0.7452413135250993
+          },
+          "direct_evidence": {
+            "distinct_seed_count": 1,
+            "qualifying_edges": [
+              [
+                4,
+                0.72
+              ]
+            ],
+            "strongest_edge": 0.72
+          },
+          "passed": true,
+          "raw_components": {
+            "feedback": 0.0,
+            "lastfm_similarity": 0.7199999999999999,
+            "tag_similarity": 0.7452413135250993
+          },
+          "reasons": [
+            "independent_seed_support"
+          ],
+          "scores": {
+            "feedback_score": 0.0,
+            "lastfm_similarity_score": 0.7199999999999999,
+            "rediscovery_score": 0.0,
+            "tag_similarity_score": 0.7452413135250993
+          },
+          "thresholds": {
+            "minimum_seed_count": 1.0,
+            "minimum_seed_edge": 0.05,
+            "minimum_tag_reinforcement": 0.05,
+            "strong_seed_edge": 0.3
+          }
+        },
+        "raw_components": {
+          "feedback": 0.0,
+          "lastfm_similarity": 0.7199999999999999,
+          "tag_similarity": 0.7452413135250993
+        },
+        "rediscovery_score": 0.0,
+        "seed_artists": [
+          {
+            "artist": "The Cure",
+            "idf_weight": 1.0,
+            "seed_weight": 3.3927845534992036,
+            "similarity": 0.72,
+            "source": "lastfm_artist_similarity"
+          }
+        ],
+        "serendipity": {
+          "calibrated_bonus": 0.0,
+          "cohesion": 0.0,
+          "component_ids": [],
+          "is_bridge": false,
+          "neighbors": [
+            4
+          ],
+          "raw_bonus": 0.0
+        },
+        "summary": "Matched tags: 2. Nearest seeds: 1. Evidence: last.fm similarity, tag similarity. Caution: obvious (0.14).",
+        "tag_fit_score": 0.7452413135250993,
+        "tags": [
+          {
+            "candidate_rank_for_tag": 42,
+            "candidate_weight": 0.15,
+            "tag": "post-punk",
+            "user_weight": 1.0
+          },
+          {
+            "candidate_rank_for_tag": 4,
+            "candidate_weight": 0.75,
+            "tag": "gothic rock",
+            "user_weight": 0.7499999999999998
+          }
+        ],
+        "top_seed_artists": [
+          "The Cure"
+        ],
+        "top_seed_edge_scores": [
+          0.72
+        ],
+        "trial_penalty": 0.0
+      }
+    }
+  ],
+  "walk": [
+    {
+      "artist_id": 5,
+      "explanation": {
+        "calibrated_components": {
+          "feedback": 0.0,
+          "lastfm_similarity": -0.3928148184210152,
+          "tag_similarity": 0.9899494936611665
+        },
+        "candidate_sources": [
+          "tag similarity"
+        ],
+        "classification": {
+          "is_new": true,
+          "is_obvious": false,
+          "is_rediscovery": false,
+          "rediscovery_eligible": false,
+          "score_band": "plausible"
+        },
+        "fatigue": {
+          "latest_run_rank": null,
+          "penalty": 0.0,
+          "prior_run_appearances": 0
+        },
+        "fatigue_penalty": 0.0,
+        "feedback": {
+          "contributions": {
+            "artist": 0.0,
+            "neighborhood": 0.0,
+            "tag": 0.0
+          },
+          "effects": [],
+          "score": 0.0
+        },
+        "feedback_score": 0.0,
+        "identity_confidence": 0.5,
+        "identity_warnings": [],
+        "knownness_penalty": 0.0,
+        "lastfm_similarity_score": -0.3928148184210152,
+        "matching_tags": [
+          "post-punk",
+          "gothic rock"
+        ],
+        "obviousness_penalty": 0.0375,
+        "penalties": {
+          "diversity": 0.0,
+          "knownness": 0.0,
+          "obviousness": 0.0375
+        },
+        "quality_gate": {
+          "calibrated_components": {
+            "feedback": 0.0,
+            "lastfm_similarity": -0.3928148184210152,
+            "tag_similarity": 0.9899494936611665
+          },
+          "direct_evidence": {
+            "distinct_seed_count": 1,
+            "qualifying_edges": [],
+            "strongest_edge": -0.3928148184210152
+          },
+          "passed": true,
+          "raw_components": {
+            "feedback": 0.0,
+            "lastfm_similarity": -0.3928148184210152,
+            "tag_similarity": 0.9899494936611665
+          },
+          "reasons": [
+            "walk_lift_and_reachability"
+          ],
+          "scores": {
+            "feedback_score": 0.0,
+            "lastfm_similarity_score": -0.3928148184210152,
+            "rediscovery_score": 0.0,
+            "tag_similarity_score": 0.9899494936611665
+          },
+          "thresholds": {
+            "min_distinct_seeds": 1.0,
+            "min_lift": -100.0
+          }
+        },
+        "raw_components": {
+          "feedback": 0.0,
+          "lastfm_similarity": -0.3928148184210152,
+          "tag_similarity": 0.9899494936611665
+        },
+        "rediscovery_score": 0.0,
+        "seed_artists": [
+          {
+            "artist": "The Cure",
+            "idf_weight": 1.0,
+            "seed_weight": 3.3927845534992036,
+            "similarity": 0.91,
+            "source": "lastfm_artist_similarity"
+          }
+        ],
+        "serendipity": {
+          "calibrated_bonus": 0.0,
+          "cohesion": 0.0,
+          "component_ids": [],
+          "is_bridge": false,
+          "neighbors": [
+            4
+          ],
+          "raw_bonus": 0.0
+        },
+        "summary": "Matched tags: 2. Nearest seeds: 1. Evidence: tag similarity. Caution: obvious (0.04).",
+        "tag_fit_score": 0.9899494936611665,
+        "tags": [
+          {
+            "candidate_rank_for_tag": 55,
+            "candidate_weight": 0.15,
+            "tag": "post-punk",
+            "user_weight": 1.0
+          },
+          {
+            "candidate_rank_for_tag": 30,
+            "candidate_weight": 0.15,
+            "tag": "gothic rock",
+            "user_weight": 0.7499999999999998
+          }
+        ],
+        "top_seed_artists": [
+          "The Cure"
+        ],
+        "top_seed_edge_scores": [
+          0.91
+        ],
+        "trial_penalty": 0.0,
+        "walk": {
+          "baseline_mass": 0.2777032961952537,
+          "contributing_seeds": [
+            {
+              "artist": "The Cure",
+              "artist_id": 4,
+              "idf_weight": 1.0
+            }
+          ],
+          "distinct_seed_count": 1,
+          "hop_distance": 1,
+          "iteration_cap_bound": false,
+          "lift": -0.3928148184210152,
+          "node_cap_bound": false,
+          "personalized_mass": 0.18749242516066997,
+          "top_paths": [
+            {
+              "artist_ids": [
+                4,
+                5
+              ],
+              "artists": [
+                "The Cure",
+                "Siouxsie and the Banshees"
+              ],
+              "weight": 0.4080717488789238
+            }
+          ]
+        }
+      }
+    },
+    {
+      "artist_id": 6,
+      "explanation": {
+        "calibrated_components": {
+          "feedback": 0.0,
+          "lastfm_similarity": -0.5717379602888841,
+          "tag_similarity": 0.7452413135250993
+        },
+        "candidate_sources": [
+          "tag similarity"
+        ],
+        "classification": {
+          "is_new": true,
+          "is_obvious": false,
+          "is_rediscovery": false,
+          "rediscovery_eligible": false,
+          "score_band": "candidate_only"
+        },
+        "fatigue": {
+          "latest_run_rank": null,
+          "penalty": 0.0,
+          "prior_run_appearances": 0
+        },
+        "fatigue_penalty": 0.0,
+        "feedback": {
+          "contributions": {
+            "artist": 0.0,
+            "neighborhood": 0.0,
+            "tag": 0.0
+          },
+          "effects": [],
+          "score": 0.0
+        },
+        "feedback_score": 0.0,
+        "identity_confidence": 0.5,
+        "identity_warnings": [],
+        "knownness_penalty": 0.0,
+        "lastfm_similarity_score": -0.5717379602888841,
+        "matching_tags": [
+          "post-punk",
+          "gothic rock"
+        ],
+        "obviousness_penalty": 0.14062499999999994,
+        "penalties": {
+          "diversity": 0.2080125735844609,
+          "knownness": 0.0,
+          "obviousness": 0.14062499999999994
+        },
+        "quality_gate": {
+          "calibrated_components": {
+            "feedback": 0.0,
+            "lastfm_similarity": -0.5717379602888841,
+            "tag_similarity": 0.7452413135250993
+          },
+          "direct_evidence": {
+            "distinct_seed_count": 1,
+            "qualifying_edges": [],
+            "strongest_edge": -0.5717379602888841
+          },
+          "passed": true,
+          "raw_components": {
+            "feedback": 0.0,
+            "lastfm_similarity": -0.5717379602888841,
+            "tag_similarity": 0.7452413135250993
+          },
+          "reasons": [
+            "walk_lift_and_reachability"
+          ],
+          "scores": {
+            "feedback_score": 0.0,
+            "lastfm_similarity_score": -0.5717379602888841,
+            "rediscovery_score": 0.0,
+            "tag_similarity_score": 0.7452413135250993
+          },
+          "thresholds": {
+            "min_distinct_seeds": 1.0,
+            "min_lift": -100.0
+          }
+        },
+        "raw_components": {
+          "feedback": 0.0,
+          "lastfm_similarity": -0.5717379602888841,
+          "tag_similarity": 0.7452413135250993
+        },
+        "rediscovery_score": 0.0,
+        "seed_artists": [
+          {
+            "artist": "The Cure",
+            "idf_weight": 1.0,
+            "seed_weight": 3.3927845534992036,
+            "similarity": 0.72,
+            "source": "lastfm_artist_similarity"
+          }
+        ],
+        "serendipity": {
+          "calibrated_bonus": 0.0,
+          "cohesion": 0.0,
+          "component_ids": [],
+          "is_bridge": false,
+          "neighbors": [
+            4
+          ],
+          "raw_bonus": 0.0
+        },
+        "summary": "Matched tags: 2. Nearest seeds: 1. Evidence: tag similarity. Caution: obvious (0.14).",
+        "tag_fit_score": 0.7452413135250993,
+        "tags": [
+          {
+            "candidate_rank_for_tag": 42,
+            "candidate_weight": 0.15,
+            "tag": "post-punk",
+            "user_weight": 1.0
+          },
+          {
+            "candidate_rank_for_tag": 4,
+            "candidate_weight": 0.75,
+            "tag": "gothic rock",
+            "user_weight": 0.7499999999999998
+          }
+        ],
+        "top_seed_artists": [
+          "The Cure"
+        ],
+        "top_seed_edge_scores": [
+          0.72
+        ],
+        "trial_penalty": 0.0,
+        "walk": {
+          "baseline_mass": 0.26277102306873396,
+          "contributing_seeds": [
+            {
+              "artist": "The Cure",
+              "artist_id": 4,
+              "idf_weight": 1.0
+            }
+          ],
+          "distinct_seed_count": 1,
+          "hop_distance": 1,
+          "iteration_cap_bound": false,
+          "lift": -0.5717379602888841,
+          "node_cap_bound": false,
+          "personalized_mass": 0.14834565507217845,
+          "top_paths": [
+            {
+              "artist_ids": [
+                4,
+                6
+              ],
+              "artists": [
+                "The Cure",
+                "Bauhaus"
+              ],
+              "weight": 0.32286995515695066
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

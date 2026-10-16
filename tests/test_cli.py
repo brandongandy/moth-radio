@@ -3,6 +3,7 @@ from datetime import datetime
 from pathlib import Path
 
 import duckdb
+import pytest
 from typer.testing import CliRunner
 
 from scrobble_recs.cli import app
@@ -1094,6 +1095,103 @@ def test_evaluate_command_rejects_nonpositive_horizon(monkeypatch, tmp_path) -> 
 
     assert result.exit_code == 1
     assert "test_until must be after test_from" in result.stdout
+
+
+def test_evaluate_rolling_command_sorts_cutoffs_and_prints_window_and_mean_metrics(tmp_path):
+    from scrobble_recs.config import load_config
+    from scrobble_recs.db import initialize_database
+
+    config_path = write_config(tmp_path)
+    result = CliRunner().invoke(
+        app,
+        [
+            "evaluate-rolling",
+            "--config",
+            str(config_path),
+            "--cutoff",
+            "2023-04-01",
+            "--cutoff",
+            "2023-01-01",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.index("2023-01-01") < result.stdout.index("2023-04-01")
+    assert "2023-06-30" in result.stdout
+    assert "windows: 2" in result.stdout
+    assert "mean recall@50: 0.000" in result.stdout
+    assert "mean recall@100: 0.000" in result.stdout
+    assert "mean ndcg@50: 0.000" in result.stdout
+    assert "mean identity_resolved_rate: 0.000" in result.stdout
+    conn = initialize_database(load_config(config_path))
+    try:
+        summaries = [
+            json.loads(row[0])["history_window"]["end"]
+            for row in conn.execute(
+                "SELECT seed_summary FROM recommendation_run ORDER BY created_at"
+            ).fetchall()
+        ]
+        assert summaries == ["2023-01-01T00:00:00", "2023-04-01T00:00:00"]
+    finally:
+        conn.close()
+
+
+def test_evaluate_rolling_command_deduplicates_normalized_cutoffs_and_uses_horizon(tmp_path):
+    from scrobble_recs.config import load_config
+    from scrobble_recs.db import initialize_database
+
+    config_path = write_config(tmp_path)
+    result = CliRunner().invoke(
+        app,
+        [
+            "evaluate-rolling",
+            "--config",
+            str(config_path),
+            "--cutoff",
+            "2023-01-01",
+            "--cutoff",
+            "2023-01-01T08:00:00+08:00",
+            "--cutoff",
+            "2023-01-01",
+            "--horizon-days",
+            "30",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "windows: 1" in result.stdout
+    assert "2023-01-31T00:00:00" in result.stdout
+    conn = initialize_database(load_config(config_path))
+    try:
+        assert conn.execute("SELECT count(*) FROM recommendation_run").fetchone() == (1,)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("horizon", ["0", "-1"])
+def test_evaluate_rolling_command_rejects_nonpositive_horizon(tmp_path, horizon):
+    result = CliRunner().invoke(
+        app,
+        [
+            "evaluate-rolling",
+            "--config",
+            str(write_config(tmp_path)),
+            "--cutoff",
+            "2023-01-01",
+            "--horizon-days",
+            horizon,
+        ],
+    )
+    assert result.exit_code == 2
+    assert "--horizon-days" in result.output
+    assert "No such command" not in result.output
+
+
+def test_evaluate_rolling_command_requires_cutoffs(tmp_path):
+    result = CliRunner().invoke(app, ["evaluate-rolling", "--config", str(write_config(tmp_path))])
+    assert result.exit_code == 2
+    assert "--cutoff" in result.output
+    assert "Missing option" in result.output
 
 
 def test_profile_tags_command_prints_tag_weights(monkeypatch, tmp_path):

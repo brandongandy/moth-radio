@@ -2,8 +2,150 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from math import isfinite
 
 from scrobble_recs.config import DiscoveryEvidenceConfig
+from scrobble_recs.models.evidence import (
+    AdmissionDecision,
+    CandidateEvidence,
+    EvidenceObservation,
+    is_legacy_compatible,
+    is_translated_legacy,
+)
+from scrobble_recs.models.recommendation_query import QueryContext
+
+
+def decide_candidate_admission(
+    evidence: CandidateEvidence,
+    *,
+    stage: int,
+    hidden: bool,
+    strongly_rejected: bool,
+    identity_confidence: float,
+    config: DiscoveryEvidenceConfig,
+    context: QueryContext | None = None,
+    tag_score: float = 0.0,
+    seed_ids: set[int] | None = None,
+    walk_supported: bool = False,
+    legacy_policy_passed: bool = False,
+) -> AdmissionDecision:
+    """Evaluate one explicit retrieval stage, before relevance calibration.
+
+    Only translated legacy facts may use the migration identity exception. Raw
+    provider values never qualify another provider's observations.
+    """
+    if stage not in range(5):
+        raise ValueError("stage must be between 0 and 4")
+
+    def result(admitted: bool, *reasons: str) -> AdmissionDecision:
+        return AdmissionDecision(admitted, stage, reasons)
+
+    if hidden:
+        return result(False, "hidden_artist")
+    if strongly_rejected:
+        return result(False, "strongly_rejected")
+    if (
+        not isfinite(identity_confidence)
+        or identity_confidence < config.low_confidence_identity_threshold
+    ):
+        return result(False, "identity_below_minimum")
+    legacy = tuple(
+        row for row in evidence.observations if row.source == "lastfm" and is_translated_legacy(row)
+    )
+    edges = tuple(
+        (row.source_artist_id, _lastfm_edge(row))
+        for row in legacy
+        if row.relationship_kind == "similar_artist"
+        and row.source_artist_id is not None
+        and (seed_ids is None or row.source_artist_id in seed_ids)
+    )
+    old = evaluate_discovery_evidence(edges=edges, tag_score=tag_score, config=config)
+    only_legacy = all(is_legacy_compatible(row) for row in evidence.observations)
+    legacy_passed = only_legacy and (old.passed or legacy_policy_passed)
+    low_identity = identity_confidence < config.identity_safety_threshold
+    if low_identity and stage < 4 and not legacy_passed:
+        return result(False, "identity_below_safety_threshold")
+    if legacy_passed:
+        reasons = old.reasons if old.passed else ("legacy_policy_admission",)
+        return result(True, *reasons, *(("legacy_identity_compatibility",) if low_identity else ()))
+    positive_personal = any(_positive_personal(row) for row in evidence.observations)
+    if only_legacy and legacy and not positive_personal and not (stage >= 3 and walk_supported):
+        return result(False, *old.reasons)
+
+    rows = tuple(
+        row for row in evidence.observations if row.family != "personal" or _positive_personal(row)
+    )
+    families = {row.family for row in rows}
+    strengths = []
+    for row in rows:
+        strength = row.evidence.get("strength")
+        if (
+            row.source == "lastfm"
+            and row.relationship_kind == "similar_artist"
+            and (seed_ids is None or row.source_artist_id in seed_ids)
+        ):
+            edge = _lastfm_edge(row)
+            strength = (
+                "strong"
+                if edge >= config.strong_seed_edge
+                else "moderate"
+                if edge >= config.minimum_seed_edge
+                else None
+            )
+        strengths.append((row.family, strength))
+    reason: str | None = None
+    if (
+        any(family == "collaborative" and strength == "strong" for family, strength in strengths)
+        and len(families) >= 2
+    ):
+        reason = "strong_collaborative_with_independent_family"
+    elif (
+        len({family for family, strength in strengths if strength in ("strong", "moderate")})
+        >= config.minimum_independent_families
+    ):
+        reason = "independent_family_agreement"
+    elif positive_personal:
+        reason = "positive_personal_evidence"
+    elif (
+        context is not None
+        and context.query_kind == "artist"
+        and config.catalog_relationships_enabled
+        and any(
+            row.relationship_kind == "catalog_relationship"
+            and row.evidence.get("supported_relationship") is True
+            for row in rows
+        )
+    ):
+        reason = "enabled_catalog_relationship"
+    elif (
+        stage >= 2
+        and len(families) >= 2
+        and any(
+            family == "collaborative" and strength in ("moderate", "weak")
+            for family, strength in strengths
+        )
+    ):
+        reason = "relaxed_collaborative_with_independent_family"
+    elif stage >= 3 and walk_supported:
+        reason = "walk_lift_and_reachability"
+    if reason is None:
+        return result(False, "missing_source_aware_evidence")
+    return result(True, reason, *(("low_confidence",) if low_identity else ()))
+
+
+def _lastfm_edge(row: EvidenceObservation) -> float:
+    value = row.evidence.get("normalized_score", row.raw_score)
+    return float(value) if isinstance(value, (int, float)) and isfinite(value) else 0.0
+
+
+def _positive_personal(row: EvidenceObservation) -> bool:
+    return (
+        row.family == "personal"
+        and row.relationship_kind == "personal_feedback"
+        and row.raw_score is not None
+        and row.raw_score > 0
+        and row.evidence.get("action") in ("save", "more_like_this", "rediscovery_good")
+    )
 
 
 @dataclass(frozen=True)

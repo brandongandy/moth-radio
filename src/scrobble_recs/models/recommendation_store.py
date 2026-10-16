@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from urllib.parse import quote
 
 from duckdb import DuckDBPyConnection
 
 from scrobble_recs.config import ScrobbleRecsConfig
+from scrobble_recs.models.evidence import (
+    AdmissionDecision,
+    CandidateEvidence,
+    candidate_evidence_json,
+)
 from scrobble_recs.models.modes import RecommendationModeSettings
 from scrobble_recs.models.policy import PolicyDecision, _CandidateDiagnostic, _CandidateScore
 from scrobble_recs.models.profile import SeedArtist
@@ -19,7 +24,6 @@ from scrobble_recs.models.retrieval import (
     RecommendationProgressCallback,
     RetrievalResult,
     _report_progress,
-    _ScoringData,
 )
 from scrobble_recs.models.walk import WalkResult
 
@@ -59,7 +63,6 @@ def persist_recommendation_run(
     """Commit the complete persisted artifact, or roll back all three tables on any failure."""
     if payload.retrieval.legacy is None:
         raise ValueError("legacy persistence requires retrieval details")
-    details = payload.retrieval.legacy
     selected = [
         decision.legacy_score
         for decision in payload.decisions
@@ -70,9 +73,7 @@ def persist_recommendation_run(
         _insert_run(conn, payload)
         _persist_candidates(
             conn,
-            payload.run_id,
-            details.scoring_data,
-            list(payload.scorer_diagnostics),
+            payload,
             progress_callback=progress_callback,
         )
         _persist_recommendations(conn, payload.run_id, selected)
@@ -115,13 +116,16 @@ def _walk_run_summary(walk_result: WalkResult | None) -> dict[str, object] | Non
 
 def _persist_candidates(
     conn: DuckDBPyConnection,
-    run_id: str,
-    scoring_data: _ScoringData,
-    diagnostics: list[_CandidateDiagnostic],
+    payload: RecommendationRunPayload,
     *,
     progress_callback: RecommendationProgressCallback | None,
 ) -> None:
     """Persist candidate artists for the current recommendation run."""
+    assert payload.retrieval.legacy is not None
+    scoring_data = payload.retrieval.legacy.scoring_data
+    diagnostics = payload.scorer_diagnostics
+    ranked = {row.artist_id: row for row in payload.ranked}
+    decisions = {row.artist_id: row for row in payload.decisions}
     total = len(diagnostics)
     _report_progress(
         progress_callback,
@@ -141,7 +145,7 @@ def _persist_candidates(
             tags = scoring_data.tag_ranks_by_artist.get(artist_id, [])
             rows.append(
                 [
-                    run_id,
+                    payload.run_id,
                     artist_id,
                     json.dumps([int(source[0]) for source in sources]),
                     float(max((source[1] for source in sources), default=0.0)),
@@ -151,14 +155,18 @@ def _persist_candidates(
                     json.dumps(list(diagnostic.reasons)),
                     json.dumps(diagnostic.quality_gate, sort_keys=True),
                 ]
+                + _candidate_detail_values(ranked[artist_id], decisions.get(artist_id))
             )
         conn.executemany(
             """
             INSERT INTO recommendation_candidate
                 (run_id, artist_id, candidate_sources, max_source_score,
                  appeared_from_seed_count, appeared_from_tag_count, eligibility_state,
-                 eligibility_reasons, quality_gate)
-            VALUES (CAST(? AS UUID), ?, ?::JSON, ?, ?, ?, ?, ?::JSON, ?::JSON)
+                 eligibility_reasons, quality_gate, evidence, feature_record, admission,
+                 policy_effects, candidate_score, relevance_score, policy_adjustment,
+                 known_status, backoff_stage)
+            VALUES (CAST(? AS UUID), ?, ?::JSON, ?, ?, ?, ?, ?::JSON, ?::JSON,
+                    ?::JSON, ?::JSON, ?::JSON, ?::JSON, ?, ?, ?, ?, ?)
             ON CONFLICT (run_id, artist_id) DO UPDATE SET
                 candidate_sources = excluded.candidate_sources,
                 max_source_score = excluded.max_source_score,
@@ -166,7 +174,16 @@ def _persist_candidates(
                 appeared_from_tag_count = excluded.appeared_from_tag_count,
                 eligibility_state = excluded.eligibility_state,
                 eligibility_reasons = excluded.eligibility_reasons,
-                quality_gate = excluded.quality_gate
+                quality_gate = excluded.quality_gate,
+                evidence = excluded.evidence,
+                feature_record = excluded.feature_record,
+                admission = excluded.admission,
+                policy_effects = excluded.policy_effects,
+                candidate_score = excluded.candidate_score,
+                relevance_score = excluded.relevance_score,
+                policy_adjustment = excluded.policy_adjustment,
+                known_status = excluded.known_status,
+                backoff_stage = excluded.backoff_stage
             """,
             rows,
         )
@@ -188,6 +205,43 @@ def _persist_candidates(
             subject="candidate rows",
             status="completed",
         )
+
+
+def _candidate_detail_values(
+    candidate: RankedCandidate, decision: PolicyDecision | None
+) -> list[object]:
+    score = candidate.legacy.score if candidate.legacy is not None else None
+    admission = candidate.admission or AdmissionDecision(score is not None, 0, ())
+    evidence = candidate.evidence or CandidateEvidence(candidate.artist_id, ())
+    features = asdict(candidate.features)
+    effects: dict[str, object] = {
+        "included": decision.included if decision is not None and score is not None else False,
+        "final_rank": decision.final_rank if decision is not None and score is not None else None,
+        "final_score": decision.final_score if decision is not None and score is not None else None,
+        "adjustment": decision.adjustment if decision is not None and score is not None else None,
+        "reasons": list(decision.reasons) if decision is not None else [],
+    }
+    assert candidate.legacy is not None
+    listening = candidate.legacy.retrieval.scoring_data.listening_by_artist.get(candidate.artist_id)
+    known_status = (
+        "rediscovery"
+        if score is not None and score.rediscovery_score > 0
+        else "known"
+        if (listening is not None and (listening[0] > 0 or listening[2] > 0))
+        or (score is not None and score.knownness > 0)
+        else "new"
+    )
+    return [
+        json.dumps(candidate_evidence_json(evidence), sort_keys=True, allow_nan=False),
+        json.dumps(features, sort_keys=True, allow_nan=False),
+        json.dumps(asdict(admission), sort_keys=True, allow_nan=False),
+        json.dumps(effects, sort_keys=True, allow_nan=False),
+        candidate.candidate_score if score is not None else None,
+        candidate.relevance_score if score is not None else None,
+        effects["adjustment"],
+        known_status,
+        admission.stage,
+    ]
 
 
 def _insert_run(conn: DuckDBPyConnection, payload: RecommendationRunPayload) -> None:
@@ -239,6 +293,10 @@ def _insert_run(conn: DuckDBPyConnection, payload: RecommendationRunPayload) -> 
                         "missing_fraction": idf_weights.missing_fraction,
                     },
                     "walk": _walk_run_summary(walk_result),
+                    "retrieval_diagnostics": {
+                        **payload.retrieval.diagnostics,
+                        "selected_count": sum(decision.included for decision in payload.decisions),
+                    },
                     "top_seeds": [
                         {
                             "artist": seed.name,

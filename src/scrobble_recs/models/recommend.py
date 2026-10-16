@@ -33,8 +33,7 @@ from scrobble_recs.models.recommendation_query import (
     RecommendationRequest,
     RecommendationVersions,
     TasteRegionSeed,
-    build_evidence_snapshot_id,
-    load_evidence_freshness,
+    capture_evidence_snapshot,
 )
 from scrobble_recs.models.recommendation_store import (
     RecommendationRunPayload,
@@ -48,7 +47,7 @@ from scrobble_recs.models.retrieval import (
     _load_seed_popularity,
     _load_user_tag_profile,
     _report_progress,
-    retrieve_legacy_candidates,
+    retrieve_with_backoff,
 )
 from scrobble_recs.models.retrieval import (
     RecommendationProgress as RecommendationProgress,
@@ -135,7 +134,9 @@ def generate_recommendations(
         regions=mode_settings.seed_regions,
         window=resolved_history_window,
     )
-    seeds = _add_feedback_seed_artists(conn, seeds, feedback_profile)
+    seeds = _add_feedback_seed_artists(
+        conn, seeds, feedback_profile, evidence_cutoff=historical_cutoff
+    )
     product_regions = {
         "lifetime": "core",
         "recent": "current",
@@ -149,6 +150,7 @@ def generate_recommendations(
         if resolved_mode in ("rediscovery", "old")
         else "discover"
     )
+    evidence_snapshot = capture_evidence_snapshot(conn, historical_cutoff=historical_cutoff)
     query_context = QueryContext(
         query_kind=resolved_request.query_kind,
         history_window=resolved_history_window,
@@ -164,15 +166,15 @@ def generate_recommendations(
             )
             for seed in seeds
         ),
-        evidence_snapshot_id=build_evidence_snapshot_id(conn, historical_cutoff=historical_cutoff),
-        evidence_freshness=load_evidence_freshness(conn, historical_cutoff=historical_cutoff),
+        evidence_snapshot_id=evidence_snapshot.snapshot_id,
+        evidence_freshness=evidence_snapshot.freshness,
         versions=RecommendationVersions(ranker=f"{config.recommendation.scoring.engine}-v1"),
         config_hash=_config_hash(config),
     )
     seed_ids = {seed.artist_id for seed in seeds}
     idf_weights = compute_seed_idf_weights(
         {seed.artist_id: seed.seed_weight for seed in seeds},
-        _load_seed_popularity(conn, seed_ids),
+        _load_seed_popularity(conn, seed_ids, evidence_cutoff=historical_cutoff),
         alpha=config.recommendation.scoring.seed_idf_alpha,
     )
     _report_progress(
@@ -196,6 +198,7 @@ def generate_recommendations(
         seeds,
         weak_tags=config.recommendation.tag_profile.weak_tags,
         weak_tag_penalty=config.recommendation.tag_profile.weak_tag_penalty,
+        evidence_cutoff=historical_cutoff,
     )
     effective_tag_profile = apply_feedback_to_tag_profile(
         _apply_tag_focus(tag_profile, mode_settings),
@@ -217,10 +220,11 @@ def generate_recommendations(
         subject="local graph",
         status="processing",
     )
-    retrieval = retrieve_legacy_candidates(
+    retrieval = retrieve_with_backoff(
         conn,
         context=query_context,
         config=config,
+        limit=limit,
         inputs=LegacyRetrievalInputs(
             tuple(seeds),
             feedback_profile,

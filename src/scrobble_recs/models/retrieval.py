@@ -5,14 +5,23 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
-from math import log
+from math import log, sqrt
 from typing import Literal, TypeAlias
 
 from duckdb import DuckDBPyConnection
 
 from scrobble_recs.config import ScrobbleRecsConfig
+from scrobble_recs.models.evidence import (
+    AdmissionDecision,
+    CandidateEvidence,
+    LegacyEvidenceRows,
+    is_legacy_compatible,
+    is_translated_legacy,
+    load_candidate_evidence,
+    load_legacy_evidence_rows,
+)
 from scrobble_recs.models.feedback import (
     FeedbackProfile,
     apply_feedback_to_tag_profile,
@@ -107,11 +116,15 @@ class RetrievalResult:
     candidates: tuple[RetrievalCandidate, ...]
     diagnostics: dict[str, object]
     legacy: LegacyRetrievalDetails | None = field(default=None, repr=False, compare=True)
+    evidence: dict[int, CandidateEvidence] = field(default_factory=dict)
+    admissions: dict[int, AdmissionDecision] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "candidates", deepcopy(tuple(self.candidates)))
         object.__setattr__(self, "diagnostics", deepcopy(self.diagnostics))
         object.__setattr__(self, "legacy", deepcopy(self.legacy))
+        object.__setattr__(self, "evidence", deepcopy(self.evidence))
+        object.__setattr__(self, "admissions", deepcopy(self.admissions))
 
 
 def _report_progress(
@@ -140,9 +153,13 @@ def _add_feedback_seed_artists(
     conn: DuckDBPyConnection,
     seeds: list[SeedArtist],
     feedback_profile: FeedbackProfile,
+    *,
+    evidence_cutoff: datetime | None = None,
 ) -> list[SeedArtist]:
     existing_seed_ids = {seed.artist_id for seed in seeds}
-    current_candidate_ids = _candidate_targets_from_seeds(conn, existing_seed_ids)
+    current_candidate_ids = _candidate_targets_from_seeds(
+        conn, existing_seed_ids, evidence_cutoff=evidence_cutoff
+    )
     feedback_seed_ids = sorted(
         feedback_profile.boosted_seed_artist_ids
         - feedback_profile.hidden_artist_ids
@@ -164,11 +181,12 @@ def _add_feedback_seed_artists(
             SELECT source_artist_id
             FROM artist_similarity_edge
             WHERE source = 'lastfm'
+              AND (? IS NULL OR fetched_at <= ?)
               AND source_artist_id IN (SELECT unnest(?))
         )
         ORDER BY a.canonical_name
         """,
-        [feedback_seed_ids],
+        [evidence_cutoff, evidence_cutoff, feedback_seed_ids],
     ).fetchall()
     feedback_seeds = [
         SeedArtist(
@@ -188,6 +206,8 @@ def _add_feedback_seed_artists(
 def _candidate_targets_from_seeds(
     conn: DuckDBPyConnection,
     seed_ids: set[int],
+    *,
+    evidence_cutoff: datetime | None = None,
 ) -> set[int]:
     if not seed_ids:
         return set()
@@ -198,9 +218,10 @@ def _candidate_targets_from_seeds(
             SELECT DISTINCT target_artist_id
             FROM artist_similarity_edge
             WHERE source = 'lastfm'
+              AND (? IS NULL OR fetched_at <= ?)
               AND source_artist_id IN (SELECT unnest(?))
             """,
-            [sorted(seed_ids)],
+            [evidence_cutoff, evidence_cutoff, sorted(seed_ids)],
         ).fetchall()
     }
 
@@ -211,6 +232,7 @@ def _load_user_tag_profile(
     *,
     weak_tags: list[str] | None = None,
     weak_tag_penalty: float = 1.0,
+    evidence_cutoff: datetime | None = None,
 ) -> dict[str, float]:
     profile: dict[str, float] = {}
     seed_weight_by_id = {seed.artist_id: seed.seed_weight for seed in seeds}
@@ -222,7 +244,9 @@ def _load_user_tag_profile(
         SELECT artist_id, tag, normalized_weight
         FROM artist_tag
         WHERE source = 'lastfm'
-        """
+          AND (? IS NULL OR fetched_at <= ?)
+        """,
+        [evidence_cutoff, evidence_cutoff],
     ).fetchall()
 
     normalized_weak_tags = {
@@ -257,6 +281,8 @@ def _load_user_tag_profile(
 def _load_seed_popularity(
     conn: DuckDBPyConnection,
     seed_ids: set[int],
+    *,
+    evidence_cutoff: datetime | None = None,
 ) -> dict[int, float]:
     """World-popularity proxy for seeds from ``tag_top_artist`` ranks.
 
@@ -274,9 +300,10 @@ def _load_seed_popularity(
         SELECT artist_id, tag_rank
         FROM tag_top_artist
         WHERE source = 'lastfm'
+          AND (? IS NULL OR fetched_at <= ?)
           AND artist_id IN (SELECT unnest(?))
         """,
-        [sorted(seed_ids)],
+        [evidence_cutoff, evidence_cutoff, sorted(seed_ids)],
     ).fetchall():
         popularity[int(artist_id)] = popularity.get(int(artist_id), 0.0) + _rank_affinity(
             int(tag_rank)
@@ -290,17 +317,22 @@ def _load_scoring_data(
     feedback_profile: FeedbackProfile,
     *,
     local_history_end: datetime | None = None,
+    evidence_cutoff: datetime | None = None,
+    legacy_rows: LegacyEvidenceRows | None = None,
 ) -> _ScoringData:
+    legacy_rows = legacy_rows or load_legacy_evidence_rows(conn, cutoff=evidence_cutoff)
     similarity_by_target: dict[int, list[tuple[int, float]]] = {}
     seed_graph: dict[int, dict[int, float]] = {seed_id: {} for seed_id in seed_ids}
     candidates = set[int]()
-    for source_artist_id, target_artist_id, normalized_score in conn.execute(
-        """
-        SELECT source_artist_id, target_artist_id, normalized_score
-        FROM artist_similarity_edge
-        WHERE source = 'lastfm'
-        """
-    ).fetchall():
+    for (
+        _source,
+        source_artist_id,
+        target_artist_id,
+        _raw,
+        normalized_score,
+        _fetched,
+        _payload,
+    ) in legacy_rows.similarities:
         source_id = int(source_artist_id)
         target_id = int(target_artist_id)
         edge_weight = float(normalized_score)
@@ -320,15 +352,17 @@ def _load_scoring_data(
         feedback_profile.boosted_seed_artist_ids | feedback_profile.suppressed_seed_artist_ids
     ) - feedback_profile.hidden_artist_ids
     if feedback_neighborhood_source_ids:
-        for source_artist_id, target_artist_id, normalized_score in conn.execute(
-            """
-            SELECT source_artist_id, target_artist_id, normalized_score
-            FROM artist_similarity_edge
-            WHERE source = 'lastfm'
-              AND source_artist_id IN (SELECT unnest(?))
-            """,
-            [sorted(feedback_neighborhood_source_ids)],
-        ).fetchall():
+        for (
+            _source,
+            source_artist_id,
+            target_artist_id,
+            _raw,
+            normalized_score,
+            _fetched,
+            _payload,
+        ) in legacy_rows.similarities:
+            if source_artist_id not in feedback_neighborhood_source_ids:
+                continue
             source_id = int(source_artist_id)
             target_id = int(target_artist_id)
             candidates.add(target_id)
@@ -337,25 +371,13 @@ def _load_scoring_data(
             )
 
     direct_tags_by_artist: dict[int, dict[str, float]] = {}
-    for artist_id, tag, normalized_weight in conn.execute(
-        """
-        SELECT artist_id, tag, normalized_weight
-        FROM artist_tag
-        WHERE source = 'lastfm'
-        """
-    ).fetchall():
+    for _source, artist_id, tag, _count, normalized_weight, _fetched in legacy_rows.artist_tags:
         direct_tags_by_artist.setdefault(int(artist_id), {})[_normalize_tag_key(tag)] = float(
             normalized_weight
         )
 
     tag_ranks_by_artist: dict[int, list[tuple[str, int]]] = {}
-    for artist_id, tag, tag_rank in conn.execute(
-        """
-        SELECT artist_id, tag, tag_rank
-        FROM tag_top_artist
-        WHERE source = 'lastfm'
-        """
-    ).fetchall():
+    for _source, artist_id, tag, tag_rank, _count, _fetched in legacy_rows.tag_memberships:
         artist = int(artist_id)
         candidates.add(artist)
         tag_ranks_by_artist.setdefault(artist, []).append((_normalize_tag_key(tag), int(tag_rank)))
@@ -512,6 +534,25 @@ def _candidate_tag_vector(
     return {**ranked_tags, **direct_tags}
 
 
+def _tag_similarity_score(
+    artist_id: int,
+    tag_profile: dict[str, float],
+    scoring_data: _ScoringData,
+) -> float:
+    """Shared legacy affinity for admission and subsequent relevance features."""
+    if not tag_profile:
+        return 0.0
+    candidate = _candidate_tag_vector(artist_id, scoring_data)
+    if not candidate:
+        return 0.0
+    dot = sum(tag_profile.get(tag, 0.0) * weight for tag, weight in candidate.items())
+    profile_norm = sqrt(sum(weight * weight for weight in tag_profile.values()))
+    candidate_norm = sqrt(sum(weight * weight for weight in candidate.values()))
+    if profile_norm == 0.0 or candidate_norm == 0.0:
+        return 0.0
+    return dot / (profile_norm * candidate_norm)
+
+
 def _normalize_tag_key(tag: object) -> str:
     return str(tag).strip().casefold()
 
@@ -578,9 +619,15 @@ def retrieve_legacy_candidates(
 ) -> RetrievalResult:
     """Read persisted legacy facts. Bare calls use the history-window end as as_of."""
     inputs = inputs or _inputs_from_context(conn, context, config)
+    legacy_rows = load_legacy_evidence_rows(conn, cutoff=context.feedback_cutoff)
     seed_ids = {seed.artist_id for seed in inputs.seeds}
     data = _load_scoring_data(
-        conn, seed_ids, inputs.feedback_profile, local_history_end=context.history_cutoff
+        conn,
+        seed_ids,
+        inputs.feedback_profile,
+        local_history_end=context.history_cutoff,
+        evidence_cutoff=context.feedback_cutoff,
+        legacy_rows=legacy_rows,
     )
     walk = (
         build_walk_result(
@@ -596,7 +643,10 @@ def retrieve_legacy_candidates(
         _retrieval_candidate(artist_id, data) for artist_id in sorted(data.candidates)
     )
     return RetrievalResult(
-        candidates, {"candidate_count": len(candidates)}, LegacyRetrievalDetails(inputs, data, walk)
+        candidates,
+        {"candidate_count": len(candidates)},
+        LegacyRetrievalDetails(inputs, data, walk),
+        load_candidate_evidence(conn, context=context, legacy_rows=legacy_rows),
     )
 
 
@@ -615,6 +665,149 @@ def _retrieval_candidate(artist_id: int, data: _ScoringData) -> RetrievalCandida
             "lastfm_similarity": max((score for _, score in edges), default=None),
             "tag_count": len(tags),
         },
+    )
+
+
+def retrieve_with_backoff(
+    conn: DuckDBPyConnection,
+    *,
+    context: QueryContext,
+    config: ScrobbleRecsConfig,
+    limit: int,
+    inputs: LegacyRetrievalInputs | None = None,
+    allow_low_confidence: bool = False,
+) -> RetrievalResult:
+    """Cumulative admission over the exhaustive persisted pool; never acquire provider data.
+
+    Retain every considered candidate for diagnostics. Admissions record the first
+    successful stage, even when later stages are needed to fill the requested pool.
+    """
+    from scrobble_recs.models.feedback import load_cooldown_artist_ids
+    from scrobble_recs.models.policy import (
+        _quality_gate_decision,
+        _walk_gate_decision,
+        candidate_eligibility,
+    )
+    from scrobble_recs.models.recommendation_quality import decide_candidate_admission
+
+    if limit < 1:
+        raise ValueError("limit must be positive")
+    result = retrieve_legacy_candidates(conn, context=context, config=config, inputs=inputs)
+    assert result.legacy is not None
+    details = result.legacy
+    evidence = result.evidence
+    seeds = {seed.artist_id for seed in details.inputs.seeds}
+    candidate_ids = ({row.artist_id for row in result.candidates} | set(evidence)) - seeds
+    # Artist tags alone do not introduce new legacy candidates.
+    legacy_ids = {row.artist_id for row in result.candidates}
+    candidate_ids = {
+        artist
+        for artist in candidate_ids
+        if artist in legacy_ids
+        or any(not is_translated_legacy(row) for row in evidence[artist].observations)
+    }
+    data = replace(details.scoring_data, candidates=candidate_ids)
+    literal_confidences = {
+        int(artist): float(confidence)
+        for artist, confidence in conn.execute(
+            "SELECT artist_id, coalesce(identity_confidence, .5) FROM artist"
+        ).fetchall()
+    }
+    cooldown = load_cooldown_artist_ids(
+        conn,
+        as_of=details.inputs.as_of,
+        days=config.recommendation.feedback_cooldown_days,
+        until=context.feedback_cutoff,
+    )
+    admissions: dict[int, AdmissionDecision] = {}
+    usable_ids = {
+        artist
+        for artist in candidate_ids
+        if candidate_eligibility(
+            artist,
+            seed_ids=seeds,
+            feedback_profile=details.inputs.feedback_profile,
+            cooldown_artist_ids=cooldown,
+            scoring_data=data,
+            mode=details.inputs.mode,
+            config=config,
+            tag_profile=details.inputs.tag_profile,
+            walk_result=details.walk_result,
+        ).eligible
+    }
+    stages: list[dict[str, object]] = []
+    for stage in range(5 if allow_low_confidence else 4):
+        for artist in sorted(candidate_ids):
+            if artist in admissions and admissions[artist].admitted:
+                continue
+            facts = evidence.get(artist, CandidateEvidence(artist, ()))
+            legacy_only = all(is_legacy_compatible(row) for row in facts.observations)
+            tag_score = _tag_similarity_score(artist, details.inputs.tag_profile, data)
+            node = details.walk_result.nodes.get(artist) if details.walk_result else None
+            walk_supported = bool(
+                node is not None
+                and 0 <= node.hop_distance <= config.recommendation.walk.max_hops
+                and _walk_gate_decision(node, config.recommendation.walk).passed
+            )
+            legacy_gate = _quality_gate_decision(
+                config,
+                details.inputs.mode,
+                edges=tuple(
+                    (source, weight)
+                    for source, weight in data.similarity_by_target.get(artist, ())
+                    if source in seeds
+                ),
+                tag_score=tag_score,
+                rediscovery_score=data.listening_by_artist.get(artist, (0, 0, 0, 0, None, None))[1],
+            )
+            legacy_policy_passed = (
+                artist in legacy_ids
+                and legacy_only
+                and (walk_supported if details.walk_result is not None else legacy_gate.passed)
+            )
+            confidence = (
+                data.identity_confidence_by_artist.get(artist, 0.5)
+                if legacy_policy_passed
+                else literal_confidences.get(artist, 0.5)
+            )
+            admissions[artist] = decide_candidate_admission(
+                facts,
+                stage=stage,
+                hidden=artist in details.inputs.feedback_profile.hidden_artist_ids,
+                strongly_rejected=artist in cooldown,
+                identity_confidence=confidence,
+                config=config.recommendation.discovery_evidence,
+                context=context,
+                tag_score=tag_score,
+                seed_ids=seeds,
+                walk_supported=walk_supported,
+                legacy_policy_passed=legacy_policy_passed,
+            )
+        admitted_count = sum(
+            row.admitted for artist, row in admissions.items() if artist in usable_ids
+        )
+        stages.append(
+            {
+                "stage": stage,
+                "admitted_count": admitted_count,
+                "depth_expansion": "legacy_exhaustive_noop" if stage == 1 else None,
+            }
+        )
+        if admitted_count >= limit:
+            break
+    return RetrievalResult(
+        tuple(_retrieval_candidate(artist, data) for artist in sorted(candidate_ids)),
+        {
+            **result.diagnostics,
+            "candidate_count": len(candidate_ids),
+            "backoff_stages": stages,
+            "requested_limit": limit,
+            "admitted_count": admitted_count,
+            "exhausted": admitted_count < limit,
+        },
+        replace(details, scoring_data=data),
+        evidence,
+        admissions,
     )
 
 
@@ -643,7 +836,9 @@ def _inputs_from_context(
     mode = resolve_recommendation_mode(context.mode, config)
     weights = compute_seed_idf_weights(
         {seed.artist_id: seed.seed_weight for seed in seeds},
-        _load_seed_popularity(conn, {seed.artist_id for seed in seeds}),
+        _load_seed_popularity(
+            conn, {seed.artist_id for seed in seeds}, evidence_cutoff=context.feedback_cutoff
+        ),
         alpha=config.recommendation.scoring.seed_idf_alpha,
     )
     profile = _load_user_tag_profile(
@@ -651,6 +846,7 @@ def _inputs_from_context(
         seeds,
         weak_tags=config.recommendation.tag_profile.weak_tags,
         weak_tag_penalty=config.recommendation.tag_profile.weak_tag_penalty,
+        evidence_cutoff=context.feedback_cutoff,
     )
     profile = apply_feedback_to_tag_profile(_apply_tag_focus(profile, mode), feedback)
     return LegacyRetrievalInputs(

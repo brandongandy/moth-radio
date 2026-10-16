@@ -154,9 +154,76 @@ def _freshness_json(freshness: EvidenceFreshness) -> dict[str, object]:
 def build_evidence_snapshot_id(
     conn: DuckDBPyConnection, *, historical_cutoff: datetime | None
 ) -> str:
-    """Hash counts/freshness, not full evidence contents, at an inclusive cutoff."""
-    summary = load_evidence_freshness(conn, historical_cutoff=historical_cutoff)
-    payload = json.dumps(
-        _freshness_json(summary), sort_keys=True, separators=(",", ":"), allow_nan=False
-    )
-    return sha256(payload.encode("utf-8")).hexdigest()
+    """Compatibility wrapper; run construction should reuse one captured snapshot."""
+    return capture_evidence_snapshot(conn, historical_cutoff=historical_cutoff).snapshot_id
+
+
+@dataclass(frozen=True)
+class EvidenceSnapshot:
+    snapshot_id: str
+    freshness: EvidenceFreshness
+
+
+def capture_evidence_snapshot(
+    conn: DuckDBPyConnection,
+    *,
+    historical_cutoff: datetime | None,
+) -> EvidenceSnapshot:
+    """Capture source summaries once, including canonical normalized/feedback identities."""
+    freshness = load_evidence_freshness(conn, historical_cutoff=historical_cutoff)
+    payload = _freshness_json(freshness)
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
+        ).fetchall()
+    }
+    cutoff = normalize_timestamp(historical_cutoff) if historical_cutoff else None
+    additions: list[tuple[str, int, datetime | None]] = []
+    for table, timestamp, fields, operator in (
+        (
+            "artist_evidence_observation",
+            "fetched_at",
+            "observation_id::VARCHAR, source, family, relationship_kind, observation_key, "
+            "source_artist_id, target_artist_id, raw_score, source_rank, provider_mode, "
+            "cache_key, payload_hash, identity_status, identity_confidence, evidence",
+            "<=",
+        ),
+        (
+            "feedback_event",
+            "created_at",
+            "feedback_id::VARCHAR, artist_id, action, value, context",
+            "<",
+        ),
+    ):
+        if table not in tables:
+            continue
+        rows = conn.execute(
+            f"SELECT {timestamp}, {fields} FROM {table} "
+            f"WHERE (? IS NULL OR {timestamp} {operator} ?)",
+            [cutoff, cutoff],
+        ).fetchall()
+        latest = max((row[0] for row in rows if row[0] is not None), default=None)
+        canonical = sorted(
+            json.dumps(
+                [
+                    _json_value(row[0]),
+                    *row[1:-1],
+                    json.loads(row[-1]) if row[-1] is not None else None,
+                ],
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+                allow_nan=False,
+            )
+            for row in rows
+        )
+        digest = sha256(json.dumps(canonical, separators=(",", ":")).encode()).hexdigest()
+        payload[table] = {
+            "row_count": len(rows),
+            "latest_at": _json_value(latest),
+            "payload_hash": digest,
+        }
+        additions.append((table, len(rows), latest))
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return EvidenceSnapshot(sha256(encoded.encode()).hexdigest(), freshness + tuple(additions))

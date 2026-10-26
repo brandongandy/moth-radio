@@ -122,3 +122,45 @@
 - The advisory three current-identity-map reads remain explicitly deferred in the execution ledger; no identity-capture or transaction redesign was added to this correction.
 - `.venv/bin/python -m pytest tests/test_evidence.py tests/test_config.py tests/test_retrieval.py tests/test_ranking.py tests/test_policy.py tests/test_recommendation_quality.py tests/test_recommendation_query.py tests/test_recommendation_store.py tests/test_recommend.py tests/test_evaluate.py tests/test_compare.py -q` — 271 passed (16.03 seconds).
 - `.venv/bin/python -m pytest` — 556 passed, no failures (33.98 seconds). Ruff lint passed; Ruff format reported 86 files already formatted; mypy reported no issues in 47 source files; diff checks were clean. Frozen control fingerprints and complete selected explanation fixtures remain unchanged.
+
+## 2026-10-26 — Set-based recommendation persistence
+
+- Replaced DuckDB `executemany` candidate writes with one typed
+  `INSERT ... SELECT FROM unnest(?)` statement for the complete candidate pool. Removed the
+  unnecessary conflict-update path: a new run UUID cannot already have candidate rows inside the
+  same transaction. Duplicate diagnostics retain the prior last-write-wins behavior by collapsing
+  to one row per artist before the set insert.
+- Replaced the per-result `conn.execute(INSERT ...)` loop with one typed set insert for every
+  selected recommendation. Python still constructs application-owned JSON, URL, identity, and rank
+  values; DuckDB receives each destination collection in one statement.
+- Preserved the transaction spanning run metadata, candidates, and selected results. A forced
+  result-set failure verifies that all three tables roll back. Empty candidate/result collections
+  remain valid, and candidate progress completes after the single statement returns.
+- Added a real-DuckDB execution-shape regression that rejects `executemany`, requires exactly one
+  candidate insert and one selected-result insert for multi-row inputs, and verifies the persisted
+  row counts.
+
+### Test-first evidence
+
+- RED: `.venv/bin/python -m pytest tests/test_recommendation_store.py -q` — 1 failed, 5 passed;
+  the guard caught candidate persistence calling `executemany`.
+- Intermediate RED after the candidate fix: the same command reported 1 failed, 5 passed because
+  two selected recommendations still produced two `recommendation` inserts.
+- GREEN: `.venv/bin/python -m pytest tests/test_recommendation_store.py -q` — 6 passed.
+- Focused pipeline verification:
+  `.venv/bin/python -m pytest tests/test_recommendation_store.py tests/test_recommend.py tests/test_retrieval.py tests/test_ranking.py tests/test_policy.py -q`
+  — 117 passed (5.56 seconds).
+- Review correction preserved the previous last-write-wins result for duplicate candidate
+  diagnostics before the set insert. Explicit empty-collection coverage verifies that no candidate
+  or result insert is issued, the run still commits, and candidate progress reports `0/0`
+  completion.
+- The exact persistence suite also passed with DuckDB 1.0.0, the declared dependency floor:
+  `PYTHONPATH="${compat_dir}:src" .venv/bin/python -m pytest tests/test_recommendation_store.py -q`
+  — 8 passed.
+- Final verification: `.venv/bin/python -m pytest` — 559 passed (28.46 seconds);
+  `.venv/bin/python -m ruff check .` — all checks passed;
+  `.venv/bin/python -m ruff format --check src tests` — 83 files already formatted;
+  `.venv/bin/python -m mypy src` — no issues in 47 source files; `git diff --check` — clean.
+- The broader `.venv/bin/python -m ruff format --check .` also inspected a pre-existing,
+  untracked `docs/superpowers/plans/2026-10-15-hybrid-recommendation-engine.md` and reported that
+  file would be reformatted. It was outside this change and left untouched.

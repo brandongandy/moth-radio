@@ -82,19 +82,102 @@ def test_run_payload_owns_retrieval_evidence_after_caller_mutation(stage_databas
     assert payload.ranked[0].legacy.retrieval.scoring_data.similarity_by_target[2] == [(1, 0.9)]
 
 
-def test_result_insert_failure_rolls_back_all_three_tables(stage_database):
+def test_store_persists_candidate_and_result_collections_with_one_statement_each(stage_database):
     store = import_module("scrobble_recs.models.recommendation_store")
     conn, payload = make_payload(stage_database)
 
-    class FailSecondResult:
-        results = 0
+    class SetBasedStatementGuard:
+        candidate_inserts = 0
+        recommendation_inserts = 0
 
         def execute(self, query, parameters=None):
+            normalized = " ".join(query.split())
+            if normalized.startswith("INSERT INTO recommendation_candidate "):
+                self.candidate_inserts += 1
+            elif normalized.startswith("INSERT INTO recommendation ("):
+                self.recommendation_inserts += 1
+            return (
+                conn.execute(query, parameters) if parameters is not None else conn.execute(query)
+            )
+
+        def executemany(self, query, parameters):
+            raise AssertionError("recommendation persistence must not use executemany")
+
+    guarded = SetBasedStatementGuard()
+    stats = store.persist_recommendation_run(guarded, payload=payload)
+
+    assert stats.recommendations == 2
+    assert guarded.candidate_inserts == 1
+    assert guarded.recommendation_inserts == 1
+    assert conn.execute("SELECT count(*) FROM recommendation_candidate").fetchone() == (3,)
+    assert conn.execute("SELECT count(*) FROM recommendation").fetchone() == (2,)
+
+
+def test_store_preserves_last_duplicate_candidate_diagnostic(stage_database):
+    store = import_module("scrobble_recs.models.recommendation_store")
+    conn, payload = make_payload(stage_database)
+    original = payload.scorer_diagnostics[0]
+    later = replace(original, state="rejected", reasons=("later_duplicate",))
+    duplicate_payload = replace(payload, scorer_diagnostics=(original, later))
+
+    store.persist_recommendation_run(conn, payload=duplicate_payload)
+
+    assert conn.execute(
+        "SELECT eligibility_state, eligibility_reasons "
+        "FROM recommendation_candidate WHERE artist_id = ?",
+        [original.artist_id],
+    ).fetchone() == ("rejected", '["later_duplicate"]')
+
+
+def test_store_skips_set_inserts_for_empty_collections(stage_database):
+    store = import_module("scrobble_recs.models.recommendation_store")
+    conn, payload = make_payload(stage_database)
+    empty_payload = replace(
+        payload,
+        retrieval=replace(payload.retrieval, candidates=(), evidence={}, admissions={}),
+        ranked=(),
+        decisions=(),
+        scorer_diagnostics=(),
+    )
+    events = []
+
+    class EmptyInsertGuard:
+        def execute(self, query, parameters=None):
+            normalized = " ".join(query.split())
+            assert not normalized.startswith("INSERT INTO recommendation_candidate ")
+            assert not normalized.startswith("INSERT INTO recommendation (")
+            return (
+                conn.execute(query, parameters) if parameters is not None else conn.execute(query)
+            )
+
+        def executemany(self, query, parameters):
+            raise AssertionError("empty recommendation persistence must not use executemany")
+
+    stats = store.persist_recommendation_run(
+        EmptyInsertGuard(), payload=empty_payload, progress_callback=events.append
+    )
+
+    assert stats.recommendations == 0
+    assert conn.execute("SELECT count(*) FROM recommendation_run").fetchone() == (1,)
+    assert conn.execute("SELECT count(*) FROM recommendation_candidate").fetchone() == (0,)
+    assert conn.execute("SELECT count(*) FROM recommendation").fetchone() == (0,)
+    assert [(event.phase, event.current, event.total, event.status) for event in events] == [
+        ("persist_candidates", 0, 0, "processing"),
+        ("persist_candidates", 0, 0, "completed"),
+    ]
+
+
+def test_result_set_insert_failure_rolls_back_all_three_tables(stage_database):
+    store = import_module("scrobble_recs.models.recommendation_store")
+    conn, payload = make_payload(stage_database)
+
+    class FailResultSet:
+        def execute(self, query, parameters=None):
             if "INSERT INTO recommendation (" in query:
-                self.results += 1
-                if self.results == 2:
-                    assert conn.execute("SELECT count(*) FROM recommendation").fetchone() == (1,)
-                    raise RuntimeError("forced second result failure")
+                assert conn.execute("SELECT count(*) FROM recommendation_candidate").fetchone() == (
+                    3,
+                )
+                raise RuntimeError("forced result set failure")
             return (
                 conn.execute(query, parameters) if parameters is not None else conn.execute(query)
             )
@@ -102,8 +185,8 @@ def test_result_insert_failure_rolls_back_all_three_tables(stage_database):
         def executemany(self, query, parameters):
             return conn.executemany(query, parameters)
 
-    with pytest.raises(RuntimeError, match="forced second result failure"):
-        store.persist_recommendation_run(FailSecondResult(), payload=payload)
+    with pytest.raises(RuntimeError, match="forced result set failure"):
+        store.persist_recommendation_run(FailResultSet(), payload=payload)
     for table in ("recommendation_run", "recommendation_candidate", "recommendation"):
         assert conn.execute(f"SELECT count(*) FROM {table}").fetchone() == (0,)
 

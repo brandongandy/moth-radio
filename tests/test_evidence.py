@@ -987,10 +987,8 @@ def test_backoff_counts_usable_candidates_after_mode_exclusions(stage_database, 
     )
 
 
-@pytest.mark.parametrize("extra,expected_batches", [(0, [3]), (998, [1000, 1])])
-def test_candidate_details_are_written_in_existing_insert_batches(
-    stage_database, extra, expected_batches
-):
+@pytest.mark.parametrize("extra,expected_rows", [(0, 3), (998, 1001)])
+def test_candidate_details_are_written_in_one_set_insert(stage_database, extra, expected_rows):
     from scrobble_recs.models.policy import apply_slate_policy
     from scrobble_recs.models.ranking import rank_candidates
     from scrobble_recs.models.recommendation_store import (
@@ -1024,21 +1022,22 @@ def test_candidate_details_are_written_in_existing_insert_batches(
         tuple(row.legacy.diagnostic for row in ranked),
         "explicit",
     )
-    batches, updates = [], []
+    inserts, updates = [], []
 
     class ObservedConnection:
         def execute(self, sql, parameters=None):
-            if "update recommendation_candidate" in sql.lower():
+            normalized = " ".join(sql.lower().split())
+            if normalized.startswith("insert into recommendation_candidate "):
+                inserts.append(len(parameters[0]))
+            if "update recommendation_candidate" in normalized:
                 updates.append(sql)
             return conn.execute(sql, parameters) if parameters is not None else conn.execute(sql)
 
         def executemany(self, sql, parameters):
-            if "insert into recommendation_candidate" in sql.lower():
-                batches.append(len(parameters))
-            return conn.executemany(sql, parameters)
+            raise AssertionError("candidate persistence must not use executemany")
 
     persist_recommendation_run(ObservedConnection(), payload=payload)
-    assert batches == expected_batches
+    assert inserts == [expected_rows]
     assert updates == []
     assert conn.execute(
         "SELECT count(*) FROM recommendation_candidate "

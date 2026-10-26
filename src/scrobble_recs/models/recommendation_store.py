@@ -135,29 +135,35 @@ def _persist_candidates(
         subject="candidate rows",
         status="processing",
     )
-    batch_size = 1_000
-    for start in range(0, total, batch_size):
-        batch = diagnostics[start : start + batch_size]
-        rows: list[list[object]] = []
-        for diagnostic in batch:
-            artist_id = diagnostic.artist_id
-            sources = scoring_data.similarity_by_target.get(artist_id, [])
-            tags = scoring_data.tag_ranks_by_artist.get(artist_id, [])
-            rows.append(
-                [
-                    payload.run_id,
-                    artist_id,
-                    json.dumps([int(source[0]) for source in sources]),
-                    float(max((source[1] for source in sources), default=0.0)),
-                    len(sources),
-                    len(tags),
-                    diagnostic.state,
-                    json.dumps(list(diagnostic.reasons)),
-                    json.dumps(diagnostic.quality_gate, sort_keys=True),
-                ]
-                + _candidate_detail_values(ranked[artist_id], decisions.get(artist_id))
-            )
-        conn.executemany(
+    rows_by_artist: dict[int, dict[str, object]] = {}
+    for diagnostic in diagnostics:
+        artist_id = diagnostic.artist_id
+        sources = scoring_data.similarity_by_target.get(artist_id, [])
+        tags = scoring_data.tag_ranks_by_artist.get(artist_id, [])
+        detail_values = _candidate_detail_values(ranked[artist_id], decisions.get(artist_id))
+        rows_by_artist[artist_id] = {
+            "run_id": payload.run_id,
+            "artist_id": artist_id,
+            "candidate_sources": json.dumps([int(source[0]) for source in sources]),
+            "max_source_score": float(max((source[1] for source in sources), default=0.0)),
+            "appeared_from_seed_count": len(sources),
+            "appeared_from_tag_count": len(tags),
+            "eligibility_state": diagnostic.state,
+            "eligibility_reasons": json.dumps(list(diagnostic.reasons)),
+            "quality_gate": json.dumps(diagnostic.quality_gate, sort_keys=True),
+            "evidence": detail_values[0],
+            "feature_record": detail_values[1],
+            "admission": detail_values[2],
+            "policy_effects": detail_values[3],
+            "candidate_score": detail_values[4],
+            "relevance_score": detail_values[5],
+            "policy_adjustment": detail_values[6],
+            "known_status": detail_values[7],
+            "backoff_stage": detail_values[8],
+        }
+    rows = list(rows_by_artist.values())
+    if rows:
+        conn.execute(
             """
             INSERT INTO recommendation_candidate
                 (run_id, artist_id, candidate_sources, max_source_score,
@@ -165,46 +171,37 @@ def _persist_candidates(
                  eligibility_reasons, quality_gate, evidence, feature_record, admission,
                  policy_effects, candidate_score, relevance_score, policy_adjustment,
                  known_status, backoff_stage)
-            VALUES (CAST(? AS UUID), ?, ?::JSON, ?, ?, ?, ?, ?::JSON, ?::JSON,
-                    ?::JSON, ?::JSON, ?::JSON, ?::JSON, ?, ?, ?, ?, ?)
-            ON CONFLICT (run_id, artist_id) DO UPDATE SET
-                candidate_sources = excluded.candidate_sources,
-                max_source_score = excluded.max_source_score,
-                appeared_from_seed_count = excluded.appeared_from_seed_count,
-                appeared_from_tag_count = excluded.appeared_from_tag_count,
-                eligibility_state = excluded.eligibility_state,
-                eligibility_reasons = excluded.eligibility_reasons,
-                quality_gate = excluded.quality_gate,
-                evidence = excluded.evidence,
-                feature_record = excluded.feature_record,
-                admission = excluded.admission,
-                policy_effects = excluded.policy_effects,
-                candidate_score = excluded.candidate_score,
-                relevance_score = excluded.relevance_score,
-                policy_adjustment = excluded.policy_adjustment,
-                known_status = excluded.known_status,
-                backoff_stage = excluded.backoff_stage
+            SELECT
+                row.run_id::UUID,
+                row.artist_id::UBIGINT,
+                row.candidate_sources::JSON,
+                row.max_source_score::DOUBLE,
+                row.appeared_from_seed_count::INTEGER,
+                row.appeared_from_tag_count::INTEGER,
+                row.eligibility_state::VARCHAR,
+                row.eligibility_reasons::JSON,
+                row.quality_gate::JSON,
+                row.evidence::JSON,
+                row.feature_record::JSON,
+                row.admission::JSON,
+                row.policy_effects::JSON,
+                row.candidate_score::DOUBLE,
+                row.relevance_score::DOUBLE,
+                row.policy_adjustment::DOUBLE,
+                row.known_status::VARCHAR,
+                row.backoff_stage::INTEGER
+            FROM unnest(?) AS candidate_rows(row)
             """,
-            rows,
+            [rows],
         )
-        persisted = start + len(batch)
-        _report_progress(
-            progress_callback,
-            phase="persist_candidates",
-            current=persisted,
-            total=total,
-            subject="candidate rows",
-            status="completed" if persisted == total else "processing",
-        )
-    if total == 0:
-        _report_progress(
-            progress_callback,
-            phase="persist_candidates",
-            current=0,
-            total=0,
-            subject="candidate rows",
-            status="completed",
-        )
+    _report_progress(
+        progress_callback,
+        phase="persist_candidates",
+        current=total,
+        total=total,
+        subject="candidate rows",
+        status="completed",
+    )
 
 
 def _candidate_detail_values(
@@ -370,6 +367,7 @@ def _persist_recommendations(
         ).fetchall()
     }
 
+    rows: list[dict[str, object]] = []
     for rank, score in enumerate(ranked, start=1):
         if getattr(score, "score_band", "") == "candidate_only":
             effective_rank = candidate_only_offset
@@ -380,6 +378,43 @@ def _persist_recommendations(
         mbid_val = identity[1]
         lastfm_url_val = f"https://www.last.fm/music/{quote(score.artist_name, safe='')}"
         musicbrainz_url_val = f"https://musicbrainz.org/artist/{mbid_val}" if mbid_val else ""
+        rows.append(
+            {
+                "run_id": run_id,
+                "rank": effective_rank,
+                "artist_id": score.artist_id,
+                "final_score": score.final_score,
+                "raw_score": score.raw_score,
+                "lastfm_similarity_score": score.lastfm_similarity_score,
+                "tag_similarity_score": score.tag_similarity_score,
+                "cluster_fit_score": 0.0,
+                "rediscovery_score": score.rediscovery_score,
+                "metadata_graph_score": 0.0,
+                "feedback_score": score.feedback_score,
+                "knownness": score.knownness,
+                "obviousness": score.obviousness,
+                "diversity_penalty": score.diversity_penalty,
+                "explanation": json.dumps(score.explanation),
+                "score_band": score.score_band,
+                "evidence_source_count": score.evidence_source_count,
+                "local_scrobble_count": score.local_scrobble_count,
+                "listened_day_count": score.listened_day_count,
+                "first_listened_at": score.first_listened_at,
+                "last_listened_at": score.last_listened_at,
+                "years_since_last_listen": score.years_since_last_listen,
+                "rediscovery_eligible": score.rediscovery_eligible,
+                "trial_penalty": score.trial_penalty,
+                "candidate_artist_name": score.artist_name,
+                "canonical_artist_name": identity[0],
+                "musicbrainz_artist_mbid": identity[1],
+                "lastfm_url": lastfm_url_val,
+                "musicbrainz_url": musicbrainz_url_val,
+                "identity_confidence": identity[2],
+                "identity_warnings": identity[3],
+                "hop_distance": score.hop_distance,
+            }
+        )
+    if rows:
         conn.execute(
             """
             INSERT INTO recommendation (
@@ -416,45 +451,40 @@ def _persist_recommendations(
                 identity_warnings,
                 hop_distance
             )
-            VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?
-            )
+            SELECT
+                row.run_id::UUID,
+                row.rank::INTEGER,
+                row.artist_id::UBIGINT,
+                row.final_score::DOUBLE,
+                row.raw_score::DOUBLE,
+                row.lastfm_similarity_score::DOUBLE,
+                row.tag_similarity_score::DOUBLE,
+                row.cluster_fit_score::DOUBLE,
+                row.rediscovery_score::DOUBLE,
+                row.metadata_graph_score::DOUBLE,
+                row.feedback_score::DOUBLE,
+                row.knownness::DOUBLE,
+                row.obviousness::DOUBLE,
+                row.diversity_penalty::DOUBLE,
+                row.explanation::JSON,
+                row.score_band::VARCHAR,
+                row.evidence_source_count::INTEGER,
+                row.local_scrobble_count::INTEGER,
+                row.listened_day_count::INTEGER,
+                row.first_listened_at::TIMESTAMP,
+                row.last_listened_at::TIMESTAMP,
+                row.years_since_last_listen::DOUBLE,
+                row.rediscovery_eligible::BOOLEAN,
+                row.trial_penalty::DOUBLE,
+                row.candidate_artist_name::VARCHAR,
+                row.canonical_artist_name::VARCHAR,
+                row.musicbrainz_artist_mbid::VARCHAR,
+                row.lastfm_url::VARCHAR,
+                row.musicbrainz_url::VARCHAR,
+                row.identity_confidence::DOUBLE,
+                row.identity_warnings::VARCHAR,
+                row.hop_distance::INTEGER
+            FROM unnest(?) AS recommendation_rows(row)
             """,
-            [
-                run_id,
-                effective_rank,
-                score.artist_id,
-                score.final_score,
-                score.raw_score,
-                score.lastfm_similarity_score,
-                score.tag_similarity_score,
-                0.0,
-                score.rediscovery_score,
-                0.0,
-                score.feedback_score,
-                score.knownness,
-                score.obviousness,
-                score.diversity_penalty,
-                json.dumps(score.explanation),
-                score.score_band,
-                score.evidence_source_count,
-                score.local_scrobble_count,
-                score.listened_day_count,
-                score.first_listened_at,
-                score.last_listened_at,
-                score.years_since_last_listen,
-                score.rediscovery_eligible,
-                score.trial_penalty,
-                score.artist_name,
-                identity[0],
-                identity[1],
-                lastfm_url_val,
-                musicbrainz_url_val,
-                identity[2],
-                identity[3],
-                score.hop_distance,
-            ],
+            [rows],
         )

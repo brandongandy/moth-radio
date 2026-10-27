@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import csv
 import json
 from copy import deepcopy
 from dataclasses import asdict, dataclass
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 from urllib.parse import quote
 
 from duckdb import DuckDBPyConnection
@@ -26,6 +29,8 @@ from scrobble_recs.models.retrieval import (
     _report_progress,
 )
 from scrobble_recs.models.walk import WalkResult
+
+_CANDIDATE_STAGING_PROGRESS_INTERVAL = 10_000
 
 
 @dataclass(frozen=True)
@@ -126,7 +131,10 @@ def _persist_candidates(
     diagnostics = payload.scorer_diagnostics
     ranked = {row.artist_id: row for row in payload.ranked}
     decisions = {row.artist_id: row for row in payload.decisions}
-    total = len(diagnostics)
+    diagnostics_by_artist: dict[int, _CandidateDiagnostic] = {}
+    for diagnostic in diagnostics:
+        diagnostics_by_artist[diagnostic.artist_id] = diagnostic
+    total = len(diagnostics_by_artist)
     _report_progress(
         progress_callback,
         phase="persist_candidates",
@@ -135,65 +143,93 @@ def _persist_candidates(
         subject="candidate rows",
         status="processing",
     )
-    rows_by_artist: dict[int, dict[str, object]] = {}
-    for diagnostic in diagnostics:
-        artist_id = diagnostic.artist_id
-        sources = scoring_data.similarity_by_target.get(artist_id, [])
-        tags = scoring_data.tag_ranks_by_artist.get(artist_id, [])
-        detail_values = _candidate_detail_values(ranked[artist_id], decisions.get(artist_id))
-        rows_by_artist[artist_id] = {
-            "run_id": payload.run_id,
-            "artist_id": artist_id,
-            "candidate_sources": json.dumps([int(source[0]) for source in sources]),
-            "max_source_score": float(max((source[1] for source in sources), default=0.0)),
-            "appeared_from_seed_count": len(sources),
-            "appeared_from_tag_count": len(tags),
-            "eligibility_state": diagnostic.state,
-            "eligibility_reasons": json.dumps(list(diagnostic.reasons)),
-            "quality_gate": json.dumps(diagnostic.quality_gate, sort_keys=True),
-            "evidence": detail_values[0],
-            "feature_record": detail_values[1],
-            "admission": detail_values[2],
-            "policy_effects": detail_values[3],
-            "candidate_score": detail_values[4],
-            "relevance_score": detail_values[5],
-            "policy_adjustment": detail_values[6],
-            "known_status": detail_values[7],
-            "backoff_stage": detail_values[8],
-        }
-    rows = list(rows_by_artist.values())
-    if rows:
-        conn.execute(
-            """
-            INSERT INTO recommendation_candidate
-                (run_id, artist_id, candidate_sources, max_source_score,
-                 appeared_from_seed_count, appeared_from_tag_count, eligibility_state,
-                 eligibility_reasons, quality_gate, evidence, feature_record, admission,
-                 policy_effects, candidate_score, relevance_score, policy_adjustment,
-                 known_status, backoff_stage)
-            SELECT
-                row.run_id::UUID,
-                row.artist_id::UBIGINT,
-                row.candidate_sources::JSON,
-                row.max_source_score::DOUBLE,
-                row.appeared_from_seed_count::INTEGER,
-                row.appeared_from_tag_count::INTEGER,
-                row.eligibility_state::VARCHAR,
-                row.eligibility_reasons::JSON,
-                row.quality_gate::JSON,
-                row.evidence::JSON,
-                row.feature_record::JSON,
-                row.admission::JSON,
-                row.policy_effects::JSON,
-                row.candidate_score::DOUBLE,
-                row.relevance_score::DOUBLE,
-                row.policy_adjustment::DOUBLE,
-                row.known_status::VARCHAR,
-                row.backoff_stage::INTEGER
-            FROM unnest(?) AS candidate_rows(row)
-            """,
-            [rows],
-        )
+    stage_path: Path | None = None
+    try:
+        if diagnostics_by_artist:
+            with NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="",
+                prefix="scrobble-recs-candidates-",
+                suffix=".csv",
+                delete=False,
+            ) as stage_file:
+                stage_path = Path(stage_file.name)
+                writer = csv.writer(stage_file)
+                for current, diagnostic in enumerate(diagnostics_by_artist.values(), start=1):
+                    artist_id = diagnostic.artist_id
+                    sources = scoring_data.similarity_by_target.get(artist_id, [])
+                    tags = scoring_data.tag_ranks_by_artist.get(artist_id, [])
+                    detail_values = _candidate_detail_values(
+                        ranked[artist_id], decisions.get(artist_id)
+                    )
+                    writer.writerow(
+                        [
+                            payload.run_id,
+                            artist_id,
+                            json.dumps([int(source[0]) for source in sources]),
+                            float(max((source[1] for source in sources), default=0.0)),
+                            len(sources),
+                            len(tags),
+                            diagnostic.state,
+                            json.dumps(list(diagnostic.reasons)),
+                            json.dumps(diagnostic.quality_gate, sort_keys=True),
+                        ]
+                        + detail_values
+                    )
+                    if current % _CANDIDATE_STAGING_PROGRESS_INTERVAL == 0 and current < total:
+                        _report_progress(
+                            progress_callback,
+                            phase="persist_candidates",
+                            current=current,
+                            total=total,
+                            subject="candidate rows",
+                            status="processing",
+                        )
+            conn.execute(
+                """
+                INSERT INTO recommendation_candidate
+                    (run_id, artist_id, candidate_sources, max_source_score,
+                     appeared_from_seed_count, appeared_from_tag_count, eligibility_state,
+                     eligibility_reasons, quality_gate, evidence, feature_record, admission,
+                     policy_effects, candidate_score, relevance_score, policy_adjustment,
+                     known_status, backoff_stage)
+                SELECT
+                    run_id, artist_id, candidate_sources, max_source_score,
+                    appeared_from_seed_count, appeared_from_tag_count, eligibility_state,
+                    eligibility_reasons, quality_gate, evidence, feature_record, admission,
+                    policy_effects, candidate_score, relevance_score, policy_adjustment,
+                    known_status, backoff_stage
+                FROM read_csv(
+                    ?,
+                    header = false,
+                    columns = {
+                        'run_id': 'UUID',
+                        'artist_id': 'UBIGINT',
+                        'candidate_sources': 'JSON',
+                        'max_source_score': 'DOUBLE',
+                        'appeared_from_seed_count': 'INTEGER',
+                        'appeared_from_tag_count': 'INTEGER',
+                        'eligibility_state': 'VARCHAR',
+                        'eligibility_reasons': 'JSON',
+                        'quality_gate': 'JSON',
+                        'evidence': 'JSON',
+                        'feature_record': 'JSON',
+                        'admission': 'JSON',
+                        'policy_effects': 'JSON',
+                        'candidate_score': 'DOUBLE',
+                        'relevance_score': 'DOUBLE',
+                        'policy_adjustment': 'DOUBLE',
+                        'known_status': 'VARCHAR',
+                        'backoff_stage': 'INTEGER'
+                    }
+                )
+                """,
+                [str(stage_path)],
+            )
+    finally:
+        if stage_path is not None:
+            stage_path.unlink(missing_ok=True)
     _report_progress(
         progress_callback,
         phase="persist_candidates",

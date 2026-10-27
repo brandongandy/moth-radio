@@ -164,3 +164,41 @@
 - The broader `.venv/bin/python -m ruff format --check .` also inspected a pre-existing,
   untracked `docs/superpowers/plans/2026-10-15-hybrid-recommendation-engine.md` and reported that
   file would be reformatted. It was outside this change and left untouched.
+
+## 2026-10-26 — Streaming candidate bulk persistence
+
+- Replaced the single Python `list[dict]` candidate parameter with a streaming CSV staging file
+  and one typed, parameterized `INSERT ... FROM read_csv(?)`. This avoids DuckDB's expensive
+  Python-to-`STRUCT[]` conversion and bounds the additional persistence memory instead of
+  materializing all candidate row dictionaries at once.
+- Preserved one transaction across run metadata, candidates, and selected results. Candidate
+  diagnostics still use last-write-wins deduplication, nullable values remain SQL nulls, and empty
+  candidate collections remain valid. The selected-recommendation set insert is unchanged.
+- The staging file is created with the platform's secure temporary-file facility, closed before
+  DuckDB reads it, and removed in `finally` after success, database failure, serialization failure,
+  or interruption. The path remains a bound parameter rather than interpolated SQL.
+- Candidate progress now advances every 10,000 staged rows before the final completion event, so a
+  large local run no longer displays `0/N` for the entire persistence phase.
+
+### Test-first evidence, benchmark, and verification
+
+- RED: `.venv/bin/python -m pytest tests/test_recommendation_store.py -q` — 3 failed, 7 passed.
+  The execution guard rejected `INSERT ... FROM unnest(?)`, the injected bulk-load failure was not
+  reached, and the expected incremental progress event was absent.
+- Initial GREEN on DuckDB 1.5.5: the same suite passed 10 tests after streaming to CSV and loading
+  with `COPY`. Compatibility RED then showed 6 failures on DuckDB 1.0.0 because that version does
+  not parse a path parameter in `COPY ... FROM ?`.
+- Compatibility correction: parameterized `read_csv(?)` uses the same bulk CSV scanner and works on
+  the declared DuckDB floor without SQL path interpolation. The exact persistence suite passed all
+  10 tests on DuckDB 1.0.0 and DuckDB 1.5.5.
+- Focused integration verification:
+  `.venv/bin/python -m pytest tests/test_recommendation_store.py tests/test_recommend.py tests/test_evidence.py -q`
+  — 177 passed (6.64 seconds), including 1,001 candidate rows, persisted JSON/null values, cleanup,
+  progress, duplicate behavior, and rollback.
+- Representative 50,000-row transport benchmark with 2,519 JSON bytes per row and a 134.8 MiB
+  staging file: the prior nested-parameter execution took 54.75 seconds; streaming and the typed CSV
+  bulk scan took 1.35 seconds total (0.97 seconds staging, 0.38 seconds loading), about 40x faster.
+- Final verification: `.venv/bin/python -m pytest -q` — 561 passed (27.08 seconds);
+  `.venv/bin/python -m ruff check src tests` — all checks passed;
+  `.venv/bin/python -m ruff format --check src tests` — 83 files already formatted;
+  `.venv/bin/python -m mypy src` — no issues in 47 source files; `git diff --check` — clean.

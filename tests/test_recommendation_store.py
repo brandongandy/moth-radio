@@ -3,6 +3,7 @@
 from copy import deepcopy
 from dataclasses import replace
 from importlib import import_module, util
+from pathlib import Path
 
 import pytest
 from test_retrieval import stage_database as stage_database
@@ -82,18 +83,25 @@ def test_run_payload_owns_retrieval_evidence_after_caller_mutation(stage_databas
     assert payload.ranked[0].legacy.retrieval.scoring_data.similarity_by_target[2] == [(1, 0.9)]
 
 
-def test_store_persists_candidate_and_result_collections_with_one_statement_each(stage_database):
+def test_store_bulk_loads_candidates_and_removes_staging_file(stage_database):
     store = import_module("scrobble_recs.models.recommendation_store")
     conn, payload = make_payload(stage_database)
 
-    class SetBasedStatementGuard:
-        candidate_inserts = 0
+    class BulkLoadStatementGuard:
+        candidate_bulk_loads = 0
+        candidate_stage_paths: list[Path] = []
         recommendation_inserts = 0
 
         def execute(self, query, parameters=None):
             normalized = " ".join(query.split())
             if normalized.startswith("INSERT INTO recommendation_candidate "):
-                self.candidate_inserts += 1
+                if "FROM read_csv(" not in normalized:
+                    raise AssertionError("candidate persistence must use the CSV bulk scanner")
+                self.candidate_bulk_loads += 1
+                assert parameters is not None
+                stage_path = Path(parameters[0])
+                assert stage_path.is_file()
+                self.candidate_stage_paths.append(stage_path)
             elif normalized.startswith("INSERT INTO recommendation ("):
                 self.recommendation_inserts += 1
             return (
@@ -103,14 +111,66 @@ def test_store_persists_candidate_and_result_collections_with_one_statement_each
         def executemany(self, query, parameters):
             raise AssertionError("recommendation persistence must not use executemany")
 
-    guarded = SetBasedStatementGuard()
+    guarded = BulkLoadStatementGuard()
     stats = store.persist_recommendation_run(guarded, payload=payload)
 
     assert stats.recommendations == 2
-    assert guarded.candidate_inserts == 1
+    assert guarded.candidate_bulk_loads == 1
+    assert len(guarded.candidate_stage_paths) == 1
+    assert not guarded.candidate_stage_paths[0].exists()
     assert guarded.recommendation_inserts == 1
     assert conn.execute("SELECT count(*) FROM recommendation_candidate").fetchone() == (3,)
     assert conn.execute("SELECT count(*) FROM recommendation").fetchone() == (2,)
+
+
+def test_candidate_bulk_load_failure_removes_staging_file_and_rolls_back(stage_database):
+    store = import_module("scrobble_recs.models.recommendation_store")
+    conn, payload = make_payload(stage_database)
+
+    class FailCandidateBulkLoad:
+        stage_path: Path | None = None
+
+        def execute(self, query, parameters=None):
+            normalized = " ".join(query.split())
+            if normalized.startswith("INSERT INTO recommendation_candidate ") and (
+                "FROM read_csv(" in normalized
+            ):
+                assert parameters is not None
+                self.stage_path = Path(parameters[0])
+                assert self.stage_path.is_file()
+                raise RuntimeError("forced candidate bulk load failure")
+            return (
+                conn.execute(query, parameters) if parameters is not None else conn.execute(query)
+            )
+
+        def executemany(self, query, parameters):
+            raise AssertionError("recommendation persistence must not use executemany")
+
+    guarded = FailCandidateBulkLoad()
+    with pytest.raises(RuntimeError, match="forced candidate bulk load failure"):
+        store.persist_recommendation_run(guarded, payload=payload)
+
+    assert guarded.stage_path is not None
+    assert not guarded.stage_path.exists()
+    for table in ("recommendation_run", "recommendation_candidate", "recommendation"):
+        assert conn.execute(f"SELECT count(*) FROM {table}").fetchone() == (0,)
+
+
+def test_candidate_staging_reports_incremental_progress(stage_database, monkeypatch):
+    store = import_module("scrobble_recs.models.recommendation_store")
+    conn, payload = make_payload(stage_database)
+    events = []
+    monkeypatch.setattr(store, "_CANDIDATE_STAGING_PROGRESS_INTERVAL", 2, raising=False)
+
+    store.persist_recommendation_run(conn, payload=payload, progress_callback=events.append)
+
+    assert [
+        (event.phase, event.current, event.total, event.subject, event.status) for event in events
+    ] == [
+        ("persist_candidates", 0, 3, "candidate rows", "processing"),
+        ("persist_candidates", 2, 3, "candidate rows", "processing"),
+        ("persist_candidates", 3, 3, "candidate rows", "completed"),
+    ]
 
 
 def test_store_preserves_last_duplicate_candidate_diagnostic(stage_database):

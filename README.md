@@ -105,7 +105,7 @@ scrobble-recs export --config ./config.json --output recs.csv --format csv
 scrobble-recs tui --config ./config.json
 ```
 
-`recommend` reads the current local evidence snapshot and persists the run, including considered candidates and inspectable evidence/admission/ranking/policy data. It does not call Last.fm or MusicBrainz.
+`recommend` reads the current local evidence snapshot and persists the run, including considered candidates and inspectable evidence/admission/ranking/policy data. It does not call provider APIs.
 
 `export` and the Textual TUI read that persisted run; neither makes live API calls. When a selected recommendation has a persisted Last.fm URL, the TUI provides an **Open on Last.fm** link that opens the artist page in your default browser.
 
@@ -208,6 +208,48 @@ outside the production pool. Source ablation excludes ListenBrainz from those me
 retrieval without deleting stored evidence; paired reports over unchanged local evidence have
 the same snapshot ID. Freeze enrichment between comparisons. Last.fm-only recommendation output
 is preserved when ListenBrainz is disabled, unavailable, or collected with candidate generation off.
+
+### Acquire optional MusicBrainz catalog facts
+
+With `apis.musicbrainz.enabled: true`, `enrich --source musicbrainz` first runs the existing
+identity resolver, then acquires aliases and artist relationships for selected local seeds with
+`resolved_musicbrainz` status, confidence at least 0.9, valid MBIDs, and no identity conflicts.
+`resolve --source musicbrainz` remains identity-only.
+
+```bash
+scrobble-recs enrich-plan --config ./config.json --source musicbrainz
+scrobble-recs enrich --config ./config.json --source musicbrainz
+scrobble-recs enrich-status --config ./config.json --source musicbrainz
+scrobble-recs enrich-retry --config ./config.json --source musicbrainz
+```
+
+Catalog lookups request `aliases+artist-rels` and use a separate cache identity from resolution.
+Fresh cache hits and stale successful fallbacks retain the original fetch time and a hash of the
+canonical cached JSON payload. Failed refreshes preserve previous aliases and relationships.
+Aliases are scoped to each artist and locale; a missing locale is stored as an empty string.
+Related artists are matched only by exact MBID. Shared names and aliases never merge identities;
+conflicting names or multiple local MBID matches remain visible in evidence warnings.
+
+`enrichment.seed_artist_limit`, `candidate_artist_limit`, and `queue_batch_size` bound catalog
+acquisition. Discovered targets are never recursively requested. Catalog queue work uses the
+`artist-catalog` endpoint: pending and recovered work drains before completed refreshes, newly safe
+skipped work resumes, and failures require explicit `enrich-retry`. Planning preserves active
+requests; a new synchronous worker run recovers interrupted work and returns its unfinished attempt.
+Progress and summary counts include requested artists, aliases, relationships, new identities,
+and ambiguous relationships.
+
+Recommendation use is separately controlled by `recommendation.catalog_evidence.enabled`, which
+is `false` by default. With MusicBrainz enabled and this policy enabled, the initial
+`allowed_relationship_types` are `member of band`, `collaboration`, `supporting musician`, and
+`instrumental supporting musician`. Other artist relationships remain stored for inspection but
+are excluded before candidate introduction and family agreement. The current allow-list is checked
+each run, so policy changes do not require reacquisition. Catalog facts provide membership,
+explanations, and independent-family reinforcement; their raw score and source rank remain null.
+The existing `discovery_evidence.catalog_relationships_enabled` switch applies only to direct
+catalog admission in artist contexts; artist querying is not exposed by this CLI yet.
+
+Catalog facts and aliases are supplied by [MusicBrainz](https://musicbrainz.org/).
+Recommendation generation and TUI browsing consume persisted local data with no HTTP calls.
 
 ### Export a persisted run
 

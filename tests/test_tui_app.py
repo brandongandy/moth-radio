@@ -953,3 +953,69 @@ def _rendered_plain(app: ScrobbleRecsTui, selector: str) -> str:
 
 def _modal_plain(app: ScrobbleRecsTui) -> str:
     return "\n".join(widget.renderable.plain for widget in app.screen.query("#help-modal Static"))
+
+
+def test_tui_browses_persisted_catalog_run_with_raising_http_clients(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    import httpx
+
+    from scrobble_recs.models.evidence import EvidenceObservation, persist_evidence_observation
+
+    config = load_config(write_config(tmp_path))
+    conn = initialize_database(config)
+    try:
+        run_id = "00000000-0000-0000-0000-000000000188"
+        _insert_run(conn, run_id=run_id, mode="balanced")
+        _insert_artist(conn, artist_id=10, name="Catalog Artist")
+        evidence = {
+            "relationship_type": "member of band",
+            "direction": "forward",
+            "supported_relationship": True,
+        }
+        persist_evidence_observation(
+            conn,
+            EvidenceObservation(
+                "musicbrainz",
+                "catalog",
+                "catalog_relationship",
+                None,
+                10,
+                None,
+                None,
+                None,
+                datetime(2025, 1, 1),
+                0.95,
+                evidence,
+            ),
+            observation_key="tui-catalog",
+        )
+        _insert_recommendation(
+            conn,
+            run_id=run_id,
+            artist_id=10,
+            rank=1,
+            final_score=0.8,
+            explanation={"summary": "Catalog: member of band.", "catalog": evidence},
+        )
+
+        def raising(*args, **kwargs):
+            raise AssertionError("TUI constructed HTTP client")
+
+        monkeypatch.setattr(httpx, "Client", raising)
+        monkeypatch.setattr(httpx, "AsyncClient", raising)
+
+        async def browse():
+            app = ScrobbleRecsTui(conn)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert app.query_one("#recommendations", DataTable).row_count == 1
+                assert "Catalog Artist" in _rendered_plain(app, "#recommendations")
+                assert "member of band" in _rendered_plain(app, "#detail")
+                await pilot.press("down", "up")
+                await pilot.pause()
+                assert "Catalog Artist" in _rendered_plain(app, "#recommendations")
+
+        asyncio.run(browse())
+    finally:
+        conn.close()

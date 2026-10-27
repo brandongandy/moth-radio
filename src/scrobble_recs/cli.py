@@ -19,6 +19,7 @@ from scrobble_recs.admin.cache_admin import (
 from scrobble_recs.admin.doctor import DiagnosticCheck, run_doctor
 from scrobble_recs.admin.init import initialize_project
 from scrobble_recs.apis.cache import ApiCache
+from scrobble_recs.apis.musicbrainz import MusicBrainzClient
 from scrobble_recs.apis.rate_limit import RateLimiter
 from scrobble_recs.config import ScrobbleRecsConfig, load_config
 from scrobble_recs.db import initialize_database
@@ -30,6 +31,10 @@ from scrobble_recs.enrichment.lastfm import (
 from scrobble_recs.enrichment.listenbrainz import (
     plan_listenbrainz_enrichment,
     run_listenbrainz_enrichment,
+)
+from scrobble_recs.enrichment.musicbrainz import (
+    plan_musicbrainz_catalog_enrichment,
+    run_musicbrainz_catalog_enrichment,
 )
 from scrobble_recs.enrichment.queue import (
     enrichment_queue_status,
@@ -503,16 +508,17 @@ def _run_musicbrainz_resolution(
     conn: DuckDBPyConnection,
     config: ScrobbleRecsConfig,
     unresolved: list[Any],
+    *,
+    client: MusicBrainzClient | None = None,
 ) -> dict[str, int]:
-    from scrobble_recs.apis.musicbrainz import MusicBrainzClient
-
     stats = {"resolved": 0, "ambiguous": 0, "not_found": 0, "skipped": 0, "errors": 0}
-    cache = ApiCache(conn)
-    client = MusicBrainzClient(
-        config=config.apis.musicbrainz,
-        cache=cache,
-        rate_limiter=RateLimiter(config.apis.musicbrainz.rate_limit_per_second),
-    )
+    owns_client = client is None
+    if client is None:
+        client = MusicBrainzClient(
+            config=config.apis.musicbrainz,
+            cache=ApiCache(conn),
+            rate_limiter=RateLimiter(config.apis.musicbrainz.rate_limit_per_second),
+        )
 
     try:
         for idx, row in enumerate(unresolved, start=1):
@@ -604,7 +610,8 @@ def _run_musicbrainz_resolution(
             if idx % 10 == 0:
                 console.print(f"  progress: {idx}/{len(unresolved)}")
     finally:
-        client.close()
+        if owns_client:
+            client.close()
 
     return stats
 
@@ -623,8 +630,6 @@ def _store_resolution(
     type: str | None = None,
     confidence: float = 0.0,
 ) -> None:
-    from datetime import datetime as _dt
-
     conn.execute(
         """
         INSERT INTO artist_identity_resolution (
@@ -652,7 +657,7 @@ def _store_resolution(
             type,
             confidence,
             status,
-            _dt.utcnow(),
+            datetime.now(UTC).replace(tzinfo=None),
         ],
     )
 
@@ -717,6 +722,10 @@ def _print_musicbrainz_enrichment_plan(
     console.print("Musicbrainz enrichment plan")
     console.print(f"  unresolved artists: {unresolved_count}")
     console.print(f"  previously resolved: {resolved_count}")
+    plan = plan_musicbrainz_catalog_enrichment(conn, resolved_config)
+    console.print("artist-catalog:")
+    for label, value in vars(plan).items():
+        console.print(f"  {label}: {value}")
 
 
 def _run_musicbrainz_enrichment(
@@ -739,17 +748,30 @@ def _run_musicbrainz_enrichment(
         """
     ).fetchall()
 
-    console.print(f"unresolved artists: {len(unresolved)}")
-    if not unresolved:
-        return
-
-    resolve_stats = _run_musicbrainz_resolution(conn, resolved_config, unresolved)
-
-    console.print(f"resolved: {resolve_stats['resolved']}")
-    console.print(f"ambiguous: {resolve_stats['ambiguous']}")
-    console.print(f"not_found: {resolve_stats['not_found']}")
-    console.print(f"skipped: {resolve_stats['skipped']}")
-    console.print(f"errors: {resolve_stats['errors']}")
+    client = MusicBrainzClient(
+        config=resolved_config.apis.musicbrainz,
+        cache=ApiCache(conn),
+        rate_limiter=RateLimiter(resolved_config.apis.musicbrainz.rate_limit_per_second),
+    )
+    try:
+        console.print(f"unresolved artists: {len(unresolved)}")
+        if unresolved:
+            resolve_stats = _run_musicbrainz_resolution(
+                conn, resolved_config, unresolved, client=client
+            )
+            for label, value in resolve_stats.items():
+                console.print(f"{label}: {value}")
+        console.print("MusicBrainz catalog lookup (bounded resolved artists)")
+        stats = run_musicbrainz_catalog_enrichment(
+            conn,
+            resolved_config,
+            client=client,
+            progress=lambda done, total: console.print(f"  catalog progress: {done}/{total}"),
+        )
+        for label, value in vars(stats).items():
+            console.print(f"{label}: {value}")
+    finally:
+        client.close()
 
 
 def _apply_scorer_override(config: ScrobbleRecsConfig, scorer: str | None) -> ScrobbleRecsConfig:

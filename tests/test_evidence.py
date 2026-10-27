@@ -1096,3 +1096,145 @@ def test_backoff_does_not_count_source_admitted_but_walk_unreachable_candidates(
     }
     assert ranked[5].legacy.diagnostic.reasons == ("walk_unreachable",)
     assert ranked[4].legacy.diagnostic.state == "eligible"
+
+
+def test_catalog_allowlist_filters_before_candidate_admission_and_family_agreement(stage_database):
+    from scrobble_recs.models.retrieval import retrieve_with_backoff
+
+    conn, config, context = stage_database
+    conn.execute("UPDATE artist SET identity_confidence = .9")
+    conn.execute("DELETE FROM tag_top_artist")
+    config.recommendation.discovery_evidence.minimum_seed_count = 2
+    # Strong Last.fm alone fails admission; unsupported catalog must not reinforce it.
+    row = replace(
+        observation(),
+        source="musicbrainz",
+        family="catalog",
+        relationship_kind="catalog_relationship",
+        raw_score=None,
+        evidence={"relationship_type": "teacher", "supported_relationship": True},
+    )
+    for target in (2, 4):
+        evidence_module().persist_evidence_observation(
+            conn, replace(row, target_artist_id=target), observation_key=f"catalog-{target}"
+        )
+    config.apis.musicbrainz.enabled = True
+    config.recommendation.catalog_evidence.enabled = True
+    result = retrieve_with_backoff(conn, context=context, config=config, limit=10)
+    assert 4 not in result.evidence
+    assert all(r.family != "catalog" for r in result.evidence[2].observations)
+    assert not result.admissions[2].admitted
+    assert conn.execute("SELECT count(*) FROM artist_evidence_observation").fetchone()[0] == 2
+    # Revalidate the current policy without acquiring again, retaining null score/rank.
+    config.recommendation.catalog_evidence.allowed_relationship_types.append("teacher")
+    allowed = retrieve_with_backoff(conn, context=context, config=config, limit=10)
+    assert allowed.admissions[2].reasons == ("strong_collaborative_with_independent_family",)
+    assert 4 in allowed.evidence and not allowed.admissions[4].admitted
+    assert [
+        (r.raw_score, r.source_rank)
+        for r in allowed.evidence[2].observations
+        if r.family == "catalog"
+    ] == [(None, None)]
+    config.recommendation.catalog_evidence.allowed_relationship_types.remove("teacher")
+    assert retrieve_with_backoff(conn, context=context, config=config, limit=10) == result
+
+
+def test_catalog_disabled_preserves_recommendation_scores_and_explanations(stage_database):
+    from scrobble_recs.models.policy import apply_slate_policy
+    from scrobble_recs.models.ranking import rank_candidates
+    from scrobble_recs.models.retrieval import retrieve_with_backoff
+
+    conn, config, context = stage_database
+    baseline = retrieve_with_backoff(conn, context=context, config=config, limit=10)
+    ranked = rank_candidates(conn, context=context, retrieval=baseline, config=config)
+    policies = apply_slate_policy(conn, context=context, ranked=ranked, limit=10, config=config)
+    row = replace(
+        observation(),
+        source="musicbrainz",
+        family="catalog",
+        relationship_kind="catalog_relationship",
+        raw_score=None,
+        evidence={"relationship_type": "member of band", "supported_relationship": True},
+    )
+    for target in (2, 4):
+        evidence_module().persist_evidence_observation(
+            conn, replace(row, target_artist_id=target), observation_key=f"catalog-{target}"
+        )
+    result = retrieve_with_backoff(conn, context=context, config=config, limit=10)
+    assert result == baseline
+    actual = rank_candidates(conn, context=context, retrieval=result, config=config)
+    assert actual == ranked
+    assert (
+        apply_slate_policy(conn, context=context, ranked=actual, limit=10, config=config)
+        == policies
+    )
+
+
+def test_catalog_current_allowlist_overrides_acquisition_supported_flag(stage_database):
+    from scrobble_recs.models.retrieval import retrieve_with_backoff
+
+    conn, config, context = stage_database
+    conn.execute("UPDATE artist SET identity_confidence = .9")
+    config.apis.musicbrainz.enabled = config.recommendation.catalog_evidence.enabled = True
+    row = replace(
+        observation(),
+        source="musicbrainz",
+        family="catalog",
+        relationship_kind="catalog_relationship",
+        raw_score=None,
+        evidence={"relationship_type": "member of band", "supported_relationship": False},
+    )
+    evidence_module().persist_evidence_observation(conn, row, observation_key="catalog")
+    result = retrieve_with_backoff(conn, context=context, config=config, limit=10)
+    catalog_rows = [r for r in result.evidence[2].observations if r.family == "catalog"]
+    assert catalog_rows[0].evidence["supported_relationship"] is True
+    assert result.admissions[2].admitted
+
+
+def test_recommendation_generation_with_persisted_catalog_never_constructs_http_clients(
+    stage_database, monkeypatch
+):
+    import httpx
+
+    from scrobble_recs.models.recommend import generate_recommendations
+
+    conn, config, _ = stage_database
+    config.apis.musicbrainz.enabled = config.recommendation.catalog_evidence.enabled = True
+    conn.execute("UPDATE artist SET identity_confidence = .95")
+    conn.execute(
+        "INSERT INTO scrobble (scrobble_id, artist_key, track_key, played_at, played_date, "
+        "is_duplicate) VALUES (1, 'seed', 'song', '2024-01-01', '2024-01-01', false)"
+    )
+    row = replace(
+        observation(),
+        source="musicbrainz",
+        family="catalog",
+        relationship_kind="catalog_relationship",
+        raw_score=None,
+        evidence={"relationship_type": "member of band", "supported_relationship": True},
+    )
+    evidence_module().persist_evidence_observation(conn, row, observation_key="catalog-offline")
+    config.recommendation.min_seed_scrobbles = 1
+
+    def raising(*args, **kwargs):
+        raise AssertionError("recommendation generation constructed HTTP client")
+
+    monkeypatch.setattr(httpx, "Client", raising)
+    monkeypatch.setattr(httpx, "AsyncClient", raising)
+    stats = generate_recommendations(conn, config, limit=2, as_of=datetime(2025, 1, 1))
+    assert stats.recommendations > 0
+    assert (
+        conn.execute(
+            "SELECT count(*) FROM recommendation_run WHERE run_id = ?::UUID", [stats.run_id]
+        ).fetchone()[0]
+        == 1
+    )
+    import json
+
+    stored = conn.execute(
+        "SELECT evidence FROM recommendation_candidate WHERE run_id = ?::UUID AND artist_id = 2",
+        [stats.run_id],
+    ).fetchone()[0]
+    rows = json.loads(stored)["observations"]
+    catalog = next(r for r in rows if r["family"] == "catalog")
+    assert catalog["raw_score"] is catalog["source_rank"] is None

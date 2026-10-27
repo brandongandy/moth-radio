@@ -153,6 +153,15 @@
         "japanese"
       ],
       "weak_tag_penalty": 0.25
+    },
+    "catalog_evidence": {
+      "enabled": false,
+      "allowed_relationship_types": [
+        "member of band",
+        "collaboration",
+        "supporting musician",
+        "instrumental supporting musician"
+      ]
     }
   }
 }

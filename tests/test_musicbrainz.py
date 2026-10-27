@@ -295,3 +295,121 @@ def test_musicbrainz_client_close_does_not_close_injected_client(tmp_path: Path)
     assert not injected_client.is_closed
     injected_client.close()
     conn.close()
+
+
+def test_catalog_contract_parses_aliases_and_artist_relationships(tmp_path):
+    payload = json.loads(Path("tests/fixtures/musicbrainz_artist_relationships.json").read_text())
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        assert dict(request.url.params) == {"inc": "aliases+artist-rels", "fmt": "json"}
+        return httpx.Response(200, json=payload)
+
+    conn = initialize_database(load_config(_config_path(tmp_path)))
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        client = MusicBrainzClient(
+            config=MusicBrainzApiConfig(enabled=True),
+            cache=ApiCache(conn),
+            http_client=http,
+            rate_limiter=RateLimiter(999, sleep=lambda _: None),
+            now=lambda: datetime(2026, 1, 1),
+        )
+        catalog = client.lookup_artist_catalog(payload["id"])
+        assert catalog.artist.mbid == payload["id"]
+        assert catalog.artist.life_span_begin == "1970"
+        assert len(catalog.aliases) == 2
+        assert catalog.aliases[0].name == "Shared"
+        assert catalog.aliases[0].locale is None
+        assert catalog.aliases[0].primary_for_locale is True
+        assert catalog.aliases[0].begin == "1990"
+        rows = catalog.artist_relationships
+        assert len(rows) == 3
+        assert (
+            rows[0].relationship_type,
+            rows[0].direction,
+            rows[0].begin,
+            rows[0].end,
+            rows[0].ended,
+        ) == ("member of band", "forward", "1990", "2001-02", True)
+        assert rows[1].direction == "backward" and rows[1].begin is None
+        assert rows[2].relationship_type == "teacher"
+        assert client.lookup_artist_catalog(payload["id"]) == catalog
+        assert len(calls) == 1
+        client.close()
+        assert not http.is_closed
+    conn.close()
+
+
+def test_catalog_stale_fallback_preserves_success_and_provenance(tmp_path):
+    payload = json.loads(Path("tests/fixtures/musicbrainz_artist_relationships.json").read_text())
+    conn = initialize_database(load_config(_config_path(tmp_path)))
+    cache = ApiCache(conn)
+    params = {"inc": "aliases+artist-rels", "fmt": "json"}
+    cache.write_response(
+        source="musicbrainz",
+        endpoint=f"artist/{payload['id']}",
+        request_url="https://example.test",
+        request_params=params,
+        response_status=200,
+        response_json=payload,
+        fetched_at=datetime(2020, 1, 1),
+        expires_at=datetime(2020, 2, 1),
+        error_message=None,
+    )
+    before = conn.execute("SELECT * FROM api_cache").fetchall()
+    with httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(503))) as http:
+        client = MusicBrainzClient(
+            config=MusicBrainzApiConfig(enabled=True),
+            cache=cache,
+            http_client=http,
+            rate_limiter=RateLimiter(999, sleep=lambda _: None),
+            now=lambda: datetime(2026, 1, 1),
+        )
+        assert client.lookup_artist_catalog(payload["id"]).artist.name == "Seed 1"
+        assert client.lookup_artist_catalog(payload["id"]).artist.name == "Seed 1"
+    assert conn.execute("SELECT * FROM api_cache").fetchall() == before
+    conn.close()
+
+
+def test_catalog_rejects_404_malformed_and_mismatched_identity(tmp_path):
+    conn = initialize_database(load_config(_config_path(tmp_path)))
+    mbid = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    responses = [
+        httpx.Response(404),
+        httpx.Response(200, json=[]),
+        httpx.Response(200, json={}),
+        httpx.Response(200, json={"id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "name": "Wrong"}),
+    ]
+    with httpx.Client(transport=httpx.MockTransport(lambda _: responses.pop(0))) as http:
+        client = MusicBrainzClient(
+            config=MusicBrainzApiConfig(enabled=True),
+            cache=ApiCache(conn),
+            http_client=http,
+            rate_limiter=RateLimiter(999, sleep=lambda _: None),
+        )
+        for _ in range(4):
+            assert client.lookup_artist_catalog(mbid) is None
+        assert not responses
+        assert client.lookup_artist_catalog("invalid") is None
+    conn.close()
+
+
+def test_catalog_malformed_collection_is_not_a_successful_empty_refresh(tmp_path):
+    conn = initialize_database(load_config(_config_path(tmp_path)))
+    payload = json.loads(Path("tests/fixtures/musicbrainz_artist_relationships.json").read_text())
+    responses = [dict(payload, aliases={}), dict(payload, relations="malformed")]
+    with httpx.Client(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=responses.pop(0)))
+    ) as http:
+        client = MusicBrainzClient(
+            config=MusicBrainzApiConfig(enabled=True),
+            cache=ApiCache(conn),
+            http_client=http,
+            rate_limiter=RateLimiter(999, sleep=lambda _: None),
+            now=lambda: datetime(2026, 1, 1),
+        )
+        for _ in range(2):
+            assert client.lookup_artist_catalog(payload["id"]) is None
+        assert conn.execute("SELECT count(*) FROM api_cache").fetchone()[0] == 0
+    conn.close()

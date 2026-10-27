@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from hashlib import sha256
 from uuid import uuid4
@@ -25,7 +26,11 @@ from scrobble_recs.models.policy import (
     apply_slate_policy,
 )
 from scrobble_recs.models.profile import select_seed_artists
-from scrobble_recs.models.profile_window import ListeningWindow, resolve_listening_window
+from scrobble_recs.models.profile_window import (
+    ListeningWindow,
+    normalize_timestamp,
+    resolve_listening_window,
+)
 from scrobble_recs.models.ranking import build_policy_explanations, rank_candidates
 from scrobble_recs.models.recommendation_query import (
     NoveltyIntent,
@@ -40,6 +45,11 @@ from scrobble_recs.models.recommendation_store import (
     persist_recommendation_run,
 )
 from scrobble_recs.models.recommendation_store import RecommendationStats as RecommendationStats
+from scrobble_recs.models.relationship import (
+    artist_query_settings,
+    build_target_relationship_snapshot,
+    resolve_target_artist,
+)
 from scrobble_recs.models.retrieval import (
     LegacyRetrievalInputs,
     _add_feedback_seed_artists,
@@ -83,12 +93,14 @@ def generate_recommendations(
     if limit < 1:
         raise ValueError("limit must be at least 1")
     resolved_request = request or RecommendationRequest()
-    if resolved_request.query_kind == "artist":
-        raise ValueError("artist recommendation queries are not yet implemented")
 
     mode_settings = resolve_recommendation_mode(mode, config)
     resolved_mode = mode_settings.name
-    resolved_as_of = as_of or datetime.now(tz=UTC).replace(tzinfo=None)
+    resolved_as_of = normalize_timestamp(as_of or datetime.now(tz=UTC))
+    if local_history_end is not None:
+        local_history_end = normalize_timestamp(local_history_end)
+    if historical_cutoff is not None:
+        historical_cutoff = normalize_timestamp(historical_cutoff)
     if history_window is None:
         resolved_history_window = resolve_listening_window(
             as_of=resolved_as_of,
@@ -100,6 +112,28 @@ def generate_recommendations(
     else:
         resolved_history_window = history_window
         history_window_source = "explicit"
+    relationship = None
+    settings = None
+    if resolved_request.query_kind == "artist":
+        assert resolved_request.target_artist_id is not None
+        resolve_target_artist(conn, str(resolved_request.target_artist_id))
+        historical_cutoff = min(resolved_as_of, historical_cutoff or resolved_as_of)
+        local_history_end = min(
+            resolved_history_window.end, historical_cutoff, local_history_end or resolved_as_of
+        )
+        resolved_history_window = ListeningWindow(resolved_history_window.start, local_history_end)
+        relationship = build_target_relationship_snapshot(
+            conn,
+            artist_id=resolved_request.target_artist_id,
+            as_of=resolved_as_of,
+            history_window=resolved_history_window,
+            feedback_cutoff=historical_cutoff,
+            thresholds=config.recommendation.artist_relationship,
+        )
+        settings = artist_query_settings(relationship, config=config, mode=mode_settings)
+        mode_settings = replace(
+            mode_settings, obviousness_penalty_weight=settings.obviousness_penalty_weight
+        )
     _report_progress(
         progress_callback,
         phase="refresh_listening",
@@ -153,6 +187,9 @@ def generate_recommendations(
     evidence_snapshot = capture_evidence_snapshot(conn, historical_cutoff=historical_cutoff)
     query_context = QueryContext(
         query_kind=resolved_request.query_kind,
+        target_artist_id=resolved_request.target_artist_id,
+        target_relationship=relationship,
+        artist_settings=settings,
         history_window=resolved_history_window,
         history_cutoff=local_history_end,
         feedback_cutoff=historical_cutoff,
@@ -168,7 +205,14 @@ def generate_recommendations(
         ),
         evidence_snapshot_id=evidence_snapshot.snapshot_id,
         evidence_freshness=evidence_snapshot.freshness,
-        versions=RecommendationVersions(ranker=f"{config.recommendation.scoring.engine}-v1"),
+        versions=RecommendationVersions(
+            ranker=f"{config.recommendation.scoring.engine}-v1",
+            **(
+                {"feature_schema": "artist-features-v1", "slate_policy": settings.version}
+                if settings
+                else {}
+            ),
+        ),
         config_hash=_config_hash(config),
     )
     seed_ids = {seed.artist_id for seed in seeds}

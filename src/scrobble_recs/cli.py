@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -45,6 +46,8 @@ from scrobble_recs.export import ExportFormat, export_recommendations
 from scrobble_recs.importers.lastfm_csv import ImportStats, get_import_stats, import_lastfm_csv
 from scrobble_recs.models.compare import ScorerComparison, compare_scorers
 from scrobble_recs.models.evaluate import (
+    ArtistEvaluationResult,
+    ArtistRollingEvaluationReport,
     EvaluationResult,
     EvaluationWindow,
     evaluate_recommendations,
@@ -62,6 +65,8 @@ from scrobble_recs.models.recommend import (
     RecommendationStats,
     generate_recommendations,
 )
+from scrobble_recs.models.recommendation_query import RecommendationRequest
+from scrobble_recs.models.relationship import resolve_target_artist
 from scrobble_recs.tui.app import ScrobbleRecsTui
 
 app = typer.Typer(help="Local-first Last.fm recommendation tooling.")
@@ -822,6 +827,9 @@ def recommend_command(
         typer.Option("--limit", help="Number of recommendations to persist."),
     ] = 500,
     mode: Annotated[str | None, typer.Option("--mode", help="Recommendation mode.")] = None,
+    artist: Annotated[
+        str | None, typer.Option("--artist", help="Local target MBID, artist ID, or exact name.")
+    ] = None,
     scorer: Annotated[
         str | None,
         typer.Option("--scorer", help="Scoring engine: 'legacy' or 'walk'."),
@@ -853,6 +861,11 @@ def recommend_command(
     conn = initialize_database(resolved_config)
     try:
         try:
+            request = (
+                RecommendationRequest("artist", resolve_target_artist(conn, artist))
+                if artist is not None
+                else None
+            )
             console.print("Generating recommendations from local DuckDB data...")
             stats = _generate_recommendations_with_progress(
                 conn,
@@ -860,7 +873,22 @@ def recommend_command(
                 limit=limit,
                 mode=mode,
                 history_window=history_window,
+                **({"request": request} if request is not None else {}),
             )
+            if request is not None:
+                target = conn.execute(
+                    """
+                        SELECT a.canonical_name, r.query_context FROM recommendation_run r JOIN
+                        artist a ON a.artist_id = r.target_artist_id WHERE r.run_id = ?
+                    """,
+                    [stats.run_id],
+                ).fetchone()
+                assert target is not None
+                state = json.loads(target[1])["target_relationship"]["state"]
+                console.print(
+                    f"target artist: {request.target_artist_id} | "
+                    f"{escape(str(target[0]))} | {state}"
+                )
         except ValueError as exc:
             console.print(f"Error: {exc}")
             raise typer.Exit(code=1) from exc
@@ -1033,12 +1061,17 @@ def evaluate_rolling_command(
         list[str],
         typer.Option("--cutoff", help="Training cutoff (YYYY-MM-DD or ISO timestamp); repeatable."),
     ],
+    task: Annotated[
+        str, typer.Option("--task", help="Evaluation task: general or artist.")
+    ] = "general",
     horizon_days: Annotated[
         int,
         typer.Option("--horizon-days", min=1, help="Outcome horizon in days after each cutoff."),
     ] = 90,
 ) -> None:
     """Replay historical recommendation windows and report their mean quality."""
+    if task not in ("general", "artist"):
+        raise typer.BadParameter("task must be general or artist")
     cutoffs = sorted({_parse_timestamp(value) for value in cutoff})
     windows = [
         EvaluationWindow(value, value, value + timedelta(days=horizon_days)) for value in cutoffs
@@ -1046,16 +1079,29 @@ def evaluate_rolling_command(
     resolved_config = load_config(config)
     conn = initialize_database(resolved_config)
     try:
-        report = evaluate_rolling_recommendations(conn, resolved_config, windows=windows)
+        report = evaluate_rolling_recommendations(
+            conn, resolved_config, windows=windows, evaluation_task=cast(Any, task)
+        )
     finally:
         conn.close()
 
     console.print("Rolling evaluation")
     console.print(f"windows: {report.window_count}")
-    console.print("cutoff | test_until | recall@50 | recall@100 | ndcg@50 | identity_resolved_rate")
+    if isinstance(report, ArtistRollingEvaluationReport):
+        console.print("task: artist")
+        console.print(f"targets: {report.target_count}")
+        console.print(f"runs: {report.run_count}")
+        console.print(f"mean graded adoption ndcg@50: {report.mean_graded_adoption_ndcg_at_50:.3f}")
+    prefix = "target_id | " if report.evaluation_task == "artist" else ""
+    console.print(
+        prefix + "cutoff | test_until | recall@50 | recall@100 | ndcg@50 | identity_resolved_rate"
+    )
     for result in report.windows:
+        prefix = (
+            f"{result.target_artist_id} | " if isinstance(result, ArtistEvaluationResult) else ""
+        )
         console.print(
-            f"{result.train_until} | {result.test_until} | "
+            prefix + f"{result.train_until} | {result.test_until} | "
             f"{result.recall_at_50:.3f} | {result.recall_at_100:.3f} | "
             f"{result.ndcg_at_50:.3f} | {result.identity_resolved_rate:.3f}"
         )
@@ -1335,6 +1381,7 @@ def _generate_recommendations_with_progress(
     limit: int,
     mode: str | None,
     history_window: ListeningWindow | None = None,
+    request: RecommendationRequest | None = None,
 ) -> RecommendationStats:
     task_ids: dict[str, TaskID] = {}
     with Progress(
@@ -1362,6 +1409,7 @@ def _generate_recommendations_with_progress(
             )
             progress.refresh()
 
+        request_options: dict[str, Any] = {"request": request} if request is not None else {}
         return generate_recommendations(
             conn,
             resolved_config,
@@ -1369,6 +1417,7 @@ def _generate_recommendations_with_progress(
             mode=mode,
             history_window=history_window,
             progress_callback=on_progress,
+            **request_options,
         )
 
 

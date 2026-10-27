@@ -108,12 +108,14 @@ def _score_candidates(
     as_of: datetime | None = None,
     progress_callback: RecommendationProgressCallback | None = None,
     admissions: dict[int, AdmissionDecision] | None = None,
+    context: QueryContext | None = None,
 ) -> tuple[list[_CandidateScore], list[_CandidateDiagnostic]]:
     # Inverse-popularity weighting is applied at aggregation only. At
     # ``seed_idf_alpha == 0`` these equal the raw seed weights exactly, so the
     # legacy path is preserved byte-for-byte.
     seed_weight_by_id = idf_weights.effective_weight_by_seed
     total_seed_weight = sum(seed_weight_by_id.values()) or 1.0
+    artist_query = context is not None and context.query_kind == "artist"
     walk_engine = config.recommendation.scoring.engine == "walk"
     scores: list[_CandidateScore] = []
     candidate_only_scores: list[_CandidateScore] = []
@@ -143,6 +145,7 @@ def _score_candidates(
             config=config,
             tag_profile=tag_profile,
             walk_result=walk_result,
+            context=context,
         )
         if eligibility.exclusion_reason is not None:
             diagnostics.append(
@@ -184,9 +187,14 @@ def _score_candidates(
         )
         rediscovery_eligible = eligibility.rediscovery_eligible
         walk_node = eligibility.walk_node
-        if walk_engine:
+        has_walk_signal = (
+            walk_node is not None and isfinite(walk_node.lift) and walk_node.hop_distance >= 0
+        )
+        if walk_engine and has_walk_signal:
             assert walk_node is not None
             lastfm_score = walk_node.lift
+        elif walk_engine and artist_query:
+            lastfm_score = 0.0
         else:
             lastfm_score = _lastfm_similarity_score(
                 artist_id,
@@ -212,7 +220,7 @@ def _score_candidates(
             "tag_similarity": tag_score,
             "feedback": feedback.score,
         }
-        if walk_engine:
+        if walk_engine and has_walk_signal:
             assert walk_node is not None
             quality_gate = _walk_gate_decision(walk_node, config.recommendation.walk)
         else:
@@ -333,6 +341,27 @@ def _score_candidates(
             candidate.rediscovery_score * mode.rediscovery_multiplier,
             calibrated_feedback,
         )
+        relevance_components = {}
+        if artist_query:
+            assert context is not None and context.artist_settings is not None
+            settings = context.artist_settings
+            target_features = scoring_data.target_features[candidate.artist_id]
+            relevance_components = {
+                "artist_existing_raw_score": raw_score,
+                "artist_target_contribution": settings.target_weight
+                * float(target_features["target_relevance"] or 0.0),
+                "artist_personal_contribution": settings.personal_weight
+                * float(target_features["target_personal_agreement"] or 0.0),
+                "artist_existing_contribution": settings.existing_weight * raw_score,
+            }
+            raw_score = sum(
+                relevance_components[key]
+                for key in (
+                    "artist_target_contribution",
+                    "artist_personal_contribution",
+                    "artist_existing_contribution",
+                )
+            )
         evidence_count = sum(
             1
             for value in (
@@ -399,6 +428,7 @@ def _score_candidates(
             identity_warnings=candidate.identity_warnings,
             hop_distance=candidate.hop_distance,
             walk_node=candidate.walk_node,
+            relevance_components=relevance_components,
         )
         if final_score <= 0.0:
             candidate_only_scores.append(score)
@@ -413,7 +443,11 @@ def _score_candidates(
         status="completed",
     )
     candidate_only_scores.sort(key=lambda s: (-s.raw_score, s.artist_id))
-    return scores + candidate_only_scores[: min(len(scores) * 2, 500)], diagnostics
+    return scores + (
+        candidate_only_scores
+        if artist_query
+        else candidate_only_scores[: min(len(scores) * 2, 500)]
+    ), diagnostics
 
 
 def _lastfm_similarity_score(
@@ -786,6 +820,7 @@ def rank_candidates(
         as_of=inputs.as_of,
         progress_callback=progress_callback,
         admissions=retrieval.admissions,
+        context=context,
     )
     score_by_id = {score.artist_id: score for score in scores}
     result = []
@@ -806,6 +841,11 @@ def rank_candidates(
             values.update(
                 {f"calibrated_{key}": value for key, value in score.calibrated_components.items()}
             )
+        if context.query_kind == "artist":
+            values.update(details.scoring_data.target_features.get(diagnostic.artist_id, {}))
+            values["target_obviousness"] = None if score is None else score.obviousness
+            if score is not None:
+                values.update(score.relevance_components)
         missing = _missing_signals(diagnostic.artist_id, details)
         explanation: dict[str, object] = {
             "eligibility_state": diagnostic.state,
@@ -880,7 +920,7 @@ def build_policy_explanations(
     assert retrieval.legacy is not None
     details = retrieval.legacy
     inputs = details.inputs
-    return tuple(
+    result = tuple(
         replace(
             decision,
             legacy_score=replace(
@@ -900,3 +940,23 @@ def build_policy_explanations(
         else decision
         for decision in decisions
     )
+    if details.scoring_data.target_features:
+        result = tuple(
+            replace(
+                decision,
+                legacy_score=replace(
+                    decision.legacy_score,
+                    explanation={
+                        **decision.legacy_score.explanation,
+                        "artist_query": {
+                            "target_artist_id": retrieval.diagnostics["target_artist_id"],
+                            **details.scoring_data.target_features[decision.artist_id],
+                        },
+                    },
+                ),
+            )
+            if decision.legacy_score is not None
+            else decision
+            for decision in result
+        )
+    return result

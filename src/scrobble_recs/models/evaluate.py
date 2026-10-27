@@ -3,14 +3,16 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from typing import Literal
 
 from duckdb import DuckDBPyConnection
 
 from scrobble_recs.config import ScrobbleRecsConfig
 from scrobble_recs.models.profile_window import normalize_timestamp, resolve_listening_window
 from scrobble_recs.models.recommend import generate_recommendations
+from scrobble_recs.models.recommendation_query import RecommendationRequest
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,18 @@ class EvaluationResult:
     identity_resolved_rate: float = 0.0
     identity_ambiguous_rate: float = 0.0
 
+    @property
+    def evaluation_task(self) -> str:
+        return "general"
+
+
+@dataclass(frozen=True, kw_only=True)
+class ArtistEvaluationResult(EvaluationResult):
+    target_artist_id: int
+    run_id: str
+    graded_adoption_ndcg_at_50: float
+    evaluation_task: Literal["artist"] = field(default="artist", init=False)
+
 
 @dataclass(frozen=True)
 class RollingEvaluationReport:
@@ -59,16 +73,33 @@ class RollingEvaluationReport:
     mean_ndcg_at_50: float
     mean_identity_resolved_rate: float
 
+    @property
+    def evaluation_task(self) -> str:
+        return "general"
+
+
+@dataclass(frozen=True, kw_only=True)
+class ArtistRollingEvaluationReport(RollingEvaluationReport):
+    target_count: int
+    run_count: int
+    mean_graded_adoption_ndcg_at_50: float
+    evaluation_task: Literal["artist"] = field(default="artist", init=False)
+
 
 def evaluate_rolling_recommendations(
     conn: DuckDBPyConnection,
     config: ScrobbleRecsConfig,
     *,
     windows: Sequence[EvaluationWindow],
+    evaluation_task: Literal["general", "artist"] = "general",
 ) -> RollingEvaluationReport:
     """Replay each historical window in input order using the single-window evaluator."""
     if not windows:
         raise ValueError("at least one evaluation window is required")
+    if evaluation_task not in ("general", "artist"):
+        raise ValueError("evaluation_task must be general or artist")
+    if evaluation_task == "artist":
+        return _evaluate_artist_windows(conn, config, windows)
     results = tuple(
         evaluate_recommendations(
             conn,
@@ -98,7 +129,12 @@ def evaluate_recommendations(
     test_from: datetime,
     test_until: datetime,
     ablate_source: str | None = None,
+    evaluation_task: Literal["general", "artist"] = "general",
+    target_artist_id: int | None = None,
 ) -> EvaluationResult:
+    if evaluation_task not in ("general", "artist"):
+        raise ValueError("evaluation_task must be general or artist")
+    request = RecommendationRequest(evaluation_task, target_artist_id)
     if ablate_source not in (None, "listenbrainz"):
         raise ValueError("ablate_source must be listenbrainz")
     if ablate_source:
@@ -126,6 +162,7 @@ def evaluate_recommendations(
         history_window=history_window,
         local_history_end=train_until,
         historical_cutoff=train_until,
+        request=request,
     )
     run_id = stats.run_id
 
@@ -192,7 +229,7 @@ def evaluate_recommendations(
     }
     identity_resolved_rate, identity_ambiguous_rate = _identity_coverage(conn, run_id)
 
-    return EvaluationResult(
+    result = EvaluationResult(
         train_until=train_until.isoformat(),
         test_from=test_from.isoformat(),
         test_until=test_until.isoformat(),
@@ -223,6 +260,20 @@ def evaluate_recommendations(
         identity_ambiguous_rate=identity_ambiguous_rate,
     )
 
+    if evaluation_task == "artist":
+        assert target_artist_id is not None
+        gains = _artist_adoption_gains(
+            conn, start=test_from, end=test_until, exclude_before=train_until
+        )
+        gains.pop(target_artist_id, None)
+        return ArtistEvaluationResult(
+            **asdict(result),
+            target_artist_id=target_artist_id,
+            run_id=run_id,
+            graded_adoption_ndcg_at_50=_adoption_ndcg_at_k(gains, rec_artist_ids, 50),
+        )
+    return result
+
 
 def _source_memberships(conn: DuckDBPyConnection, run_id: str) -> dict[str, set[int]]:
     memberships: dict[str, set[int]] = {"lastfm": set(), "lastfm_tag": set()}
@@ -251,7 +302,12 @@ def _add_radio_memberships(
         "SELECT query_context FROM recommendation_run WHERE run_id = ?", [run_id]
     ).fetchone()
     assert row is not None
-    seeds = [seed["artist_id"] for seed in json.loads(row[0])["taste_region_seeds"]]
+    context = json.loads(row[0])
+    seeds = (
+        [context["target_artist_id"]]
+        if context["query_kind"] == "artist"
+        else [seed["artist_id"] for seed in context["taste_region_seeds"]]
+    )
     targets = conn.execute(
         "SELECT DISTINCT target_artist_id FROM artist_evidence_observation "
         "WHERE source = 'listenbrainz' AND relationship_kind = 'artist_radio_membership' "
@@ -494,3 +550,103 @@ def _cooldown_or_repeat_rate(conn: DuckDBPyConnection, run_id: str) -> float:
         if isinstance(reasons, list) and excluded_reasons.intersection(reasons):
             cooldown_or_hidden += 1
     return cooldown_or_hidden / len(rows)
+
+
+def _evaluate_artist_windows(
+    conn: DuckDBPyConnection,
+    config: ScrobbleRecsConfig,
+    windows: Sequence[EvaluationWindow],
+) -> ArtistRollingEvaluationReport:
+    results: list[ArtistEvaluationResult] = []
+    target_ids: set[int] = set()
+    for window in windows:
+        cutoff = normalize_timestamp(window.train_until)
+        start, end = normalize_timestamp(window.test_from), normalize_timestamp(window.test_until)
+        if start < cutoff:
+            raise ValueError("test_from must not be before train_until")
+        if end <= start:
+            raise ValueError("test_until must be after test_from")
+        history = resolve_listening_window(
+            as_of=cutoff,
+            default_months=config.recommendation.profile_window_months,
+            since=None,
+            until=cutoff,
+        )
+        eligible = conn.execute(
+            """
+            SELECT a.artist_id FROM artist a JOIN scrobble s USING (artist_key)
+            WHERE NOT s.is_duplicate AND s.played_at >= ? AND s.played_at < ?
+            GROUP BY a.artist_id HAVING count(*) >= ? ORDER BY a.artist_id
+        """,
+            [history.start, cutoff, config.recommendation.min_seed_scrobbles],
+        ).fetchall()
+        for (artist,) in eligible:
+            target_ids.add(int(artist))
+            result = evaluate_recommendations(
+                conn,
+                config,
+                train_until=cutoff,
+                test_from=start,
+                test_until=end,
+                evaluation_task="artist",
+                target_artist_id=int(artist),
+            )
+            assert isinstance(result, ArtistEvaluationResult)
+            results.append(result)
+    denominator = len(results) or 1
+    return ArtistRollingEvaluationReport(
+        windows=tuple(results),
+        window_count=len(windows),
+        mean_recall_at_50=sum(row.recall_at_50 for row in results) / denominator,
+        mean_recall_at_100=sum(row.recall_at_100 for row in results) / denominator,
+        mean_ndcg_at_50=sum(row.ndcg_at_50 for row in results) / denominator,
+        mean_identity_resolved_rate=sum(row.identity_resolved_rate for row in results)
+        / denominator,
+        target_count=len(target_ids),
+        run_count=len(results),
+        mean_graded_adoption_ndcg_at_50=sum(row.graded_adoption_ndcg_at_50 for row in results)
+        / denominator,
+    )
+
+
+def _artist_adoption_gains(
+    conn: DuckDBPyConnection,
+    *,
+    start: datetime,
+    end: datetime,
+    exclude_before: datetime,
+) -> dict[int, float]:
+    """Local artist replay v1: first listen=1, repeat=2, multi-day adoption=3.
+
+    Only artists first heard in the horizon receive credit. Future plays outside
+    that horizon and duplicate imports never increase the grade.
+    """
+    first_heard = _first_listened_artist_ids(
+        conn, start=start, end=end, exclude_before=exclude_before
+    )
+    rows = conn.execute(
+        """
+        SELECT a.artist_id, count(*), count(DISTINCT cast(s.played_at AS DATE))
+        FROM scrobble s JOIN artist a USING (artist_key)
+        WHERE NOT s.is_duplicate AND s.played_at >= ? AND s.played_at < ?
+        GROUP BY a.artist_id ORDER BY a.artist_id
+    """,
+        [normalize_timestamp(start), normalize_timestamp(end)],
+    ).fetchall()
+    return {
+        int(artist): 3.0 if days >= 2 else 2.0 if count >= 2 else 1.0
+        for artist, count, days in rows
+        if int(artist) in first_heard
+    }
+
+
+def _adoption_ndcg_at_k(gains: dict[int, float], recommendations: list[int], k: int) -> float:
+    dcg = sum(
+        (2 ** gains.get(artist, 0.0) - 1) / math.log2(i + 2)
+        for i, artist in enumerate(recommendations[:k])
+    )
+    ideal = sum(
+        (2**gain - 1) / math.log2(i + 2)
+        for i, gain in enumerate(sorted(gains.values(), reverse=True)[:k])
+    )
+    return dcg / ideal if ideal else 0.0

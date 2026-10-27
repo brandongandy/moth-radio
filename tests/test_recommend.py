@@ -513,11 +513,11 @@ def test_mode_persists_product_regions_and_intent_with_same_engine(
         conn.close()
 
 
-def test_artist_request_fails_before_creating_a_run(tmp_path: Path) -> None:
+def test_missing_artist_request_fails_before_creating_a_run(tmp_path: Path) -> None:
     config = load_config(write_config(tmp_path))
     conn = initialize_database(config)
     try:
-        with pytest.raises(ValueError, match="artist.*not yet implemented"):
+        with pytest.raises(ValueError, match="target artist not found: 7"):
             generate_recommendations(
                 conn, config, limit=10, request=RecommendationRequest("artist", 7)
             )

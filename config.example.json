@@ -162,6 +162,42 @@
         "supporting musician",
         "instrumental supporting musician"
       ]
+    },
+    "artist_relationship": {
+      "sampled_max_plays": 5,
+      "established_min_plays": 20,
+      "established_min_active_months": 3,
+      "dormant_days": 730
+    },
+    "artist_challenger": {
+      "enabled": false,
+      "version": "artist-challenger-v1",
+      "target_weight": 0.75,
+      "personal_weight": 0.15,
+      "existing_weight": 0.1,
+      "structural_membership_prior": 0.25,
+      "hop_proximity_scale": 1.0,
+      "known_neighbor_penalty": 0.12,
+      "unheard": {
+        "max_hops": 1,
+        "popularity_preference": 0.1,
+        "obviousness_penalty_weight": 0.05
+      },
+      "sampled": {
+        "max_hops": 1,
+        "popularity_preference": 0.0,
+        "obviousness_penalty_weight": 0.1
+      },
+      "established_favorite": {
+        "max_hops": 2,
+        "popularity_preference": -0.1,
+        "obviousness_penalty_weight": 0.2
+      },
+      "dormant_favorite": {
+        "max_hops": 2,
+        "popularity_preference": -0.05,
+        "obviousness_penalty_weight": 0.15
+      }
     }
   }
 }

@@ -8,7 +8,7 @@ Moth Radio is a single-listener artist recommendation workbench. It is for getti
 
 It imports a Last.fm CSV export into DuckDB, builds long-term and recent taste regions, and optionally enriches the local catalog with cache-first Last.fm, MusicBrainz, and ListenBrainz data. Recommendation runs consume persisted local evidence rather than live APIs. Each run records its immutable query context, evidence snapshot, admission decisions, feature values, ranking scores, and slate-policy effects so results can be inspected, exported, replayed, and compared.
 
-The current CLI produces general artist discovery and rediscovery lists. Its source-aware pipeline is designed to accept additional persisted evidence without comparing unrelated providers' raw scores. Acquisition may use the network when you explicitly run enrichment; recommendation generation, evaluation, export, and TUI browsing use local data.
+The current CLI produces general discovery, artist-conditioned continuation, and rediscovery lists. Its source-aware pipeline is designed to accept additional persisted evidence without comparing unrelated providers' raw scores. Acquisition may use the network when you explicitly run enrichment; recommendation generation, evaluation, export, and TUI browsing use local data.
 
 The Python package and command-line tool are named `scrobble-recs`. Your listening history, recommendation runs, feedback, evidence, and API cache stay on your machine.
 
@@ -95,7 +95,7 @@ After enabling MusicBrainz in `config.json`, resolve ambiguous local artist iden
 scrobble-recs resolve --config ./config.json --source musicbrainz
 ```
 
-`enrich --source musicbrainz` currently runs the same bounded identity-resolution workflow. MBIDs remain evidence, not automatic proof that two artists are identical; ambiguous results stay separate.
+`enrich --source musicbrainz` resolves identities, then acquires bounded catalog facts and aliases. MBIDs remain evidence, not automatic proof that two artists are identical; ambiguous results stay separate.
 
 ### 5. Generate and inspect a run
 
@@ -104,6 +104,78 @@ scrobble-recs recommend --config ./config.json --limit 100
 scrobble-recs export --config ./config.json --output recs.csv --format csv
 scrobble-recs tui --config ./config.json
 ```
+
+To explore an artist's neighborhood using the same persisted-data pipeline:
+
+```bash
+scrobble-recs recommend --config ./config.json --artist "The Cure" --limit 25
+scrobble-recs recommend --config ./config.json --artist 42 --mode explore
+```
+
+`--artist` resolves an exact local MusicBrainz artist MBID first, then a positive numeric artist ID,
+then a normalized exact canonical name. Ambiguous matches list IDs and names; missing matches fail
+without constructing a network client. Aliases and fuzzy names are not lookup alternatives. The CLI
+prints the target ID, canonical name, and relationship state from the persisted query context.
+
+Artist retrieval first bounds the neighborhood to target-origin Last.fm edges and walks, shared
+semantic facets, enabled target-origin ListenBrainz memberships, and explicitly enabled catalog
+relationships. Personal taste and feedback rerank only that pool. Global chart placement or personal
+positive feedback alone cannot introduce an unrelated artist. Sparse neighborhoods return fewer
+results. Safe known neighbors are labeled `known`, unheard neighbors `new`. The default control uses the
+existing scorer and its knownness, trial-listen, fatigue, and diversity policies; deeply known
+neighbors receive the existing knownness preference reduction. Modes,
+including `rediscovery`, remain available. Hides, cooldowns, explicit negative artist feedback, and
+identities below the safety threshold remain excluded. Provider membership scores/ranks stay null.
+
+The immutable `artist-relationship-v1` snapshot counts duplicate-free scrobbles in the requested
+half-open history window, strictly before the as-of/history/feedback cutoff. It records counts,
+unique nonempty track/release keys, UTC active days/months, first/last listen, span, feedback, and
+prior persisted run appearances (`exposure_source=run_appearance`). Missing track keys count as
+individual singleton replay groups and stay in the play denominator. Recency-weighted plays sum
+the existing `exp(-days/400)` profile decay. Recent trend compares actual available recent
+(up to 90 days) and earlier daily rates: both zero gives 0; recent evidence without an earlier
+rate gives finite 1. Release keys are local album keys, not claims of resolved catalog identity.
+
+Initial configurable `recommendation.artist_relationship` thresholds are `sampled_max_plays=5`,
+`established_min_plays=20`, `established_min_active_months=3`, and `dormant_days=730`. Zero plays is
+`unheard`; both established thresholds plus at least 730 inactive days is `dormant_favorite`;
+both established thresholds otherwise is `established_favorite`; all other heard histories remain
+conservatively `sampled`. The explicit low-depth sampled band is persisted separately. Short history
+windows can therefore omit a dormant relationship; extend `--since` when that history is relevant.
+
+The default `artist-control-v1` profile uses the selected existing deterministic scorer (`legacy`
+or `walk`) and its configured component weights, mode multipliers, calibration, identity scaling,
+serendipity, and slate policy over the explicit target pool. Walk retrieval uses the existing
+`walk.max_hops` bound. Relationship state is recorded but does not silently activate new numerical
+controls. Unranked radio/catalog membership alone receives no positive relevance prior; it can
+remain a retrieved diagnostic candidate with zero relevance and no selected result. Finite semantic
+or other existing scoring evidence can still support that neighbor. Invalid Last.fm similarity rows
+are omitted consistently from scoring, features, and provenance; run diagnostics retain their IDs
+and string-valued rejection reasons without serializing NaN/Infinity.
+
+An experimental, reversible profile is available through
+`recommendation.artist_challenger.enabled=true`, which is **false by default**. The validated,
+versioned `artist-challenger-v1` configuration contains all additional tunables: target/personal/
+existing relevance weights (initially 0.75/0.15/0.10, nonnegative and summing to one), structural
+membership prior (0.25), hop-proximity scale (1.0, divided by `hop+1`), known-neighbor reduction
+(0.12), and per-state radius/popularity/obviousness controls. Initial unheard/sampled/established/
+dormant radii are 1/1/2/2, bounded by `walk.max_hops`; popularity preferences are +0.10/0/-0.10/-0.05
+and obviousness weights are 0.05/0.10/0.20/0.15. These values are unvalidated challenger settings,
+not production defaults. Use an explicitly configured file for local evaluation, for example:
+
+```bash
+scrobble-recs evaluate-rolling --config ./artist-challenger.json --task artist \
+  --cutoff 2024-01-01 --horizon-days 90
+```
+
+Each run persists the active control/challenger profile, actual settings, existing scorer weights,
+and target/personal/existing relevance contributions. Popularity, novelty, and other slate effects
+remain outside relevance: candidate policy JSON records each signed adjustment in final-score units,
+including diversity, clipping and exclusion, so `relevance + sum(policy components) = final score`.
+Challenger popularity/obviousness effects honor `obviousness.enabled`, and its additional known-neighbor
+reduction honors `knownness.enabled`. Disabling the challenger restores the existing control;
+activation is explicit and no promotion happens automatically. Changing the default requires the
+comparison evidence specified by the design; no fusion, exposure, or promotion workflow is added here.
 
 `recommend` reads the current local evidence snapshot and persists the run, including considered candidates and inspectable evidence/admission/ranking/policy data. It does not call provider APIs.
 
@@ -246,7 +318,9 @@ are excluded before candidate introduction and family agreement. The current all
 each run, so policy changes do not require reacquisition. Catalog facts provide membership,
 explanations, and independent-family reinforcement; their raw score and source rank remain null.
 The existing `discovery_evidence.catalog_relationships_enabled` switch applies only to direct
-catalog admission in artist contexts; artist querying is not exposed by this CLI yet.
+catalog admission in artist contexts. Enable it as well as `catalog_evidence.enabled` to let
+a target-origin catalog relationship introduce an artist-query candidate. Membership alone
+does not supply a positive default relevance score.
 
 Catalog facts and aliases are supplied by [MusicBrainz](https://musicbrainz.org/).
 Recommendation generation and TUI browsing consume persisted local data with no HTTP calls.
@@ -324,6 +398,24 @@ scrobble-recs evaluate-rolling \
 
 `--cutoff` is required and repeatable. Cutoffs accept dates or ISO timestamps, normalize to UTC, and are sorted and deduplicated. Each window trains strictly before its cutoff and evaluates first listens in the following `--horizon-days` days (90 by default; must be positive). The command prints each window followed by unweighted mean recall@50, recall@100, ndcg@50, and identity resolution coverage. Each replay persists a local recommendation run and uses that window's historical listening and feedback cutoff.
 
+Add `--task artist` for separate artist-conditioned replay (`--task general` is the default):
+
+```bash
+scrobble-recs evaluate-rolling --config ./config.json --task artist \
+  --cutoff 2024-01-01 --cutoff 2024-04-01 --horizon-days 90
+```
+
+At each cutoff, eligible targets have at least `min_seed_scrobbles` duplicate-free plays inside
+that cutoff's configured profile window. Targets run in ascending local artist-ID order, one
+persisted run per target. Artist reports identify each target, report distinct target count and
+run count, and average over target-window runs. Empty-target windows still count as windows but
+create no runs; an entirely empty target population has zero means. General reports retain their
+existing window denominator and metrics; artist means never include general runs. Artist results
+also report local horizon-only graded adoption NDCG: a newly heard artist earns 1 for a first
+listen, 2 for repeat plays, or 3 for listening on multiple UTC days, with gain `2**grade - 1`.
+Duplicates, pre-cutoff known artists, and plays outside the horizon earn no adoption credit.
+This retrospective result is supplementary: history does not establish discovery through the target.
+
 The Python evaluation results also include candidate and future-hit counts for `lastfm` (seed similarity evidence) and `lastfm_tag` (tag evidence). A candidate with both kinds of evidence counts in both groups, including candidates excluded from the final recommendations. Legacy `candidate_sources` stores seed IDs, so these diagnostics use the persisted seed/tag evidence counts. Identity rates cover all candidate artists: `resolved_musicbrainz` counts as resolved; `ambiguous_musicbrainz` and `provisional_mbid_conflict` count as ambiguous. Provisional MBIDs alone do not establish resolution. Empty candidate populations report zero rates.
 
 ## Development
@@ -375,7 +467,8 @@ A candidate must have direct graph evidence. With the current defaults, it passe
 - at least two distinct seeds have an edge to it of at least `0.05`; or
 - one strong seed edge of at least `0.30` is reinforced by tag similarity of at least `0.05`.
 
-This deliberately prevents tag-only recommendations.
+For general discovery, this deliberately prevents tag-only recommendations. Artist-conditioned
+queries can admit shared target semantic facets inside their explicit neighborhood.
 
 ### 4. Scoring
 

@@ -7,7 +7,7 @@ from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from math import log, sqrt
+from math import isfinite, log, sqrt
 from typing import Literal, TypeAlias
 
 from duckdb import DuckDBPyConnection
@@ -16,6 +16,7 @@ from scrobble_recs.config import ScrobbleRecsConfig
 from scrobble_recs.models.evidence import (
     AdmissionDecision,
     CandidateEvidence,
+    EvidenceObservation,
     LegacyEvidenceRows,
     is_legacy_compatible,
     is_translated_legacy,
@@ -70,6 +71,9 @@ class _ScoringData:
     identity_confidence_by_artist: dict[int, float]
     identity_warnings_by_artist: dict[int, list[str]]
     seed_graph: dict[int, dict[int, float]]
+    target_features: dict[int, dict[str, float | int | bool | str | None]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
@@ -636,7 +640,7 @@ def retrieve_legacy_candidates(
             seed_weights=inputs.idf_weights.effective_weight_by_seed,
             config=config.recommendation.walk,
         )
-        if config.recommendation.scoring.engine == "walk"
+        if config.recommendation.scoring.engine == "walk" and context.query_kind == "general"
         else None
     )
     candidates = tuple(
@@ -715,6 +719,12 @@ def retrieve_with_backoff(
     details = result.legacy
     evidence = result.evidence
     seeds = {seed.artist_id for seed in details.inputs.seeds}
+    if context.query_kind == "artist":
+        result = _condition_on_artist(conn, result, context=context, config=config)
+        assert result.legacy is not None
+        details = result.legacy
+        evidence = result.evidence
+        seeds = {seed.artist_id for seed in details.inputs.seeds}
     candidate_ids = ({row.artist_id for row in result.candidates} | set(evidence)) - seeds
     # Artist tags alone do not introduce new legacy candidates.
     legacy_ids = {row.artist_id for row in result.candidates}
@@ -751,6 +761,7 @@ def retrieve_with_backoff(
             config=config,
             tag_profile=details.inputs.tag_profile,
             walk_result=details.walk_result,
+            context=context,
         ).eligible
     }
     stages: list[dict[str, object]] = []
@@ -785,14 +796,18 @@ def retrieve_with_backoff(
             )
             confidence = (
                 data.identity_confidence_by_artist.get(artist, 0.5)
-                if legacy_policy_passed
+                if legacy_policy_passed and context.query_kind == "general"
                 else literal_confidences.get(artist, 0.5)
             )
             admissions[artist] = decide_candidate_admission(
                 facts,
                 stage=stage,
                 hidden=artist in details.inputs.feedback_profile.hidden_artist_ids,
-                strongly_rejected=artist in cooldown,
+                strongly_rejected=artist in cooldown
+                or (
+                    context.query_kind == "artist"
+                    and artist in details.inputs.feedback_profile.suppressed_seed_artist_ids
+                ),
                 identity_confidence=confidence,
                 config=config.recommendation.discovery_evidence,
                 context=context,
@@ -800,6 +815,7 @@ def retrieve_with_backoff(
                 seed_ids=seeds,
                 walk_supported=walk_supported,
                 legacy_policy_passed=legacy_policy_passed,
+                target_neighborhood_member=(artist in data.target_features),
             )
         admitted_count = sum(
             row.admitted for artist, row in admissions.items() if artist in usable_ids
@@ -902,3 +918,206 @@ def compute_identity_confidence(
         warnings.append("missing_musicbrainz_mbid")
 
     return (max(0.0, min(1.0, confidence)), sorted(warnings))
+
+
+def _condition_on_artist(
+    conn: DuckDBPyConnection,
+    result: RetrievalResult,
+    *,
+    context: QueryContext,
+    config: ScrobbleRecsConfig,
+) -> RetrievalResult:
+    """Bound the shared pool before admission; taste and feedback cannot add origins."""
+    assert result.legacy is not None and context.target_artist_id is not None
+    assert context.artist_settings is not None and context.target_relationship is not None
+    details = result.legacy
+    data = details.scoring_data
+    target = context.target_artist_id
+    identity = conn.execute(
+        """
+            SELECT canonical_name, artist_key, coalesce(lastfm_name, canonical_name) FROM artist
+            WHERE artist_id = ?
+        """,
+        [target],
+    ).fetchone()
+    if identity is None:
+        raise ValueError(f"target artist not found: {target}")
+    seed = SeedArtist(
+        target,
+        str(identity[0]),
+        str(identity[1]),
+        str(identity[2]),
+        context.target_relationship.play_count,
+        1.0,
+        ("target",),
+    )
+    target_tags = _candidate_tag_vector(target, data)
+    invalid_rows = [
+        {
+            "source_artist_id": source,
+            "target_artist_id": artist,
+            "reason": "nonfinite_similarity",
+            "value": "nan" if weight != weight else "infinity" if weight > 0 else "-infinity",
+        }
+        for artist, edges in sorted(data.similarity_by_target.items())
+        for source, weight in sorted(edges)
+        if not isfinite(weight)
+    ]
+    data = replace(
+        data,
+        similarity_by_target={
+            artist: [(source, weight) for source, weight in edges if isfinite(weight)]
+            for artist, edges in data.similarity_by_target.items()
+        },
+        feedback_similarity_by_target={
+            artist: [(source, weight) for source, weight in edges if isfinite(weight)]
+            for artist, edges in data.feedback_similarity_by_target.items()
+        },
+    )
+    # Only finite, positive Last.fm edges can create target-origin reachability.
+    graph = {
+        artist: [(source, weight) for source, weight in edges if isfinite(weight) and weight > 0]
+        for artist, edges in data.similarity_by_target.items()
+    }
+    walk = build_walk_result(
+        graph,
+        seed_ids={target},
+        seed_weights={target: 1.0},
+        config=config.recommendation.walk.model_copy(
+            update={"max_hops": context.artist_settings.max_hops, "symmetrize": False}
+        ),
+    )
+    candidates = (
+        set(data.direct_tags_by_artist)
+        | set(data.tag_ranks_by_artist)
+        | set(walk.nodes)
+        | set(result.evidence)
+    )
+    features: dict[int, dict[str, float | int | bool | str | None]] = {}
+    evidence: dict[int, CandidateEvidence] = {}
+    personal_weights = {seed.artist_id: seed.weight for seed in context.taste_region_seeds}
+    total_personal = sum(personal_weights.values()) or 1.0
+    for artist in sorted(candidates - {target}):
+        node = walk.nodes.get(artist)
+        hop = (
+            node.hop_distance
+            if node and 0 < node.hop_distance <= context.artist_settings.max_hops
+            else None
+        )
+        semantic = _tag_similarity_score(artist, target_tags, data)
+        observations = _target_observations(
+            result.evidence.get(artist, CandidateEvidence(artist, ())),
+            target=target,
+            semantic_overlap=semantic,
+            identity_threshold=config.recommendation.discovery_evidence.identity_safety_threshold,
+            catalog_enabled=config.recommendation.discovery_evidence.catalog_relationships_enabled,
+        )
+        radio = any(
+            row.source == "listenbrainz"
+            and row.source_artist_id == target
+            and row.relationship_kind == "artist_radio_membership"
+            for row in observations
+        )
+        catalog = any(
+            row.family == "catalog"
+            and row.source_artist_id == target
+            and row.relationship_kind == "catalog_relationship"
+            for row in observations
+        )
+        direct = max(
+            (weight for source, weight in graph.get(artist, ()) if source == target), default=0.0
+        )
+        if hop is None and semantic <= 0 and not radio and not catalog:
+            continue
+        known = (
+            data.listening_by_artist.get(artist, (0, 0, 0, 0, None, None))[2] > 0
+            or artist in details.inputs.feedback_profile.known_artist_ids
+        )
+        personal = (
+            sum(
+                personal_weights.get(source, 0.0) * weight
+                for source, weight in graph.get(artist, ())
+            )
+            / total_personal
+        )
+        personal = max(personal, _tag_similarity_score(artist, details.inputs.tag_profile, data))
+        features[artist] = {
+            "target_direct_strength": direct,
+            "target_hop_distance": hop,
+            "target_semantic_overlap": semantic,
+            "target_radio_membership": radio,
+            "target_catalog_relationship": catalog,
+            "target_relationship_state": context.target_relationship.state,
+            "known_status": "known" if known else "new",
+            "target_personal_agreement": personal,
+            "target_relevance": max(
+                direct,
+                context.artist_settings.hop_proximity_scale / (hop + 1) if hop else 0.0,
+                semantic,
+                context.artist_settings.structural_membership_prior if radio or catalog else 0.0,
+            ),
+            "artist_profile": context.artist_settings.profile,
+            "artist_max_hops": context.artist_settings.max_hops,
+            "artist_popularity_preference": context.artist_settings.popularity_preference,
+            "artist_obviousness_penalty_weight": context.artist_settings.obviousness_penalty_weight,
+        }
+        evidence[artist] = CandidateEvidence(artist, observations)
+    inputs = replace(
+        details.inputs,
+        seeds=(seed,),
+        idf_weights=compute_seed_idf_weights({target: 1.0}, {}, alpha=0.0),
+        tag_profile=target_tags,
+    )
+    data = replace(
+        data,
+        candidates=set(features),
+        target_features=features,
+        identity_confidence_by_artist={
+            int(a): float(c)
+            for a, c in conn.execute(
+                "SELECT artist_id, coalesce(identity_confidence, .5) FROM artist"
+            ).fetchall()
+        },
+    )
+    return RetrievalResult(
+        tuple(_retrieval_candidate(artist, data) for artist in sorted(features)),
+        {
+            "candidate_count": len(features),
+            "target_artist_id": target,
+            "target_neighborhood": sorted(features),
+            "invalid_similarity_rows": invalid_rows,
+        },
+        LegacyRetrievalDetails(inputs, data, walk),
+        evidence,
+    )
+
+
+def _target_observations(
+    facts: CandidateEvidence,
+    *,
+    target: int,
+    semantic_overlap: float,
+    identity_threshold: float,
+    catalog_enabled: bool,
+) -> tuple[EvidenceObservation, ...]:
+    observations = []
+    for row in facts.observations:
+        if row.family == "catalog" and not catalog_enabled:
+            continue
+        if (
+            not is_translated_legacy(row)
+            and row.family != "personal"
+            and row.identity_confidence < identity_threshold
+        ):
+            continue
+        if (
+            row.family == "personal"
+            or (row.family == "semantic" and semantic_overlap > 0)
+            or (
+                row.source_artist_id == target
+                and row.relationship_kind
+                in ("similar_artist", "artist_radio_membership", "catalog_relationship")
+            )
+        ):
+            observations.append(row)
+    return tuple(observations)

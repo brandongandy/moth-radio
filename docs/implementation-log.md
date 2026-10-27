@@ -421,3 +421,129 @@ All Python verification commands used `PYTHONPATH=src` and the repository virtua
 - Final verification: `python -m pytest -q` — 643 passed (34.86 seconds), no warnings or failures;
   Ruff lint passed; Ruff format reported 92 files formatted; mypy found no issues in 50 source
   files; `git diff --check` was clean. Verification used the same `PYTHONPATH=src` interpreter.
+
+
+## Task 7 — Artist-conditioned discovery through the shared engine
+
+The initial numerical-control description below is historical; fix round 1 replaces its production
+default with the existing deterministic scorer and moves the variation behind an explicit default-off
+challenger. The fix-round entry records the current behavior.
+
+- Added exact local target resolution (MBID, positive ID, normalized exact canonical name),
+  explicit ambiguity errors, and strict-window relationship snapshots. Every continuous metric,
+  threshold, low-depth sampled band, relationship version, and run-appearance exposure provenance
+  is persisted. Exhaustive state precedence and finite recent-trend/missing-key conventions match
+  the pinned local decisions. The existing 400-day knownness decay was extracted without changing
+  general arithmetic.
+- Added `RecommendationRequest(query_kind="artist", target_artist_id=...)` to the existing
+  retrieval → ranking → policy → store pipeline. Target-only outgoing walk reachability, direct
+  graph neighbors, shared semantic facets, target radio membership, and current enabled/allow-listed
+  catalog evidence establish the pool before personal taste or feedback can rerank it. Both catalog
+  policy switches and both ListenBrainz switches retain their existing roles. Provider scores/ranks
+  are not synthesized or rewritten. Sparse pools stay sparse.
+- Versioned artist controls use radius 1/1/2/2, popularity preference +0.10/0/-0.10/-0.05, and
+  obviousness weights 0.05/0.10/0.20/0.15 for unheard/sampled/established/dormant respectively.
+  Radius is bounded by configured walk depth; structural unranked membership has target relevance
+  0.25. Initial relevance uses 0.75 target relevance + 0.15 personal agreement + 0.10 existing
+  components, with 0.12 known-neighbor reduction. These are recorded initial controls, not claimed
+  optima. Full settings, target features, known/new labels, and policy reasons are inspectable JSON.
+- Artist eligibility permits known neighbors but preserves hidden/cooldown/unsafe identity and
+  explicit negative artist feedback exclusions at retrieval and ranking. Self-review regression
+  tests additionally pin unsafe provider-observation identity, weak older negative feedback,
+  mode-independent known/new labels, future-evidence/history/feedback exclusion, and catalog flags.
+- Added `recommend --artist REFERENCE`, target ID/name/state output, and `evaluate-rolling --task`.
+  Artist replay selects pre-cutoff targets meeting the existing minimum seed play threshold inside
+  each configured history window, ordered by ID. One run is generated per target-window; artist
+  means use run count, distinct target count is separate, and empty populations report zeros.
+  General result serialization and metric arithmetic remain unchanged. Artist reports serialize
+  their task discriminator and report local horizon adoption grades (first=1, repeat=2, multi-day=3)
+  with a separate graded NDCG field. No Task 8 fusion or Task 9 exposure schema was introduced.
+- README and example configuration describe shipped behavior and initial numerical conventions.
+  Corrected the deferred quick-start MusicBrainz wording while updating adjacent workflow docs.
+
+### TDD and verification
+
+- Relationship/config API RED: collection failed on the absent `ArtistRelationshipConfig` and
+  relationship module. GREEN after implementation: 33 relationship/knownness/query tests passed.
+  Boundary additions exercise exact 730-day dormancy and singleton missing-track replay behavior.
+- Shared artist pipeline RED: 16 failures at the explicit artist-not-implemented rejection.
+  GREEN: 16 passed through real temporary DuckDB, both scorers, all modes, bounded retrieval,
+  known-neighbor preference, strict safety, source gates, sparse results, and deterministic JSON.
+- Replay/CLI RED: 9 failures for absent artist/task options, replay keyword, and adoption helpers.
+  The initial broad replay/CLI/evidence/recommend run had 260 passed and 3 failed on a missing
+  CLI JSON import; after fixing that import, the focused relationship/artist/CLI/replay/control
+  run passed 131 tests.
+  The old unsupported-artist assertion now checks a missing local target instead; the existing
+  standalone catalog admission contract remains intact.
+- Self-review RED: unsafe provider identity introduced a candidate; old weak negative feedback
+  restored two neighbors; rediscovery labeled a known artist `rediscovery`; serialized task/target
+  output and target-obviousness fields were absent; disabled direct catalog admission leaked a
+  catalog-only neighbor. Minimal shared-stage fixes made the focused artist suite pass (22 tests).
+  Recent positive-feedback cooldown and strict future cutoffs also remain covered.
+- Verification uses `PYTHONPATH=src` with the repository virtualenv interpreter, deterministic
+  fixtures, temporary DuckDB files, and raising provider-client boundaries. No live API calls.
+- Final focused command: `python -m pytest tests/test_relationship.py tests/test_artist_recommend.py
+  tests/test_cli.py tests/test_evaluate.py
+  tests/test_recommend.py::test_control_recommendation_fingerprint_matches_fixture -q` —
+  132 passed (10.64 seconds), including the unchanged frozen control fixture.
+- Final full suite after code/test edits: `python -m pytest -q` — 691 passed (35.25 seconds),
+  no warnings or failures. `python -m ruff check .` passed; `python -m ruff format --check .`
+  reported 95 formatted files; `python -m mypy src` found no issues in 51 source files;
+  `git diff --check` was clean. Configuration-only cleanup retained the example's existing
+  decimal formatting. No credentials or local user paths were added to implementation files.
+- Self-review covered resolution ambiguity, normalized timestamp/cutoff math, all state boundaries,
+  neighborhood leakage, repeated safety checks, known labels, sparse slates, deterministic
+  persistence, general-control stability, evaluation denominators, source gates, and network-free
+  CLI/replay execution. The numerical artist controls remain initial experimental defaults.
+
+
+### Task 7 review fix round 1 — cutoff, policy accounting, invalid evidence, and control profile
+
+- I1: derive one effective artist listening window ending at the minimum requested end, as-of,
+  historical cutoff, and local-history cutoff. Use it for personal seed/profile construction,
+  persisted query context, relationship snapshot, and local listening inputs. Unequal-bound tests
+  reproduce future-only scrobbles changing persisted seeds/features/rank order; all three bound
+  variants now remain unchanged under both control and challenger profiles.
+- I2: remove relationship popularity and known-neighbor reductions from raw relevance. The shared
+  policy seam applies enabled adjustments and records signed per-candidate components/reasons in
+  final-score units. Existing knownness/obviousness/fatigue/trial adjustments, challenger effects,
+  clipping, diversity, and slate exclusion account for the full difference between relevance and
+  final score. Excluded candidates retain their reasons and amounts too.
+- I3: filter nonfinite Last.fm similarities consistently before artist scoring, graph features,
+  feedback-neighborhood scoring, and provenance. Persist invalid-row IDs/reasons with string values
+  in run retrieval diagnostics. Valid semantic neighbors remain usable when their legacy edge is
+  NaN or positive/negative Infinity, under either configured scorer and either artist profile.
+- I4: default artist production now uses `artist-control-v1`: the selected existing scorer,
+  component weights, calibration/mode/identity/serendipity controls, walk depth and slate policies
+  over the bounded target neighborhood. No structural membership prior, new hop floor, relevance
+  blend, relationship popularity matrix, or additional known-neighbor reduction is active by default.
+  Membership-only zero-relevance candidates remain persisted diagnostics and do not pad the slate.
+- Consolidated the experimental variation in validated `recommendation.artist_challenger` config,
+  version `artist-challenger-v1`, default `enabled=false`. Bounded relevance weights must sum to one;
+  structural/hop/novelty values and every state's radius/popularity/obviousness controls are explicit.
+  Runs persist the active profile, actual settings and relevance contributions; disabling the profile
+  restores the existing control. README/example config distinguish control from optional evaluation
+  settings. No automatic promotion, Task 8 fusion, Task 9 exposures, or Task 11 workflow was added.
+- TDD: I1 first reproduced 3 unequal-bound failures, then 3 passed; I3 first reproduced 6 JSON
+  persistence failures for NaN/±Infinity edges, then 6 passed; I2 first reproduced different raw
+  relevance for equal-strength known/new neighbors, then accounting passed. Expanded exclusion
+  tests exposed 2 missing per-effect reason failures, then passed. I4 first reproduced 4 missing
+  control/default-off/zero-prior failures; 14 focused control/config tests then passed. Old tests
+  asserting the rejected default numerical variation now explicitly enable the challenger.
+- Latest focused artist suite: 50 passed, including control restoration, enabled-effect flags,
+  actual tunable/contribution persistence, existing knownness preference, both scorer settings,
+  profile-separated cutoff/invalid-evidence regressions and selected/excluded policy accounting.
+- A final zero-relevance membership regression exposed a misleading `slate_limit` reason;
+  it now records `nonpositive_policy_score`. RED: 1 failed; GREEN accounting/zero-prior checks:
+  5 passed. General policy reasons/serialization remain unchanged.
+- Final broad focused command covering artist/relationship/query/config/evaluation/CLI/policy/
+  ranking/store/recommendation tests: 336 passed (18.85 seconds), including the unchanged frozen
+  general control fingerprint. Full `python -m pytest -q`: 730 passed (41.05 seconds), no failures
+  or warnings. Ruff lint passed; Ruff format reported 95 formatted files; mypy found no issues
+  in 51 source files; diff checks were clean. Commands used `PYTHONPATH=src` and the repository
+  virtualenv interpreter. No live API calls or new network dependencies were introduced.
+- Self-review verified effective history bounds under both profiles, finite source-local values
+  throughout scoring/provenance, explicit disabled-by-default challenger controls, actual
+  contribution persistence, selected/excluded/diversity policy accounting, control restoration,
+  existing knownness preference, and byte-stable general control behavior. All four Important
+  findings are addressed; no scope expansion or unresolved contract decision remains.

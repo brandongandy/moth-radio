@@ -710,3 +710,35 @@ def test_listenbrainz_obsolete_config_has_migration_message(field) -> None:
 
     with pytest.raises(ValidationError, match="remove.*" + field):
         ListenBrainzApiConfig(**{field: None})
+
+
+def test_artist_challenger_is_explicit_versioned_and_default_off():
+    config = RecommendationConfig()
+    assert hasattr(config, "artist_challenger")
+    challenger = config.artist_challenger
+    assert challenger.enabled is False
+    assert challenger.version == "artist-challenger-v1"
+    assert (
+        challenger.target_weight + challenger.personal_weight + challenger.existing_weight
+        == pytest.approx(1)
+    )
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"target_weight": -0.1},
+        {"target_weight": 1.1},
+        {"target_weight": 0.9},
+        {"structural_membership_prior": float("inf")},
+        {"hop_proximity_scale": -1},
+        {"known_neighbor_penalty": 2},
+        {"unheard": {"max_hops": 0}},
+        {"sampled": {"popularity_preference": 2}},
+        {"established_favorite": {"obviousness_penalty_weight": float("nan")}},
+        {"version": "unversioned"},
+    ],
+)
+def test_artist_challenger_rejects_unbounded_or_unversioned_controls(settings):
+    with pytest.raises(ValidationError):
+        RecommendationConfig.model_validate({"artist_challenger": settings})

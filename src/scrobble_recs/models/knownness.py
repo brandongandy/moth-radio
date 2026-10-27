@@ -49,7 +49,7 @@ def compute_artist_listening_scores(
         * (1.0 + _TRACK_DIVERSITY_WEIGHT * log1p(artist.track_count))
         * (1.0 + _ACTIVE_MONTH_LIFETIME_WEIGHT * log1p(artist.active_months))
     )
-    recency_weight = exp(-days_since_last_play / _RECENT_DECAY_DAYS)
+    recency_weight = recency_decay(days_since_last_play)
     recent_weight = lifetime_weight * (0.35 + 0.65 * recency_weight)
     knownness = (
         min(1.0, log1p(artist.play_count) / log1p(50))
@@ -97,3 +97,8 @@ def _rediscovery_score(*, play_count: int, days_since_last_play: int, knownness:
     dormancy = min(1.0, days_since_last_play / _REDISCOVERY_DORMANCY_DAYS)
     novelty = 1.0 - knownness
     return max(0.0, min(1.0, play_band * dormancy * novelty))
+
+
+def recency_decay(days_since_play: int) -> float:
+    """The existing 400-day profile decay, shared with target snapshots."""
+    return exp(-max(days_since_play, 0) / _RECENT_DECAY_DAYS)

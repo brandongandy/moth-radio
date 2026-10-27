@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from hashlib import sha256
 from typing import Literal
@@ -15,6 +15,7 @@ from scrobble_recs.models.profile_window import ListeningWindow, normalize_times
 QueryKind = Literal["general", "artist"]
 NoveltyIntent = Literal["discover", "mixed", "rediscover"]
 EvidenceFreshness = tuple[tuple[str, int, datetime | None], ...]
+RelationshipState = Literal["unheard", "sampled", "established_favorite", "dormant_favorite"]
 
 
 @dataclass(frozen=True)
@@ -44,7 +45,7 @@ class TasteRegionSeed:
 
 @dataclass(frozen=True)
 class TargetRelationshipSnapshot:
-    state: Literal["unheard", "sampled", "established_favorite", "dormant_favorite"]
+    state: RelationshipState
     play_count: int
     recency_weighted_play_count: float
     unique_tracks: int
@@ -59,6 +60,27 @@ class TargetRelationshipSnapshot:
     positive_feedback: float
     negative_feedback: float
     prior_recommendation_exposures: int
+    exposure_source: str = "run_appearance"
+    relationship_version: str = "artist-relationship-v1"
+    thresholds: dict[str, int] = field(default_factory=dict)
+    low_depth_sample: bool = False
+
+
+@dataclass(frozen=True)
+class ArtistQuerySettings:
+    profile: Literal["control", "challenger"]
+    version: str
+    max_hops: int
+    popularity_preference: float
+    obviousness_penalty_weight: float
+    known_neighbor_penalty: float
+    target_weight: float
+    personal_weight: float
+    existing_weight: float
+    structural_membership_prior: float
+    hop_proximity_scale: float
+    scoring_engine: str
+    component_weights: dict[str, float]
 
 
 @dataclass(frozen=True)
@@ -86,6 +108,7 @@ class QueryContext:
     code_version: str | None = None
     target_artist_id: int | None = None
     target_relationship: TargetRelationshipSnapshot | None = None
+    artist_settings: ArtistQuerySettings | None = None
 
     def __post_init__(self) -> None:
         RecommendationRequest(self.query_kind, self.target_artist_id)
@@ -100,6 +123,7 @@ class QueryContext:
         if self.query_kind == "general":
             payload.pop("target_artist_id")
             payload.pop("target_relationship")
+            payload.pop("artist_settings")
         return {key: _json_value(value) for key, value in payload.items()}
 
 

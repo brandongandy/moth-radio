@@ -71,6 +71,7 @@ class _CandidateScore:
     identity_warnings: tuple[str, ...] = ()
     hop_distance: int | None = None
     walk_node: WalkNode | None = None
+    relevance_components: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -145,10 +146,12 @@ class PolicyDecision:
     adjustment: float
     reasons: tuple[str, ...]
     legacy_score: _CandidateScore | None = field(default=None, repr=False)
+    components: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "reasons", tuple(self.reasons))
         object.__setattr__(self, "legacy_score", deepcopy(self.legacy_score))
+        object.__setattr__(self, "components", dict(self.components))
 
 
 @dataclass(frozen=True)
@@ -177,6 +180,7 @@ def candidate_eligibility(
     config: ScrobbleRecsConfig,
     tag_profile: dict[str, float],
     walk_result: WalkResult | None,
+    context: QueryContext | None = None,
 ) -> CandidateEligibility:
     listening = scoring_data.listening_by_artist.get(artist_id, (0.0, 0.0, 0, 0, None, None))
     rediscovery = listening[1] if mode.name == "rediscovery" else 0.0
@@ -186,6 +190,16 @@ def candidate_eligibility(
         has_positive_feedback=artist_id in feedback_profile.boosted_seed_artist_ids,
     )
     node = walk_result.nodes.get(artist_id) if walk_result is not None else None
+    if context is not None and context.query_kind == "artist":
+        reason = _artist_exclusion_reason(
+            artist_id,
+            context=context,
+            feedback=feedback_profile,
+            cooldown=cooldown_artist_ids,
+            data=scoring_data,
+            identity_threshold=config.recommendation.discovery_evidence.identity_safety_threshold,
+        )
+        return CandidateEligibility(artist_id, reason, rediscovery, rediscovery_eligible, node)
     reason = _admission_exclusion_reason(
         artist_id,
         seed_ids=seed_ids,
@@ -207,6 +221,33 @@ def candidate_eligibility(
             scoring_data=scoring_data,
         )
     return CandidateEligibility(artist_id, reason, rediscovery, rediscovery_eligible, node)
+
+
+def _artist_exclusion_reason(
+    artist_id: int,
+    *,
+    context: QueryContext,
+    feedback: FeedbackProfile,
+    cooldown: set[int],
+    data: _ScoringData,
+    identity_threshold: float,
+) -> str | None:
+    if artist_id == context.target_artist_id:
+        return "target_artist"
+    if artist_id not in data.target_features:
+        return "outside_target_neighborhood"
+    if artist_id in feedback.hidden_artist_ids:
+        return "hidden_artist"
+    if artist_id in cooldown:
+        return "feedback_cooldown"
+    if artist_id in feedback.suppressed_seed_artist_ids:
+        return "negative_artist_feedback"
+    if artist_id not in data.artist_names:
+        return "missing_artist_name"
+    confidence = data.identity_confidence_by_artist.get(artist_id, 0.0)
+    if not isfinite(confidence) or confidence < identity_threshold:
+        return "identity_below_safety_threshold"
+    return None
 
 
 def _admission_exclusion_reason(
@@ -652,6 +693,18 @@ def apply_slate_policy(
         and item.legacy.score is not None
         and item.artist_id not in hidden
     ]
+    artist_components = {}
+    if context.query_kind == "artist":
+        by_id = {item.artist_id: item for item in ranked}
+        adjusted = []
+        for score in scores:
+            item = by_id[score.artist_id]
+            components = _artist_policy_components(item, score, context, mode, config)
+            raw_final = item.relevance_score + sum(components.values())
+            components["floor_at_zero"] = max(0.0, -raw_final)
+            artist_components[score.artist_id] = components
+            adjusted.append(replace(score, final_score=max(0.0, raw_final)))
+        scores = [score for score in adjusted if score.final_score > 0.0]
     data = next(
         (item.legacy.retrieval.scoring_data for item in ranked if item.legacy is not None), None
     )
@@ -688,7 +741,23 @@ def apply_slate_policy(
     for item in ranked:
         if item.artist_id in chosen:
             rank, score = chosen[item.artist_id]
+            components = dict(artist_components.get(item.artist_id, {}))
+            if context.query_kind == "artist":
+                components["diversity"] = -score.diversity_penalty
             reasons = ["included"]
+            reasons.extend(name for name, amount in components.items() if amount != 0.0)
+            if context.query_kind == "artist":
+                reasons.extend(
+                    (
+                        "artist_neighborhood",
+                        f"relationship_{context.target_relationship.state}"
+                        if context.target_relationship
+                        else "artist_relationship",
+                        "known_neighbor"
+                        if item.features.values.get("known_status") == "known"
+                        else "new_neighbor",
+                    )
+                )
             if score.fatigue.penalty:
                 reasons.append("fatigue")
             if score.knownness_penalty:
@@ -708,8 +777,11 @@ def apply_slate_policy(
                     rank,
                     score.final_score,
                     score.final_score - item.relevance_score,
-                    tuple(reasons),
+                    tuple(dict.fromkeys(reasons))
+                    if context.query_kind == "artist"
+                    else tuple(reasons),
                     score,
+                    components,
                 )
             )
         else:
@@ -720,9 +792,26 @@ def apply_slate_policy(
                 mode,
                 diversity_enabled=config.recommendation.diversity.enabled,
             )
+            components = dict(artist_components.get(item.artist_id, {}))
+            if context.query_kind == "artist":
+                if (
+                    item.artist_id in artist_components
+                    and item.relevance_score + sum(components.values()) <= 0.0
+                ):
+                    excluded_reasons = ("nonpositive_policy_score",)
+                components["slate_exclusion"] = -(item.relevance_score + sum(components.values()))
+                excluded_reasons += tuple(
+                    name for name, amount in components.items() if amount != 0.0
+                )
             decisions.append(
                 PolicyDecision(
-                    item.artist_id, False, None, 0.0, -item.relevance_score, excluded_reasons
+                    item.artist_id,
+                    False,
+                    None,
+                    0.0,
+                    -item.relevance_score,
+                    excluded_reasons,
+                    components=components,
                 )
             )
     return tuple(
@@ -731,6 +820,30 @@ def apply_slate_policy(
             key=lambda item: (item.final_rank is None, item.final_rank or 0, item.artist_id),
         )
     )
+
+
+def _artist_policy_components(
+    item: RankedCandidate,
+    score: _CandidateScore,
+    context: QueryContext,
+    mode: RecommendationModeSettings,
+    config: ScrobbleRecsConfig,
+) -> dict[str, float]:
+    """Amounts are final-score units; relevance never contains slate preferences."""
+    assert context.artist_settings is not None
+    scale = 0.5 + 0.5 * score.identity_confidence
+    settings = context.artist_settings
+    return {
+        "knownness": -score.knownness_penalty * scale,
+        "obviousness": -score.obviousness_penalty * scale,
+        "fatigue": -score.fatigue.penalty * scale,
+        "trial_listen": -score.trial_penalty * scale if mode.name == "balanced" else 0.0,
+        "relationship_popularity": settings.popularity_preference * score.obviousness * scale,
+        "known_neighbor_novelty": -settings.known_neighbor_penalty * scale
+        if item.features.values.get("known_status") == "known"
+        and config.recommendation.knownness.enabled
+        else 0.0,
+    }
 
 
 def _excluded_slate_reasons(

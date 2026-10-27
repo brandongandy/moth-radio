@@ -901,3 +901,119 @@ def test_unavailable_listenbrainz_retains_previous_observations_and_lastfm_contr
         assert conn.execute("SELECT count(*) FROM artist_evidence_observation").fetchone()[0] == 2
     finally:
         conn.close()
+
+
+def test_artist_rolling_replay_uses_ascending_targets_and_separate_run_denominator(tmp_path):
+    from dataclasses import asdict
+
+    conn, config = _setup_db(tmp_path)
+    config.recommendation.profile_window_months = 24
+    config.recommendation.min_seed_scrobbles = 2
+    conn.execute("UPDATE artist SET identity_confidence = .95")
+    window = evaluate_model.EvaluationWindow(
+        datetime(2024, 1, 3), datetime(2024, 1, 3), datetime(2024, 4, 3)
+    )
+    try:
+        report = evaluate_model.evaluate_rolling_recommendations(
+            conn, config, windows=[window], evaluation_task="artist"
+        )
+        expected = [
+            int(row[0])
+            for row in conn.execute(
+                """
+                    SELECT a.artist_id FROM artist a JOIN scrobble s USING (artist_key) WHERE
+                    NOT s.is_duplicate AND s.played_at >= '2022-01-03' AND s.played_at <
+                    '2024-01-03' GROUP BY a.artist_id HAVING count(*) >= 2 ORDER BY a.artist_id
+                """
+            ).fetchall()
+        ]
+        assert expected
+        assert report.evaluation_task == "artist"
+        assert asdict(report)["evaluation_task"] == "artist"
+        assert report.window_count == 1
+        assert report.target_count == report.run_count == len(expected)
+        assert [r.target_artist_id for r in report.windows] == expected
+        assert report.mean_recall_at_50 == pytest.approx(
+            sum(r.recall_at_50 for r in report.windows) / len(expected)
+        )
+        assert all(r.evaluation_task == "artist" and r.run_id for r in report.windows)
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM recommendation_run WHERE query_kind = 'general'"
+            ).fetchone()[0]
+            == 0
+        )
+        assert all(0 <= r.graded_adoption_ndcg_at_50 <= 1 for r in report.windows)
+        repeated = evaluate_model.evaluate_rolling_recommendations(
+            conn, config, windows=[window], evaluation_task="artist"
+        )
+        for first, second in zip(report.windows, repeated.windows, strict=True):
+            assert {k: v for k, v in asdict(first).items() if k != "run_id"} == {
+                k: v for k, v in asdict(second).items() if k != "run_id"
+            }
+    finally:
+        conn.close()
+
+
+def test_artist_rolling_empty_targets_produces_zero_report_and_no_runs(tmp_path):
+    conn, config = _setup_db(tmp_path)
+    try:
+        report = evaluate_model.evaluate_rolling_recommendations(
+            conn,
+            config,
+            windows=[
+                evaluate_model.EvaluationWindow(
+                    datetime(1990, 1, 1), datetime(1990, 1, 1), datetime(1990, 4, 1)
+                )
+            ],
+            evaluation_task="artist",
+        )
+        assert report.window_count == 1
+        assert report.run_count == report.target_count == 0
+        assert report.windows == ()
+        assert report.mean_recall_at_50 == report.mean_ndcg_at_50 == 0
+        assert conn.execute("SELECT count(*) FROM recommendation_run").fetchone() == (0,)
+        with pytest.raises(ValueError, match="evaluation_task"):
+            evaluate_model.evaluate_rolling_recommendations(
+                conn,
+                config,
+                windows=[
+                    evaluate_model.EvaluationWindow(
+                        datetime(1990, 1, 1), datetime(1990, 1, 1), datetime(1990, 4, 1)
+                    )
+                ],
+                evaluation_task="other",
+            )
+    finally:
+        conn.close()
+
+
+def test_artist_adoption_gains_are_horizon_only_and_duplicate_free(tmp_path):
+    conn, config = _setup_db(tmp_path)
+    try:
+        conn.execute(
+            """
+                INSERT INTO artist (artist_id, canonical_name, artist_key) VALUES (9700,
+                'Adopted', 'adopted'), (9701, 'Once', 'once')
+            """
+        )
+        conn.execute(
+            """
+                INSERT INTO scrobble (scrobble_id, artist_key, track_key, played_at,
+                is_duplicate) VALUES (9700, 'adopted', 'a', '2025-01-02', false), (9701,
+                'adopted', 'a', '2025-01-03', false), (9702, 'once', 'b', '2025-01-03', false),
+                (9703, 'once', 'b', '2025-01-04', true), (9704, 'once', 'c', '2025-04-01',
+                false)
+            """
+        )
+        gains = evaluate_model._artist_adoption_gains(
+            conn,
+            start=datetime(2025, 1, 1),
+            end=datetime(2025, 4, 1),
+            exclude_before=datetime(2025, 1, 1),
+        )
+        assert gains == {9700: 3.0, 9701: 1.0}
+        assert evaluate_model._adoption_ndcg_at_k(gains, [9701, 9700], 50) < 1.0
+        assert evaluate_model._adoption_ndcg_at_k(gains, [9700, 9701], 50) == 1.0
+    finally:
+        conn.close()

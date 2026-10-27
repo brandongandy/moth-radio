@@ -28,6 +28,7 @@ def decide_candidate_admission(
     seed_ids: set[int] | None = None,
     walk_supported: bool = False,
     legacy_policy_passed: bool = False,
+    target_neighborhood_member: bool | None = None,
 ) -> AdmissionDecision:
     """Evaluate one explicit retrieval stage, before relevance calibration.
 
@@ -49,6 +50,16 @@ def decide_candidate_admission(
         or identity_confidence < config.low_confidence_identity_threshold
     ):
         return result(False, "identity_below_minimum")
+    if (
+        context is not None
+        and context.query_kind == "artist"
+        and target_neighborhood_member is not None
+    ):
+        if identity_confidence < config.identity_safety_threshold:
+            return result(False, "identity_below_safety_threshold")
+        if target_neighborhood_member:
+            return result(True, "target_neighborhood_evidence")
+        return result(False, "outside_target_neighborhood")
     legacy = tuple(
         row for row in evidence.observations if row.source == "lastfm" and is_translated_legacy(row)
     )

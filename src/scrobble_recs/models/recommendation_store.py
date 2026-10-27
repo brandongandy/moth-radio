@@ -254,6 +254,8 @@ def _candidate_detail_values(
         "adjustment": decision.adjustment if decision is not None and score is not None else None,
         "reasons": list(decision.reasons) if decision is not None else [],
     }
+    if "known_status" in candidate.features.values and decision is not None:
+        effects["components"] = decision.components
     assert candidate.legacy is not None
     listening = candidate.legacy.retrieval.scoring_data.listening_by_artist.get(candidate.artist_id)
     known_status = (
@@ -264,6 +266,8 @@ def _candidate_detail_values(
         or (score is not None and score.knownness > 0)
         else "new"
     )
+    if "known_status" in candidate.features.values:
+        known_status = str(candidate.features.values["known_status"])
     return [
         json.dumps(candidate_evidence_json(evidence), sort_keys=True, allow_nan=False),
         json.dumps(features, sort_keys=True, allow_nan=False),

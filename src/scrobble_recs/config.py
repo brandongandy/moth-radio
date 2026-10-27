@@ -518,9 +518,74 @@ class TagProfileConfig(BaseModel):
         return value
 
 
+class ArtistRelationshipConfig(BaseModel):
+    """Version-one conservative relationship thresholds, not fitted optima."""
+
+    model_config = ConfigDict(extra="forbid")
+    sampled_max_plays: int = Field(default=5, ge=0)
+    established_min_plays: int = Field(default=20, ge=0)
+    established_min_active_months: int = Field(default=3, ge=0)
+    dormant_days: int = Field(default=730, ge=0)
+
+    @model_validator(mode="after")
+    def validate_threshold_order(self) -> ArtistRelationshipConfig:
+        if self.established_min_plays <= self.sampled_max_plays:
+            raise ValueError("established_min_plays must exceed sampled_max_plays")
+        return self
+
+
+class ArtistStatePolicyConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    max_hops: int = Field(default=1, ge=1, le=100)
+    popularity_preference: float = Field(default=0.0, ge=-1.0, le=1.0)
+    obviousness_penalty_weight: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class ArtistChallengerConfig(BaseModel):
+    """Unvalidated artist variations require explicit opt-in; never auto-promoted."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    enabled: bool = False
+    version: Literal["artist-challenger-v1"] = "artist-challenger-v1"
+    target_weight: float = Field(default=0.75, ge=0.0, le=1.0)
+    personal_weight: float = Field(default=0.15, ge=0.0, le=1.0)
+    existing_weight: float = Field(default=0.10, ge=0.0, le=1.0)
+    structural_membership_prior: float = Field(default=0.25, ge=0.0, le=1.0)
+    hop_proximity_scale: float = Field(default=1.0, ge=0.0, le=1.0)
+    known_neighbor_penalty: float = Field(default=0.12, ge=0.0, le=1.0)
+    unheard: ArtistStatePolicyConfig = Field(
+        default_factory=lambda: ArtistStatePolicyConfig(
+            max_hops=1, popularity_preference=0.10, obviousness_penalty_weight=0.05
+        )
+    )
+    sampled: ArtistStatePolicyConfig = Field(
+        default_factory=lambda: ArtistStatePolicyConfig(
+            max_hops=1, popularity_preference=0.0, obviousness_penalty_weight=0.10
+        )
+    )
+    established_favorite: ArtistStatePolicyConfig = Field(
+        default_factory=lambda: ArtistStatePolicyConfig(
+            max_hops=2, popularity_preference=-0.10, obviousness_penalty_weight=0.20
+        )
+    )
+    dormant_favorite: ArtistStatePolicyConfig = Field(
+        default_factory=lambda: ArtistStatePolicyConfig(
+            max_hops=2, popularity_preference=-0.05, obviousness_penalty_weight=0.15
+        )
+    )
+
+    @model_validator(mode="after")
+    def validate_weight_total(self) -> ArtistChallengerConfig:
+        if abs(self.target_weight + self.personal_weight + self.existing_weight - 1.0) > 1e-9:
+            raise ValueError("artist challenger relevance weights must sum to 1")
+        return self
+
+
 class RecommendationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
+    artist_relationship: ArtistRelationshipConfig = Field(default_factory=ArtistRelationshipConfig)
+    artist_challenger: ArtistChallengerConfig = Field(default_factory=ArtistChallengerConfig)
     default_mode: str = "balanced"
     seed_artist_limit: int = 250
     similar_artists_per_seed: int = 100

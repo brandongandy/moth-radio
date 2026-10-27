@@ -1772,3 +1772,115 @@ def test_musicbrainz_cli_preserves_pacing_across_resolution_and_catalog(tmp_path
     assert "resolved: 1" in resolution.output
     assert len(requests) == 3 and requests[-1][0] == "/ws/2/artist"
     assert all(client.is_closed for client in clients)
+
+
+@pytest.mark.parametrize("reference", ["Local Target", "1", "local-mbid", "missing"])
+def test_recommend_artist_is_local_resolves_and_persists(tmp_path, monkeypatch, reference):
+    from scrobble_recs.apis.lastfm import LastFmClient
+    from scrobble_recs.apis.listenbrainz import ListenBrainzClient
+    from scrobble_recs.apis.musicbrainz import MusicBrainzClient
+    from scrobble_recs.config import load_config
+    from scrobble_recs.db import initialize_database
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("network client constructed")
+
+    for client in [LastFmClient, MusicBrainzClient, ListenBrainzClient]:
+        monkeypatch.setattr(client, "__init__", forbidden)
+    path = write_config(tmp_path)
+    conn = initialize_database(load_config(path))
+    conn.execute(
+        """
+            INSERT INTO artist (artist_id, canonical_name, artist_key, musicbrainz_artist_mbid)
+            VALUES (1, 'Local Target', 'local target', 'local-mbid')
+        """
+    )
+    conn.close()
+    result = CliRunner().invoke(app, ["recommend", "--config", str(path), "--artist", reference])
+    if reference == "missing":
+        assert result.exit_code == 1
+        assert "target artist not found: missing" in result.output
+    else:
+        assert result.exit_code == 0, result.output
+        assert "target artist: 1 | Local Target | unheard" in result.output
+        conn = initialize_database(load_config(path))
+        assert conn.execute(
+            "SELECT query_kind, target_artist_id FROM recommendation_run"
+        ).fetchone() == ("artist", 1)
+        conn.close()
+
+
+def test_recommend_artist_ambiguous_name_lists_local_choices(tmp_path):
+    from scrobble_recs.config import load_config
+    from scrobble_recs.db import initialize_database
+
+    path = write_config(tmp_path)
+    conn = initialize_database(load_config(path))
+    conn.execute(
+        """
+            INSERT INTO artist (artist_id, canonical_name, artist_key) VALUES (1, 'Target',
+            'a'), (2, 'TARGET', 'b')
+        """
+    )
+    conn.close()
+    result = CliRunner().invoke(app, ["recommend", "--config", str(path), "--artist", "target"])
+    assert result.exit_code == 1
+    assert (
+        "ambiguous" in result.output
+        and "1: Target" in result.output
+        and "2: TARGET" in result.output
+    )
+
+
+def test_evaluate_rolling_artist_task_reports_empty_target_denominator(tmp_path):
+    result = CliRunner().invoke(
+        app,
+        [
+            "evaluate-rolling",
+            "--config",
+            str(write_config(tmp_path)),
+            "--cutoff",
+            "2024-01-01",
+            "--task",
+            "artist",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "task: artist" in result.output
+    assert "targets: 0" in result.output and "runs: 0" in result.output
+
+
+def test_evaluate_rolling_artist_nonempty_runs_are_local_and_identified(tmp_path, monkeypatch):
+    from scrobble_recs.apis.lastfm import LastFmClient
+    from scrobble_recs.apis.listenbrainz import ListenBrainzClient
+    from scrobble_recs.apis.musicbrainz import MusicBrainzClient
+    from scrobble_recs.config import load_config
+    from scrobble_recs.db import initialize_database
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("network client constructed")
+
+    for client in [LastFmClient, MusicBrainzClient, ListenBrainzClient]:
+        monkeypatch.setattr(client, "__init__", forbidden)
+    path = write_config(tmp_path)
+    conn = initialize_database(load_config(path))
+    conn.execute(
+        "INSERT INTO artist (artist_id, canonical_name, artist_key) "
+        "VALUES (1, 'Replay Target', 'replay')"
+    )
+    conn.execute(
+        """
+        INSERT INTO scrobble (scrobble_id, artist_key, track_key, played_at, is_duplicate)
+        VALUES (1, 'replay', 'a', '2023-01-01', false),
+               (2, 'replay', 'b', '2023-02-01', false),
+               (3, 'replay', 'c', '2023-03-01', false)
+        """
+    )
+    conn.close()
+    result = CliRunner().invoke(
+        app,
+        ["evaluate-rolling", "--config", str(path), "--cutoff", "2024-01-01", "--task", "artist"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "target_id | cutoff" in result.output
+    assert "targets: 1" in result.output and "runs: 1" in result.output

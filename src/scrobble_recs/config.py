@@ -172,13 +172,38 @@ class ListenBrainzApiConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
-    dump_dir: Path = Field(default_factory=lambda: _expand_path("~/datasets/listenbrainz"))
-    use_recommendation_api: bool = False
+    candidate_generation_enabled: bool = False
+    base_url: str = "https://api.listenbrainz.org/1/"
+    rate_limit_per_second: float = 1.0
+    cache_ttl_days: int = Field(default=30, ge=1)
+    max_retries: int = Field(default=2, ge=0)
+    timeout_seconds: float = 20.0
+    stale_cache_on_error: bool = True
+    mode: Literal["easy", "medium", "hard"] = "easy"
+    max_similar_artists: int = Field(default=100, ge=1)
+    max_recordings_per_artist: int = Field(default=3, ge=1)
+    pop_begin: int = Field(default=0, ge=0, le=100)
+    pop_end: int = Field(default=100, ge=0, le=100)
 
-    @field_validator("dump_dir", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def expand_dump_dir(cls, value: str | Path) -> Path:
-        return _expand_path(value)
+    def reject_obsolete_fields(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            obsolete = sorted({"dump_dir", "use_recommendation_api"}.intersection(value))
+            if obsolete:
+                raise ValueError("remove obsolete ListenBrainz settings: " + ", ".join(obsolete))
+        return value
+
+    @field_validator("rate_limit_per_second", "timeout_seconds")
+    @classmethod
+    def positive_finite(cls, value: float) -> float:
+        return _positive_finite(value, field_name="ListenBrainz rate/timeout")
+
+    @model_validator(mode="after")
+    def ordered_popularity(self) -> ListenBrainzApiConfig:
+        if self.pop_begin > self.pop_end:
+            raise ValueError("pop_begin must be less than or equal to pop_end")
+        return self
 
 
 class ApiConfig(BaseModel):
@@ -574,11 +599,7 @@ def default_config_document() -> dict[str, Any]:
                 "cache_ttl_days": 3650,
                 "max_retries": 2,
             },
-            "listenbrainz": {
-                "enabled": False,
-                "dump_dir": "~/datasets/listenbrainz",
-                "use_recommendation_api": False,
-            },
+            "listenbrainz": ListenBrainzApiConfig().model_dump(),
         },
         "enrichment": {
             "seed_artist_limit": 250,

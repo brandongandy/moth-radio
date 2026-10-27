@@ -227,6 +227,7 @@ def load_candidate_evidence(
     *,
     context: QueryContext,
     legacy_rows: LegacyEvidenceRows | None = None,
+    excluded_sources: frozenset[str] = frozenset(),
 ) -> dict[int, CandidateEvidence]:
     cutoff = normalize_timestamp(context.feedback_cutoff) if context.feedback_cutoff else None
     legacy_rows = legacy_rows or load_legacy_evidence_rows(conn, cutoff=cutoff)
@@ -328,6 +329,8 @@ def load_candidate_evidence(
         "FROM artist_evidence_observation WHERE (? IS NULL OR fetched_at <= ?)",
         [cutoff, cutoff],
     ).fetchall():
+        if stored[0] in excluded_sources:
+            continue
         observations.append(
             EvidenceObservation(
                 source=stored[0],

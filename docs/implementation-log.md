@@ -202,3 +202,118 @@
   `.venv/bin/python -m ruff check src tests` — all checks passed;
   `.venv/bin/python -m ruff format --check src tests` — 83 files already formatted;
   `.venv/bin/python -m mypy src` — no issues in 47 source files; `git diff --check` — clean.
+
+## 2026-10-27 — Task 5: Cache-first ListenBrainz aggregate evidence
+
+- Replaced placeholder ListenBrainz settings with validated public API, rate/timeout/cache/retry,
+  mode/popularity, and acquisition bounds. Acquisition and candidate generation default off.
+  Obsolete dump/personalized-API fields now produce an actionable removal error. Updated generated
+  defaults and the checked-in example so it remains loadable.
+- Added the public artist-radio client with injected HTTP/time boundaries, configured timeout,
+  exponential transient retries, explicit stale-success policy, and owned-client cleanup. The cache
+  stores ordered artist groups and the original payload hash so fresh/stale reads retain provider
+  response positions. Malformed successes never replace usable cache entries.
+- Added bounded enrichment over resolved, high-confidence local MBID seeds, with local planning,
+  queue status/retry routing, and atomic membership replacement plus queue completion. Matching
+  MBIDs reuse canonical artists; normalized-name conflicts preserve separate artists and warnings.
+  Existing identity confidence/status are never upgraded by aggregate membership.
+- Persisted unranked collaborative observations with null score/rank, provider mode and request
+  bounds, original response position, bounded recording MBIDs/listen counts, fetch time, cache key,
+  and payload hash. Explicit reruns refresh existing rows and remove obsolete memberships for that
+  seed/request without duplicating evidence.
+- Kept optional provider observations out of production admission/calibration unless the separate
+  candidate-generation switch is explicitly enabled. Evaluation measures distinct source/family
+  membership and unique candidate/future-hit additions independently of that production pool.
+  `evaluate --ablate-source listenbrainz` filters measurements/retrieval while preserving stored
+  evidence and its snapshot ID. No fusion/RRF, artist queries, or representative-recording lookup
+  behavior was introduced.
+- Documented the optional aggregate workflow, settings, queue semantics, provenance, attribution,
+  and same-snapshot ablation. Tests use deterministic fixtures, fake provider clients or MockTransport,
+  and temporary DuckDB files; no live API calls, keys, or local user paths are committed.
+
+### Test-first evidence
+
+- Config RED: 13 expected failures for missing bounded fields and obsolete-field migration errors;
+  GREEN: 13 passed after replacing the placeholder settings.
+- Client RED: missing-module discovery followed by an explicit unimplemented constructor yielded
+  17 expected failures; GREEN: 17 passed for the request contract, fresh/stale order preservation,
+  bounded transport/429/503 retries, stale policy, immediate 4xx failure, malformed payload rejection,
+  configured timeout, and HTTP ownership.
+- Enrichment RED: 5 expected failures against unimplemented entrypoints; GREEN: all 5 passed for
+  seed safety, identity matching/conflicts, null rank/score and provenance, replacement/idempotence,
+  queue failure/retry, disabled acquisition, and acquisition bounds. Real HTTP-cache integration,
+  recording limits, and ineligible pending seeds add regression coverage.
+- Integration RED: 8 expected CLI/evaluation/control failures exposed unsupported source routing,
+  missing source metrics/ablation, and changed Last.fm admission from stored optional observations;
+  GREEN: all 8 passed after routing and production gating.
+- Additional RED/GREEN regressions preserved existing ambiguous identity confidence/status,
+  retained cache/payload provenance in evidence JSON, and detected normalized-name conflicts across
+  separately created provider identities. Disabled and failed-provider controls compare complete
+  persisted recommendation tuples and explanation bytes against the Last.fm-only baseline with
+  optional rows actually present.
+
+### Verification
+
+All commands used the repository environment with `PYTHONPATH=src`:
+
+- `.venv/bin/python -m pytest tests/test_listenbrainz_client.py tests/test_listenbrainz_enrichment.py tests/test_config.py tests/test_cli.py tests/test_evaluate.py tests/test_recommend.py -q`
+  — 225 passed (10.88 seconds).
+- `.venv/bin/python -m pytest -q` — 611 passed (28.41 seconds), no failures or warnings.
+- `.venv/bin/python -m ruff check .` — all checks passed.
+- `.venv/bin/python -m ruff format --check .` — 90 files already formatted.
+- `.venv/bin/python -m mypy src` — no issues in 49 source files.
+- `git diff --check` — clean. Frozen legacy/walk control fingerprints and selected explanation
+  fixtures remain unchanged. Self-review confirmed no new schema, dependency, API credentials,
+  network-bound test, or later-task behavior.
+
+### Task 5 review fixes
+
+- Fixed completed refreshes starving later bounded batches. Planning now finishes adding/recovering
+  queued work, then starts a completed-work refresh cycle only when no queued/running rows remain.
+  A two-seed, batch-size-one regression drains both seeds across repeated calls, refreshes both
+  again, and verifies updated evidence remains one observation per seed.
+- Fixed skipped rows becoming permanently stranded. Planning requeues a skipped row only when its
+  seed is currently eligible. A real-DuckDB regression exercises queued → skipped → eligible →
+  complete, proves still-unsafe rows stay skipped, and preserves a separate failed row's attempts
+  and error until explicit retry.
+- RED: `.venv/bin/python -m pytest tests/test_listenbrainz_enrichment.py -q -k bounded_batches_drain`
+  — 1 failed, 10 deselected: a completed row was requeued while another seed was pending.
+  GREEN after the fairness fix: `-k 'bounded_batches_drain or rerun_refreshes'`
+  — 2 passed, 9 deselected.
+- RED: `.venv/bin/python -m pytest tests/test_listenbrainz_enrichment.py -q -k skipped_seed_recovers`
+  — 1 failed, 11 deselected: restoring eligibility queued zero rows.
+  GREEN after recovery: `-k 'skipped_seed_recovers or bounded_batches_drain or queue_plan_failure or rerun_refreshes'`
+  — 4 passed, 8 deselected.
+- Final commands used `PYTHONPATH=src` and the repository Python environment:
+  `.venv/bin/python -m pytest tests/test_listenbrainz_enrichment.py tests/test_listenbrainz_client.py tests/test_cli.py -q`
+  — 83 passed (3.68 seconds); `.venv/bin/python -m pytest -q`
+  — 613 passed (31.68 seconds), no warnings or failures. Ruff lint passed; Ruff format reported
+  90 files already formatted; mypy reported no issues in 49 source files; `git diff --check` was clean.
+- Self-review confirmed that pending work takes precedence without changing queue priority or
+  depending on wall-clock ordering; completed work still refreshes/idempotently replaces evidence
+  after draining; skipped recovery uses current identity safety; failed rows are never reset by
+  planning. No later-task work or new schema/config behavior was introduced.
+
+### Task 5 review fix round 2 — Interrupted running work
+
+- A new synchronous ListenBrainz enrichment invocation now recovers persisted `running` rows for
+  its own provider/endpoint to `queued` before planning. The unfinished attempt is returned to the
+  retry budget, so recovery works even with `max_queue_attempts=1`. Completed refreshes continue to
+  wait for the recovered batch to drain; failed and skipped rows retain their existing semantics.
+- Recovery is scoped to worker entry, not planning. The app calls this worker synchronously and
+  has no concurrent ListenBrainz worker path. A mid-request planning regression verifies genuinely
+  active work remains running and still blocks completed refreshes while that request executes.
+- RED: `.venv/bin/python -m pytest tests/test_listenbrainz_enrichment.py -q -k interrupted_running_seed`
+  — 1 failed, 12 deselected: after a real `KeyboardInterrupt` left complete/running queue rows,
+  the resumed call made zero requests instead of one. This remained red with a one-attempt budget.
+- GREEN: `-k 'interrupted_running_seed or bounded_batches_drain or skipped_seed_recovers or queue_plan_failure'`
+  — 4 passed, 9 deselected. The interrupted seed resumes first, then both seeds refresh across
+  bounded calls with no duplicate evidence. Active-request planning adds a separate guard regression.
+- Final verification used `PYTHONPATH=src` and the repository Python environment:
+  `.venv/bin/python -m pytest tests/test_listenbrainz_enrichment.py tests/test_listenbrainz_client.py tests/test_cli.py -q`
+  — 85 passed (3.90 seconds); `.venv/bin/python -m pytest -q`
+  — 615 passed (32.04 seconds), no warnings or failures. Ruff lint passed; Ruff format reported
+  90 files already formatted; mypy reported no issues in 49 source files; diff checks were clean.
+- Self-review confirmed recovery touches only this provider/endpoint's interrupted work at a new
+  synchronous call, preserves pending-batch fairness and explicit failed retries, and needs no
+  generic queue redesign, schema, worker lease, timestamp heuristic, or later-task behavior.

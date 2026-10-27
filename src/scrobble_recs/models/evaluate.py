@@ -41,6 +41,11 @@ class EvaluationResult:
     cooldown_or_repeat_rate: float
     candidate_count_by_source: dict[str, int] = field(default_factory=dict)
     future_hit_count_by_source: dict[str, int] = field(default_factory=dict)
+    unique_candidate_count_by_source: dict[str, int] = field(default_factory=dict)
+    unique_future_hit_count_by_source: dict[str, int] = field(default_factory=dict)
+    candidate_count_by_family: dict[str, int] = field(default_factory=dict)
+    evidence_snapshot_id: str = ""
+    ablated_source: str | None = None
     identity_resolved_rate: float = 0.0
     identity_ambiguous_rate: float = 0.0
 
@@ -92,7 +97,13 @@ def evaluate_recommendations(
     train_until: datetime,
     test_from: datetime,
     test_until: datetime,
+    ablate_source: str | None = None,
 ) -> EvaluationResult:
+    if ablate_source not in (None, "listenbrainz"):
+        raise ValueError("ablate_source must be listenbrainz")
+    if ablate_source:
+        config = config.model_copy(deep=True)
+        config.apis.listenbrainz.enabled = False
     train_until = normalize_timestamp(train_until)
     test_from = normalize_timestamp(test_from)
     test_until = normalize_timestamp(test_until)
@@ -158,7 +169,27 @@ def evaluate_recommendations(
     eligible_coverage = _eligible_candidate_coverage(conn, run_id, test_artists)
     novelty_rate = _novelty_rate(conn, rec_artist_ids, train_until)
     cooldown_or_repeat_rate = _cooldown_or_repeat_rate(conn, run_id)
-    candidate_counts, future_hit_counts = _source_coverage(conn, run_id, test_artists)
+    memberships = _source_memberships(conn, run_id)
+    if config.apis.listenbrainz.enabled:
+        _add_radio_memberships(conn, run_id, train_until, memberships)
+    if ablate_source:
+        memberships.pop(ablate_source, None)
+    candidate_counts = {source: len(ids) for source, ids in memberships.items()}
+    future_hit_counts = {source: len(ids & test_artists) for source, ids in memberships.items()}
+    unique = {
+        source: ids - set().union(*(other for name, other in memberships.items() if name != source))
+        for source, ids in memberships.items()
+    }
+    snapshot = conn.execute(
+        "SELECT evidence_snapshot_id FROM recommendation_run WHERE run_id = ?", [run_id]
+    ).fetchone()
+    assert snapshot is not None
+    families = {
+        "collaborative": len(
+            memberships.get("lastfm", set()) | memberships.get("listenbrainz", set())
+        ),
+        "semantic": len(memberships.get("lastfm_tag", set())),
+    }
     identity_resolved_rate, identity_ambiguous_rate = _identity_coverage(conn, run_id)
 
     return EvaluationResult(
@@ -181,32 +212,56 @@ def evaluate_recommendations(
         cooldown_or_repeat_rate=cooldown_or_repeat_rate,
         candidate_count_by_source=candidate_counts,
         future_hit_count_by_source=future_hit_counts,
+        unique_candidate_count_by_source={source: len(ids) for source, ids in unique.items()},
+        unique_future_hit_count_by_source={
+            source: len(ids & test_artists) for source, ids in unique.items()
+        },
+        candidate_count_by_family=families,
+        evidence_snapshot_id=str(snapshot[0]),
+        ablated_source=ablate_source,
         identity_resolved_rate=identity_resolved_rate,
         identity_ambiguous_rate=identity_ambiguous_rate,
     )
 
 
-def _source_coverage(
-    conn: DuckDBPyConnection, run_id: str, test_artists: set[int]
-) -> tuple[dict[str, int], dict[str, int]]:
-    # Legacy candidate_sources contains seed IDs, not provider labels. The counts
-    # explicitly record seed/tag evidence and do not require parsing that JSON.
+def _source_memberships(conn: DuckDBPyConnection, run_id: str) -> dict[str, set[int]]:
+    memberships: dict[str, set[int]] = {"lastfm": set(), "lastfm_tag": set()}
     rows = conn.execute(
-        """
-        SELECT artist_id, appeared_from_seed_count, appeared_from_tag_count
-        FROM recommendation_candidate WHERE run_id = ?
-        """,
+        "SELECT artist_id, appeared_from_seed_count, appeared_from_tag_count, evidence "
+        "FROM recommendation_candidate WHERE run_id = ?",
         [run_id],
     ).fetchall()
-    candidate_counts = {"lastfm": 0, "lastfm_tag": 0}
-    future_hit_counts = {"lastfm": 0, "lastfm_tag": 0}
-    for artist_id, seed_count, tag_count in rows:
-        for source, evidence_count in (("lastfm", seed_count), ("lastfm_tag", tag_count)):
-            if evidence_count is not None and evidence_count > 0:
-                candidate_counts[source] += 1
-                if int(artist_id) in test_artists:
-                    future_hit_counts[source] += 1
-    return candidate_counts, future_hit_counts
+    for artist_id, seed_count, tag_count, payload in rows:
+        for source, count in (("lastfm", seed_count), ("lastfm_tag", tag_count)):
+            if count is not None and count > 0:
+                memberships[source].add(int(artist_id))
+        for observation in json.loads(payload or "{}").get("observations", []):
+            source = observation["source"]
+            if source not in ("lastfm", "local_feedback"):
+                memberships.setdefault(source, set()).add(int(artist_id))
+    return memberships
+
+
+def _add_radio_memberships(
+    conn: DuckDBPyConnection, run_id: str, cutoff: datetime, memberships: dict[str, set[int]]
+) -> None:
+    # Measure the unranked set even while candidate generation is gated off. Restrict
+    # it to this run's seeds and historical snapshot; repeated modes/seeds add no credit.
+    row = conn.execute(
+        "SELECT query_context FROM recommendation_run WHERE run_id = ?", [run_id]
+    ).fetchone()
+    assert row is not None
+    seeds = [seed["artist_id"] for seed in json.loads(row[0])["taste_region_seeds"]]
+    targets = conn.execute(
+        "SELECT DISTINCT target_artist_id FROM artist_evidence_observation "
+        "WHERE source = 'listenbrainz' AND relationship_kind = 'artist_radio_membership' "
+        "AND fetched_at <= ? AND source_artist_id IN (SELECT unnest(?::UBIGINT[]))",
+        [cutoff, seeds],
+    ).fetchall()
+    if targets:
+        memberships.setdefault("listenbrainz", set()).update(
+            int(target) for (target,) in targets if int(target) not in seeds
+        )
 
 
 def _identity_coverage(conn: DuckDBPyConnection, run_id: str) -> tuple[float, float]:

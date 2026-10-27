@@ -27,6 +27,10 @@ from scrobble_recs.enrichment.lastfm import (
     LastFmEnrichmentStats,
     run_lastfm_enrichment,
 )
+from scrobble_recs.enrichment.listenbrainz import (
+    plan_listenbrainz_enrichment,
+    run_listenbrainz_enrichment,
+)
 from scrobble_recs.enrichment.queue import (
     enrichment_queue_status,
     plan_enrichment,
@@ -228,8 +232,8 @@ def enrich_command(
         ),
     ] = None,
 ) -> None:
-    if source not in ("lastfm", "musicbrainz"):
-        raise typer.BadParameter("--source must be 'lastfm' or 'musicbrainz'")
+    if source not in ("lastfm", "musicbrainz", "listenbrainz"):
+        raise typer.BadParameter("--source must be 'lastfm', 'musicbrainz', or 'listenbrainz'")
     if depth < 1:
         raise typer.BadParameter("--depth must be at least 1")
     if max_frontier_artists is not None and max_frontier_artists < 0:
@@ -255,6 +259,15 @@ def enrich_command(
                 raise typer.Exit(code=1) from exc
             console.print("Last.fm enrichment complete")
             _print_enrichment_stats(stats)
+        elif source == "listenbrainz":
+            try:
+                radio_stats = run_listenbrainz_enrichment(conn, resolved_config)
+            except RuntimeError as exc:
+                console.print(f"Error: {exc}")
+                raise typer.Exit(code=1) from exc
+            console.print("ListenBrainz enrichment complete")
+            for label, value in vars(radio_stats).items():
+                console.print(f"{label}: {value}")
         else:
             _run_musicbrainz_enrichment(conn, resolved_config)
     finally:
@@ -267,8 +280,8 @@ def enrich_plan_command(
     source: Annotated[str, typer.Option("--source", help="Enrichment source.")] = "lastfm",
 ) -> None:
     """Plan enrichment work without calling the network."""
-    if source not in ("lastfm", "musicbrainz"):
-        raise typer.BadParameter("--source must be 'lastfm' or 'musicbrainz'")
+    if source not in ("lastfm", "musicbrainz", "listenbrainz"):
+        raise typer.BadParameter("--source must be 'lastfm', 'musicbrainz', or 'listenbrainz'")
 
     resolved_config = load_config(config)
     conn = initialize_database(resolved_config)
@@ -300,6 +313,11 @@ def enrich_plan_command(
             console.print(f"  missing: {plan.tag_top_artist_queued}")
             console.print("")
             console.print(f"total queued: {plan.total_queued}")
+        elif source == "listenbrainz":
+            radio_plan = plan_listenbrainz_enrichment(conn, resolved_config)
+            console.print("ListenBrainz artist-radio enrichment plan")
+            for label, value in vars(radio_plan).items():
+                console.print(f"{label}: {value}")
         else:
             _print_musicbrainz_enrichment_plan(conn, resolved_config)
     finally:
@@ -312,8 +330,8 @@ def enrich_status_command(
     source: Annotated[str, typer.Option("--source", help="Enrichment source.")] = "lastfm",
 ) -> None:
     """Show enrichment queue status."""
-    if source not in ("lastfm", "musicbrainz"):
-        raise typer.BadParameter("--source must be 'lastfm' or 'musicbrainz'")
+    if source not in ("lastfm", "musicbrainz", "listenbrainz"):
+        raise typer.BadParameter("--source must be 'lastfm', 'musicbrainz', or 'listenbrainz'")
 
     resolved_config = load_config(config)
     conn = initialize_database(resolved_config)
@@ -337,8 +355,8 @@ def enrich_retry_command(
     source: Annotated[str, typer.Option("--source", help="Enrichment source.")] = "lastfm",
 ) -> None:
     """Retry failed enrichment queue entries."""
-    if source not in ("lastfm", "musicbrainz"):
-        raise typer.BadParameter("--source must be 'lastfm' or 'musicbrainz'")
+    if source not in ("lastfm", "musicbrainz", "listenbrainz"):
+        raise typer.BadParameter("--source must be 'lastfm', 'musicbrainz', or 'listenbrainz'")
 
     resolved_config = load_config(config)
     conn = initialize_database(resolved_config)
@@ -909,10 +927,18 @@ def evaluate_command(
         str | None,
         typer.Option("--ablate", help="Zero one scoring component and re-run."),
     ] = None,
+    ablate_source: Annotated[
+        str | None,
+        typer.Option(
+            "--ablate-source", help="Measure without ListenBrainz on the same persisted snapshot."
+        ),
+    ] = None,
 ) -> None:
     """Evaluate recommendation quality using a train/test split."""
     from datetime import timedelta
 
+    if ablate_source not in (None, "listenbrainz"):
+        raise typer.BadParameter("--ablate-source must be listenbrainz")
     resolved_config = _apply_ablation(_apply_scorer_override(load_config(config), scorer), ablate)
     conn = initialize_database(resolved_config)
     try:
@@ -935,12 +961,14 @@ def evaluate_command(
             raise typer.Exit(code=1)
 
         console.print("Generating evaluation recommendations from local DuckDB data...")
+        evaluation_options = {"ablate_source": ablate_source} if ablate_source else {}
         result = evaluate_recommendations_from_config(
             conn,
             resolved_config,
             train_until=train_dt,
             test_from=test_dt,
             test_until=test_end_dt,
+            **evaluation_options,
         )
     finally:
         conn.close()
@@ -951,6 +979,13 @@ def evaluate_command(
     console.print(f"scoring_engine: {result.scoring_engine}")
     if ablate:
         console.print(f"ablated_component: {ablate}")
+    if ablate_source:
+        console.print(f"ablated_source: {ablate_source}")
+    console.print(f"evidence_snapshot_id: {result.evidence_snapshot_id}")
+    console.print(f"candidate_count_by_source: {result.candidate_count_by_source}")
+    console.print(f"future_hit_count_by_source: {result.future_hit_count_by_source}")
+    console.print(f"unique_candidate_count_by_source: {result.unique_candidate_count_by_source}")
+    console.print(f"unique_future_hit_count_by_source: {result.unique_future_hit_count_by_source}")
     console.print(f"train_until: {result.train_until}")
     console.print(f"test_from: {result.test_from}")
     console.print(f"test_until: {result.test_until}")
@@ -1178,6 +1213,7 @@ def evaluate_recommendations_from_config(
     train_until: datetime,
     test_from: datetime,
     test_until: datetime,
+    ablate_source: str | None = None,
 ) -> EvaluationResult:
     """Thin wrapper for CLI monkeypatching in tests."""
     return evaluate_recommendations(
@@ -1186,6 +1222,7 @@ def evaluate_recommendations_from_config(
         train_until=train_until,
         test_from=test_from,
         test_until=test_until,
+        ablate_source=ablate_source,
     )
 
 

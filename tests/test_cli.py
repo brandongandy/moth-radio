@@ -1514,3 +1514,80 @@ def test_compare_command_rejects_unknown_scorer(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code != 0
+
+
+@pytest.mark.parametrize("command", ["enrich-plan", "enrich-status", "enrich-retry"])
+def test_listenbrainz_queue_cli_routes_offline(tmp_path: Path, command: str) -> None:
+    result = CliRunner().invoke(
+        app, [command, "--config", str(write_config(tmp_path)), "--source", "listenbrainz"]
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_listenbrainz_enrich_cli_disabled_is_clear(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app, ["enrich", "--config", str(write_config(tmp_path)), "--source", "listenbrainz"]
+    )
+    assert result.exit_code == 1
+    assert "ListenBrainz enrichment is disabled" in result.output
+
+
+def test_evaluate_source_ablation_cli_reports_snapshot(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "evaluate",
+            "--config",
+            str(write_config(tmp_path)),
+            "--split-date",
+            "2024-01-03",
+            "--ablate-source",
+            "listenbrainz",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "ablated_source: listenbrainz" in result.output
+    assert "evidence_snapshot_id:" in result.output
+
+
+def test_listenbrainz_enrich_cli_persists_aggregate_radio_offline(tmp_path: Path, monkeypatch):
+    import httpx
+
+    from scrobble_recs.config import load_config
+    from scrobble_recs.db import initialize_database
+
+    path = write_config(tmp_path)
+    data = json.loads(path.read_text())
+    data["apis"] = {"listenbrainz": {"enabled": True}}
+    path.write_text(json.dumps(data))
+    config = load_config(path)
+    conn = initialize_database(config)
+    conn.execute(
+        "INSERT INTO artist (artist_id, canonical_name, artist_key, "
+        "musicbrainz_artist_mbid, resolution_status, identity_confidence) "
+        "VALUES (1, 'Seed', 'seed', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', "
+        "'resolved_musicbrainz', .95)"
+    )
+    conn.execute(
+        "INSERT INTO artist_listening_fact (artist_id, play_count, recent_weight) VALUES (1, 10, 1)"
+    )
+    conn.close()
+    original = httpx.Client
+    content = Path("tests/fixtures/listenbrainz_artist_radio.json").read_bytes()
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        lambda **kwargs: original(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, content=content)), **kwargs
+        ),
+    )
+    runner = CliRunner()
+    plan = runner.invoke(app, ["enrich-plan", "--config", str(path), "--source", "listenbrainz"])
+    assert plan.exit_code == 0 and "total_queued: 1" in plan.output
+    result = runner.invoke(app, ["enrich", "--config", str(path), "--source", "listenbrainz"])
+    assert result.exit_code == 0, result.output
+    assert "observations_written: 2" in result.output
+    status = runner.invoke(
+        app, ["enrich-status", "--config", str(path), "--source", "listenbrainz"]
+    )
+    assert status.exit_code == 0 and "complete: 1" in status.output

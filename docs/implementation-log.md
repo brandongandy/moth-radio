@@ -317,3 +317,107 @@ All commands used the repository environment with `PYTHONPATH=src`:
 - Self-review confirmed recovery touches only this provider/endpoint's interrupted work at a new
   synchronous call, preserves pending-batch fairness and explicit failed retries, and needs no
   generic queue redesign, schema, worker lease, timestamp heuristic, or later-task behavior.
+
+## Task 6 — Source-aware MusicBrainz catalog relationships
+
+- Added replay-safe migration `017_musicbrainz_catalog.sql` for per-artist aliases, including
+  locale, primary status, partial dates, type, source, and original fetch time. Missing locale
+  uses an empty-string sentinel so the per-source/artist/normalized-alias/locale unique key
+  deduplicates it; shared aliases across artists never merge identities.
+- Preserved identity search/lookup and the identity-only `resolve` command. Added a separate
+  cache-first `aliases+artist-rels` artist lookup with frozen catalog/alias/relationship models.
+  Parsing skips malformed relation rows and missing/invalid targets, preserves directions and
+  partial dates, and retains unknown types. Malformed collection containers fail lookup rather
+  than becoming successful empty refreshes. Stale fallbacks preserve the successful cache row,
+  fetch time, and canonical-JSON payload hash. UTC timestamps retain existing naïve UTC storage
+  using the supported clock API.
+- Added bounded, nonrecursive catalog enrichment over resolved/high-confidence local seeds.
+  Exact MBIDs identify targets; conflicting normalized names remain separate identities with
+  inspectable warnings. Multiple local MBID matches remain separate, with deterministic target
+  selection and warnings; duplicate source MBIDs are ineligible. Existing identity confidence
+  and resolution status are preserved. Aliases and catalog evidence update transactionally with
+  queue completion; failed lookup or persistence retains the prior catalog.
+- Ported the fixed Task 5 queue lifecycle for MusicBrainz `artist-catalog` work: pending batches
+  drain before refresh, eligible skipped rows recover, failed rows need explicit retry, and
+  synchronous worker entry recovers interrupted attempts within its own provider/endpoint.
+  Planning leaves active requests and the refresh barrier untouched. Disabled acquisition
+  neither requests HTTP nor mutates catalog queue state.
+- Added default-off `recommendation.catalog_evidence` policy and an explicit initial allow-list:
+  `member of band`, `collaboration`, `supporting musician`, and
+  `instrumental supporting musician`. Unknown relations persist for inspection but current
+  policy excludes them before candidate introduction, admission, and family agreement.
+  Allow-list changes take effect without reacquisition. Every acquired catalog observation has
+  null raw score/source rank; supported facts supply membership, explanation, and family
+  reinforcement without synthetic strength, score, or provider rank.
+- `enrich --source musicbrainz` resolves first, then acquires catalog facts even when no unresolved
+  identities remain. CLI planning/status/retry, bounded progress, summary statistics, generated
+  configuration, example configuration, attribution, and README behavior are updated.
+- The real CLI regression caught a DuckDB natural-index conflict when deleting/reinserting
+  observations after reopening the database. Retained relationship observations now update
+  in place and obsolete observations are removed in the same scoped transaction. Relationship
+  keys omit provider display names so a renamed target updates its evidence without changing
+  the durable fact identity. Alias, relation, and observation helpers were extracted while green.
+
+### TDD and verification
+
+All Python verification commands used `PYTHONPATH=src` and the repository virtualenv interpreter.
+
+- RED alias migration test: 1 failed because `artist_alias` did not exist; GREEN after migration:
+  1 passed. Tests replay migrations and exercise actual unique constraints with temporary DuckDB.
+- RED expanded client contract: 3 failed, 9 passed because `lookup_artist_catalog` was missing;
+  GREEN: 13 passed including migration. Later malformed-collection regression failed on a
+  falsely successful refresh, then passed after rejecting invalid containers.
+- RED initial enrichment contracts: 10 failed, 1 passed at the explicit missing-module assertion;
+  policy-default test separately failed at missing `catalog_evidence`. GREEN: 12 passed covering
+  identity safety, replacement, rollback via a real constraint failure, bounds, and queue lifecycle.
+- RED catalog retrieval policy: 3 failed, 2 passed; GREEN focused catalog tests: 5 passed.
+  A fixture's one-seed threshold was corrected to two so the independent-family regression
+  actually isolates catalog reinforcement. Full evidence/client/enrichment run: 116 passed.
+- RED real CLI integration failed at absent catalog statistics, then exposed the reopen conflict;
+  GREEN MusicBrainz CLI/enrichment tests: 16 passed. The retry assertion was corrected to use
+  the existing `enrich-retry` command name.
+- RED stable-key/source-ambiguity regressions: 2 failed, 13 passed; GREEN: 15 passed.
+  RED progress callback regression failed at the missing keyword; GREEN focused provider/
+  enrichment/evidence/CLI suite: 177 passed. Latest helper refactor: 20 passed, 52 deselected.
+- Focused client/enrichment/evidence/CLI/TUI command:
+  `python -m pytest tests/test_musicbrainz.py tests/test_musicbrainz_enrichment.py tests/test_evidence.py tests/test_cli.py tests/test_tui_app.py -q`
+  — 201 passed (13.72 seconds). Recommendation generation and Textual browsing are verified
+  against persisted catalog data with both synchronous and asynchronous HTTP clients replaced
+  by raising fakes. Tests use deterministic local fixtures, mocked HTTP/time boundaries, and
+  temporary database files; no live API was called.
+- Frozen control check:
+  `python -m pytest tests/test_recommend.py::test_control_recommendation_fingerprint_matches_fixture -q`
+  — 1 passed (0.45 seconds). Disabled-catalog tests also compare complete retrieval, admission,
+  ranked explanations, and policy objects with stored catalog observations present.
+- Initial full-suite run: `python -m pytest -q` — 641 passed, 1 failed (30.85 seconds).
+  `tests/test_config.py::test_initialize_database_applies_initial_migration` enumerated the exact
+  old table set; its assertion was updated to include the new additive `artist_alias` table.
+  Targeted schema check then passed (0.13 seconds). No production change was needed.
+- `python -m ruff check .` — all checks passed; `python -m ruff format --check .` — 92 files
+  already formatted; `python -m mypy src` — no issues in 50 source files; `git diff --check` — clean.
+- Self-review confirmed exact-MBID target identity, shared-alias independence, canonical cache
+  provenance, atomic/idempotent replacement after reopening, provider-scoped queue recovery,
+  unsupported-type neutrality, default-off control stability, resolution-before-catalog order,
+  and persisted-only recommendation/TUI behavior. No fusion, artist-query, representative-item,
+  experiment, learned-ranking, dependency, API credential, or user-path changes were introduced.
+- Final full-suite rerun after the schema assertion update: `python -m pytest -q` — 642 passed
+  (30.94 seconds), no failures or warnings. Final Ruff lint/format, mypy, and diff checks passed.
+
+### Task 6 review fix round 1 — MusicBrainz cross-phase pacing
+
+- Fixed I1: `enrich --source musicbrainz` now owns one MusicBrainz client/limiter across identity
+  resolution and catalog acquisition, and closes it after both phases in a `finally` block.
+  The resolver accepts an injected client without closing it; standalone `resolve` still creates
+  and closes its own client. Already-resolved catalog refresh and cache-first lookups are retained.
+- Offline fake-clock CLI regression first reproduced RED: identity and catalog requests both
+  occurred at time 0, violating the configured one-second interval (1 failed, 0.39 seconds).
+  GREEN after sharing the client: 1 passed (0.53 seconds), with exactly one fake one-second sleep.
+  The same regression verifies cached refresh makes no HTTP request or extra sleep, all owned
+  HTTP clients close, and standalone resolution performs identity acquisition only.
+- Focused verification, using `PYTHONPATH=src` and the repository Python environment:
+  `python -m pytest tests/test_cli.py tests/test_musicbrainz.py tests/test_musicbrainz_enrichment.py tests/test_rate_limit.py -q`
+  — 94 passed (4.13 seconds). No live API calls or real sleeps were used by the new regression.
+- Deferred minor README wording and tracked queue-duplication debt were left outside this fix.
+- Final verification: `python -m pytest -q` — 643 passed (34.86 seconds), no warnings or failures;
+  Ruff lint passed; Ruff format reported 92 files formatted; mypy found no issues in 50 source
+  files; `git diff --check` was clean. Verification used the same `PYTHONPATH=src` interpreter.

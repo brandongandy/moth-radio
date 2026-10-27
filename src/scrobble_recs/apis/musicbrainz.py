@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import Any, Literal
+from uuid import UUID
 
 import httpx
 
@@ -35,6 +36,118 @@ class MusicBrainzArtistResult:
     life_span_end: str
 
 
+@dataclass(frozen=True)
+class MusicBrainzArtistAlias:
+    name: str
+    locale: str | None = None
+    primary_for_locale: bool = False
+    begin: str | None = None
+    end: str | None = None
+    type: str | None = None
+
+
+@dataclass(frozen=True)
+class MusicBrainzArtistRelationship:
+    target_mbid: str
+    target_name: str
+    relationship_type: str
+    direction: Literal["forward", "backward"]
+    begin: str | None
+    end: str | None
+    ended: bool
+
+
+@dataclass(frozen=True)
+class MusicBrainzArtistCatalog:
+    artist: MusicBrainzArtistResult
+    aliases: tuple[MusicBrainzArtistAlias, ...]
+    artist_relationships: tuple[MusicBrainzArtistRelationship, ...]
+
+
+def valid_mbid(value: Any) -> str | None:
+    try:
+        return str(UUID(value)) if isinstance(value, str) else None
+    except (ValueError, AttributeError):
+        return None
+
+
+def catalog_params() -> JsonObject:
+    return {"inc": "aliases+artist-rels", "fmt": "json"}
+
+
+def _parse_catalog(data: Any, mbid: str) -> MusicBrainzArtistCatalog | None:
+    if not isinstance(data, dict) or valid_mbid(data.get("id")) != mbid:
+        return None
+    if any(
+        field in data and not isinstance(data[field], list) for field in ("aliases", "relations")
+    ):
+        return None
+    name = data.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    life = data.get("life-span")
+    life = life if isinstance(life, dict) else {}
+    artist = MusicBrainzArtistResult(
+        mbid,
+        name,
+        _optional_string(data.get("disambiguation")) or "",
+        _optional_string(data.get("country")) or "",
+        _optional_string(data.get("type")) or "",
+        _optional_string(life.get("begin")) or "",
+        _optional_string(life.get("end")) or "",
+    )
+    aliases = []
+    seen = set()
+    for row in data.get("aliases", []) if isinstance(data.get("aliases"), list) else []:
+        if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+            continue
+        alias = row["name"].strip()
+        locale = _optional_string(row.get("locale"))
+        if not alias or (alias, locale) in seen:
+            continue
+        seen.add((alias, locale))
+        aliases.append(
+            MusicBrainzArtistAlias(
+                alias,
+                locale,
+                row.get("primary") is True,
+                _optional_string(row.get("begin-date")),
+                _optional_string(row.get("end-date")),
+                _optional_string(row.get("type")),
+            )
+        )
+    relations = []
+    for row in data.get("relations", []) if isinstance(data.get("relations"), list) else []:
+        if not isinstance(row, dict) or not isinstance(row.get("artist"), dict):
+            continue
+        target = row["artist"]
+        target_mbid = valid_mbid(target.get("id"))
+        target_name = target.get("name")
+        kind = row.get("type")
+        direction = row.get("direction")
+        if (
+            not target_mbid
+            or not isinstance(target_name, str)
+            or not target_name.strip()
+            or not isinstance(kind, str)
+            or not kind.strip()
+            or direction not in ("forward", "backward")
+        ):
+            continue
+        relations.append(
+            MusicBrainzArtistRelationship(
+                target_mbid,
+                target_name,
+                kind,
+                direction,
+                _optional_string(row.get("begin")),
+                _optional_string(row.get("end")),
+                row.get("ended") is True,
+            )
+        )
+    return MusicBrainzArtistCatalog(artist, tuple(aliases), tuple(relations))
+
+
 class MusicBrainzClient:
     def __init__(
         self,
@@ -53,7 +166,7 @@ class MusicBrainzClient:
             headers={"User-Agent": config.user_agent},
         )
         self._rate_limiter = rate_limiter or RateLimiter(config.rate_limit_per_second)
-        self._now = now or datetime.utcnow
+        self._now = now or (lambda: datetime.now(UTC).replace(tzinfo=None))
 
     def search_artist(self, query: str, *, limit: int = 5) -> list[MusicBrainzArtistMatch]:
         params: JsonObject = {"query": f'artist:"{query}"', "limit": str(limit), "fmt": "json"}
@@ -99,6 +212,43 @@ class MusicBrainzClient:
             life_span_begin=str(life_span.get("begin", "")),
             life_span_end=str(life_span.get("end", "")),
         )
+
+    def lookup_artist_catalog(self, mbid: str) -> MusicBrainzArtistCatalog | None:
+        identifier = valid_mbid(mbid)
+        if identifier is None:
+            return None
+        endpoint, params, now = f"artist/{identifier}", catalog_params(), self._now()
+        fresh = self._cache.get_fresh(_SOURCE, endpoint, params, now=now)
+        if fresh is not None:
+            return _parse_catalog(fresh, identifier)
+        stale = self._cache.get_stale_success(_SOURCE, endpoint, params)
+        fallback = _parse_catalog(stale, identifier)
+        self._rate_limiter.wait()
+        try:
+            response = self._http_client.get(
+                f"{self._config.base_url.rstrip('/')}/{endpoint}", params=params
+            )
+            if not response.is_success:
+                return fallback
+            data = response.json()
+            parsed = _parse_catalog(data, identifier)
+            if parsed is None:
+                return fallback
+        except (httpx.HTTPError, ValueError):
+            return fallback
+        # Failed refreshes never replace the usable successful cache row.
+        self._cache.write_response(
+            source=_SOURCE,
+            endpoint=endpoint,
+            request_url=str(response.url),
+            request_params=params,
+            response_status=response.status_code,
+            response_json=data,
+            fetched_at=now,
+            expires_at=now + timedelta(days=self._config.cache_ttl_days),
+            error_message=None,
+        )
+        return parsed
 
     def _request(self, endpoint: str, params: JsonObject) -> JsonObject | None:
         now = self._now()

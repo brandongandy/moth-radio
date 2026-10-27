@@ -1,0 +1,23 @@
+{
+  "id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  "name": "Seed 1",
+  "type": "Person",
+  "life-span": {"begin": "1970", "end": null},
+  "aliases": [
+    {"name": "Shared", "locale": null, "primary": true, "begin-date": "1990", "type": "Artist name"},
+    {"name": "Shared", "locale": null},
+    {"name": "Shared", "locale": "en"},
+    {"name": ""}, null, "invalid"
+  ],
+  "relations": [
+    {"type": "member of band", "direction": "forward", "begin": "1990", "end": "2001-02", "ended": true, "artist": {"id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "name": "Candidate"}},
+    {"type": "collaboration", "direction": "backward", "artist": {"id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "name": "Same Name"}},
+    {"type": "teacher", "direction": "forward", "artist": {"id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", "name": "Teacher"}},
+    {"type": "member of band", "direction": "forward", "artist": {"name": "Missing ID"}},
+    {"type": "member of band", "direction": "forward", "artist": {"id": "invalid", "name": "Invalid ID"}},
+    {"type": "member of band", "direction": "sideways", "artist": {"id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "name": "Candidate"}},
+    {"type": "url", "url": {"resource": "https://example.test"}},
+    {"artist": {"id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "name": "Candidate"}},
+    null, "invalid"
+  ]
+}

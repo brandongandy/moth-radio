@@ -228,6 +228,7 @@ def load_candidate_evidence(
     context: QueryContext,
     legacy_rows: LegacyEvidenceRows | None = None,
     excluded_sources: frozenset[str] = frozenset(),
+    allowed_catalog_relationship_types: frozenset[str] | None = None,
 ) -> dict[int, CandidateEvidence]:
     cutoff = normalize_timestamp(context.feedback_cutoff) if context.feedback_cutoff else None
     legacy_rows = legacy_rows or load_legacy_evidence_rows(conn, cutoff=cutoff)
@@ -331,6 +332,19 @@ def load_candidate_evidence(
     ).fetchall():
         if stored[0] in excluded_sources:
             continue
+        stored_payload = {
+            key: value
+            for key, value in json.loads(stored[10]).items()
+            if key not in _RESERVED_LEGACY_KEYS
+        }
+        if stored[1] == "catalog" and allowed_catalog_relationship_types is not None:
+            if (
+                stored[2] != "catalog_relationship"
+                or stored_payload.get("relationship_type") not in allowed_catalog_relationship_types
+            ):
+                continue
+            # Stored policy is acquisition-time provenance; current policy controls admission.
+            stored_payload["supported_relationship"] = True
         observations.append(
             EvidenceObservation(
                 source=stored[0],
@@ -343,11 +357,7 @@ def load_candidate_evidence(
                 provider_mode=stored[7],
                 fetched_at=stored[8],
                 identity_confidence=stored[9],
-                evidence={
-                    key: value
-                    for key, value in json.loads(stored[10]).items()
-                    if key not in _RESERVED_LEGACY_KEYS
-                },
+                evidence=stored_payload,
             )
         )
     for event_id, created, target, action, value, payload in conn.execute(

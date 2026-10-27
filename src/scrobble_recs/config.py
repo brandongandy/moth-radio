@@ -413,6 +413,20 @@ class DiscoveryEvidenceConfig(BaseModel):
         return self
 
 
+class CatalogEvidenceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    allowed_relationship_types: list[str] = Field(
+        default_factory=lambda: [
+            "member of band",
+            "collaboration",
+            "supporting musician",
+            "instrumental supporting musician",
+        ]
+    )
+
+
 class CalibrationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -524,6 +538,7 @@ class RecommendationConfig(BaseModel):
     diversity: DiversityConfig = Field(default_factory=DiversityConfig)
     quality_gate: QualityGateConfig = Field(default_factory=QualityGateConfig)
     discovery_evidence: DiscoveryEvidenceConfig = Field(default_factory=DiscoveryEvidenceConfig)
+    catalog_evidence: CatalogEvidenceConfig = Field(default_factory=CatalogEvidenceConfig)
     calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
     serendipity: SerendipityConfig = Field(default_factory=SerendipityConfig)
     fatigue: FatigueConfig = Field(default_factory=FatigueConfig)
@@ -667,6 +682,7 @@ def default_config_document() -> dict[str, Any]:
                 "minimum_seed_count": 2,
                 "minimum_tag_reinforcement": 0.05,
             },
+            "catalog_evidence": CatalogEvidenceConfig().model_dump(),
             "calibration": {"enabled": True},
             "serendipity": {
                 "enabled": True,

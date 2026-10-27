@@ -650,6 +650,12 @@ def retrieve_legacy_candidates(
             conn,
             context=context,
             legacy_rows=legacy_rows,
+            allowed_catalog_relationship_types=frozenset(
+                config.recommendation.catalog_evidence.allowed_relationship_types
+                if config.apis.musicbrainz.enabled
+                and config.recommendation.catalog_evidence.enabled
+                else ()
+            ),
             excluded_sources=(
                 frozenset()
                 if (

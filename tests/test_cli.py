@@ -1591,3 +1591,184 @@ def test_listenbrainz_enrich_cli_persists_aggregate_radio_offline(tmp_path: Path
         app, ["enrich-status", "--config", str(path), "--source", "listenbrainz"]
     )
     assert status.exit_code == 0 and "complete: 1" in status.output
+
+
+def test_musicbrainz_enrich_resolves_then_catalog_refreshes_persisted_queue(tmp_path, monkeypatch):
+    import httpx
+
+    from scrobble_recs.config import load_config
+    from scrobble_recs.db import initialize_database
+
+    path = write_config(tmp_path)
+    document = json.loads(path.read_text())
+    document["apis"] = {"musicbrainz": {"enabled": True, "rate_limit_per_second": 100000}}
+    document["recommendation"] = {"min_seed_scrobbles": 1}
+    path.write_text(json.dumps(document))
+    config = load_config(path)
+    conn = initialize_database(config)
+    conn.execute(
+        "INSERT INTO artist (artist_id, canonical_name, artist_key) VALUES (1, 'Seed 1', 'seed 1')"
+    )
+    conn.execute(
+        "INSERT INTO artist_listening_fact (artist_id, play_count, recent_weight, "
+        "lifetime_weight) VALUES (1, 10, 1, 1)"
+    )
+    conn.close()
+    payload = json.loads(Path("tests/fixtures/musicbrainz_artist_relationships.json").read_text())
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        if request.url.path.endswith("/artist"):
+            return httpx.Response(
+                200, json={"artists": [{"id": payload["id"], "name": "Seed 1", "score": 100}]}
+            )
+        return httpx.Response(200, json=payload)
+
+    original = httpx.Client
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        lambda *args, **kwargs: original(*args, **kwargs, transport=httpx.MockTransport(handler)),
+    )
+    runner = CliRunner()
+    result = runner.invoke(app, ["enrich", "--source", "musicbrainz", "-c", str(path)])
+    assert result.exit_code == 0, result.output
+    assert "artists_requested: 1" in result.output and "relationships_written: 3" in result.output
+    assert calls == ["/ws/2/artist", f"/ws/2/artist/{payload['id']}"]
+    again = runner.invoke(app, ["enrich", "--source", "musicbrainz", "-c", str(path)])
+    assert again.exit_code == 0 and "unresolved artists: 0" in again.output
+    assert "artists_requested: 1" in again.output  # no early return when already resolved
+    assert len(calls) == 2  # both lookups cache-first
+    conn = initialize_database(config)
+    assert conn.execute(
+        "SELECT endpoint, status FROM enrichment_queue WHERE source = 'musicbrainz'"
+    ).fetchall() == [("artist-catalog", "complete")]
+    assert conn.execute("SELECT count(*) FROM api_cache").fetchone()[0] == 2
+    assert conn.execute("SELECT count(*) FROM artist_alias").fetchone()[0] == 2
+    assert conn.execute("SELECT count(*) FROM artist_evidence_observation").fetchone()[0] == 3
+    conn.close()
+    plan = runner.invoke(app, ["enrich-plan", "--source", "musicbrainz", "-c", str(path)])
+    assert (
+        plan.exit_code == 0 and "artist-catalog" in plan.output and "total_queued: 1" in plan.output
+    )
+    status = runner.invoke(app, ["enrich-status", "--source", "musicbrainz", "-c", str(path)])
+    assert status.exit_code == 0 and "queued: 1" in status.output
+    conn = initialize_database(config)
+    conn.execute("UPDATE enrichment_queue SET status = 'failed', attempts = 1")
+    conn.close()
+    retry = runner.invoke(app, ["enrich-retry", "--source", "musicbrainz", "-c", str(path)])
+    assert retry.exit_code == 0 and "Reset 1" in retry.output
+    assert len(calls) == 2
+
+
+def test_musicbrainz_disabled_catalog_plan_and_enrich_do_not_request(tmp_path, monkeypatch):
+    import httpx
+
+    from scrobble_recs.config import load_config
+    from scrobble_recs.db import initialize_database
+
+    path = write_config(tmp_path)
+
+    def raises(*args, **kwargs):
+        raise AssertionError("network client constructed")
+
+    monkeypatch.setattr(httpx, "Client", raises)
+    runner = CliRunner()
+    for command in ("enrich", "enrich-plan"):
+        result = runner.invoke(app, [command, "--source", "musicbrainz", "-c", str(path)])
+        assert result.exit_code == 0, result.output
+    conn = initialize_database(load_config(path))
+    assert (
+        conn.execute(
+            "SELECT count(*) FROM enrichment_queue WHERE source = 'musicbrainz'"
+        ).fetchone()[0]
+        == 0
+    )
+    conn.close()
+
+
+def test_musicbrainz_cli_preserves_pacing_across_resolution_and_catalog(tmp_path, monkeypatch):
+    import httpx
+
+    from scrobble_recs.apis.rate_limit import RateLimiter
+    from scrobble_recs.config import load_config
+    from scrobble_recs.db import initialize_database
+
+    path = write_config(tmp_path)
+    document = json.loads(path.read_text())
+    document["apis"] = {"musicbrainz": {"enabled": True, "rate_limit_per_second": 1.0}}
+    document["recommendation"] = {"min_seed_scrobbles": 1}
+    path.write_text(json.dumps(document))
+    config = load_config(path)
+    conn = initialize_database(config)
+    conn.execute(
+        "INSERT INTO artist (artist_id, canonical_name, artist_key) VALUES (1, 'Seed 1', 'seed 1')"
+    )
+    conn.execute(
+        "INSERT INTO artist_listening_fact (artist_id, play_count, recent_weight, "
+        "lifetime_weight) VALUES (1, 10, 1, 1)"
+    )
+    conn.close()
+    payload = json.loads(Path("tests/fixtures/musicbrainz_artist_relationships.json").read_text())
+    current = [0.0]
+    sleeps = []
+    requests = []
+    clients = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        current[0] += seconds
+
+    def limiter(rate):
+        return RateLimiter(rate, monotonic=lambda: current[0], sleep=sleep)
+
+    # Both production construction sites use one deterministic clock. A reset limiter
+    # would allow the first catalog request at t=0 despite its own correct implementation.
+    monkeypatch.setattr("scrobble_recs.cli.RateLimiter", limiter)
+    monkeypatch.setattr("scrobble_recs.apis.musicbrainz.RateLimiter", limiter)
+
+    def handler(request):
+        requests.append((request.url.path, current[0]))
+        if request.url.path.endswith("/artist"):
+            return httpx.Response(
+                200, json={"artists": [{"id": payload["id"], "name": "Seed 1", "score": 100}]}
+            )
+        return httpx.Response(200, json=payload)
+
+    original = httpx.Client
+
+    def http_client(*args, **kwargs):
+        client = original(*args, **kwargs, transport=httpx.MockTransport(handler))
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(httpx, "Client", http_client)
+    runner = CliRunner()
+    result = runner.invoke(app, ["enrich", "--source", "musicbrainz", "-c", str(path)])
+    assert result.exit_code == 0, result.output
+    assert [path for path, _ in requests] == ["/ws/2/artist", f"/ws/2/artist/{payload['id']}"]
+    assert requests[1][1] - requests[0][1] >= 1.0
+    assert all(client.is_closed for client in clients)
+    assert "relationships_written: 3" in result.output
+
+    # A fresh cached catalog still refreshes local evidence without network pacing or HTTP.
+    again = runner.invoke(app, ["enrich", "--source", "musicbrainz", "-c", str(path)])
+    assert again.exit_code == 0, again.output
+    assert "unresolved artists: 0" in again.output and "artists_requested: 1" in again.output
+    assert len(requests) == 2 and sleeps == [1.0]
+    assert all(client.is_closed for client in clients)
+
+    # Standalone resolution retains its owned-client lifecycle and performs no catalog lookup.
+    conn = initialize_database(config)
+    conn.execute(
+        "UPDATE artist SET identity_confidence = 0, resolution_status = 'unresolved' "
+        "WHERE artist_id = 1"
+    )
+    conn.execute("DELETE FROM api_cache WHERE endpoint = 'artist'")
+    conn.close()
+    resolution = runner.invoke(app, ["resolve", "--source", "musicbrainz", "-c", str(path)])
+    assert resolution.exit_code == 0, resolution.output
+    assert "resolved: 1" in resolution.output
+    assert len(requests) == 3 and requests[-1][0] == "/ws/2/artist"
+    assert all(client.is_closed for client in clients)

@@ -547,3 +547,124 @@ challenger. The fix-round entry records the current behavior.
   contribution persistence, selected/excluded/diversity policy accounting, control restoration,
   existing knownness preference, and byte-stable general control behavior. All four Important
   findings are addressed; no scope expansion or unresolved contract decision remains.
+
+### Task 8 — source-family rank fusion (default-off challenger)
+
+- Added validated `SourceCandidate` / `FusedCandidate` and deterministic weighted RRF:
+  `weight / (constant + rank)`, with no confidence multiplier. Best rank wins conflicting
+  duplicates from one retriever/artist; sources must have consistent families. Source sums remain
+  uncapped in diagnostics; family sums are capped afterwards. Artist ID breaks ties. Invalid
+  rank/ranked combinations, boolean/fractional ranks, nonpositive/nonfinite constants, and
+  negative/nonfinite weights/caps fail clearly.
+- Added explicit, reversible `fusion-v1` and `fusion-features-v1` selection for both query kinds.
+  `FusionConfig.enabled=false`, generated `scoring.engine=legacy`, and the separate Task 7
+  numerical artist challenger defaults are unchanged. Config selection requires both the engine
+  and enable switch; explicit CLI scorer selection enables only that invocation's challenger.
+  Ranked sources have weights of 1, RRF constant 60, and explicit family caps of `1/61` as a
+  bounded baseline. These values were not tuned against fixtures or inferred preferences.
+- Build source-local lists only after fixing the shared query pool/artist neighborhood. Last.fm
+  direct ordering uses the effective seed-weighted normalized edge average; walk uses finite lift;
+  semantic uses query/candidate cosine tag overlap. All have versioned definitions and artist-ID
+  tie breaks. Direct and walk share collaborative credit. ListenBrainz radio, MusicBrainz catalog,
+  and direct local feedback remain unranked memberships, with no fabricated rank or provider RRF.
+- Keep admission, hidden/rejected/identity exclusions and sparse results in the existing shared
+  pipeline. Fusion personal relevance uses capped retrieval credit plus existing weighted feedback
+  and rediscovery, followed by identity and serendipity; knownness, trial, obviousness, fatigue and
+  diversity remain policy effects. Source/family contributions, ranks, confidence, independent
+  families, unranked membership, rank disagreement, source freshness and missing flags are
+  inspectable in strict JSON feature/evidence records. Raw provider observations remain separate.
+- Distinguish disabled, missing, unavailable, stale, ranked and present-unranked sources. Persisted
+  stale evidence remains usable and is marked against provider cache TTLs. Quarantine malformed
+  normalized observations and fusion legacy rows individually. Snapshot hashing encodes invalid
+  nonfinite values as explicit canonical sentinels so quarantine remains reachable. Valid general
+  control output and Task 7 control/challenger semantics remain covered by the existing suite.
+- Extend compare/evaluate reports without changing old metric meanings: pool/eligible recall and
+  coverage, slate recall/NDCG, identity, novelty, tag diversity, tag-chart popularity proxy with
+  missing share, provider concentration, family share, runtime and source counts. New coverage
+  uses the complete persisted artist catalogue; old `catalog_coverage` keeps its graph denominator.
+  Last.fm direct/tag provenance count as one provider for concentration.
+- Comparison captures one transactionally exported temporary DuckDB state and imports a fresh
+  temporary database for every engine/ablation. Full table content hashes supplement snapshot IDs;
+  cutoffs, target, evidence and prior-run fatigue are fixed even for prospective comparisons.
+  Source evidence and recommendation history in the user's database are unchanged. Isolated
+  comparison runs are temporary; standalone evaluation retains its persisted-run behavior.
+  Source ablations cover direct Last.fm, walk, semantic, ListenBrainz and MusicBrainz derived
+  retrieval views. Per-ablation added/removed counts describe enabling that source versus full
+  fusion. Temporary database export/import adds disk/time overhead and fails clearly on state drift.
+- Support-file scope: CLI scorer/ablation selection, evidence quarantine/snapshot hashing,
+  `models/recommend.py`, `models/evaluate.py`, and example config are required integration seams.
+  No migration, live API dependency, exposure/judgment workflow, recording feature, learned model,
+  or full Task 11 promotion rule was added.
+- TDD RED/GREEN evidence: absent fusion module (expected import RED) to 18 math tests GREEN;
+  missing config field to explicit default-off/validation GREEN; missing source lists and feature
+  versions to shared artist persistence GREEN; NaN observation failure to row quarantine GREEN;
+  malformed family failure to quarantine GREEN; seed aggregate poisoned by NaN to valid-row-only
+  rank ordering GREEN; absent ablation argument to isolated same-state comparisons GREEN;
+  full-pipeline snapshot NaN failure to strict canonical hashing GREEN; unsupported fusion CLI
+  selection to reversible override GREEN; missing persisted fusion rank accounting to structured
+  evidence GREEN; stale/missing flags to explicit availability GREEN; provider concentration 0.5
+  for one provider to 1.0 GREEN; graph-only new coverage denominator to artist-catalogue coverage
+  GREEN. Existing deterministic evaluation equality now excludes the newly measured wall runtime.
+- Measured deterministic offline fixture only: two rolling fusion windows returned mean recall@50
+  and NDCG@50 of 0.0. Eight same-state variants (legacy/walk/fusion plus five source ablations)
+  shared a snapshot; legacy produced 1 recommendation, walk/fusion produced 0, semantic
+  ablation produced 3 and the other four ablations produced 0.
+  This tiny fixture is behavioral verification, not quality/promotion evidence. **Not promoted:**
+  `missing_blinded_evidence` and `incomplete_guardrails`; defaults remain control/default-off.
+  No tuning or fabricated judgments were used.
+- Verification before final record: full suite 764 passed (38.93 seconds); expanded focused fusion,
+  retrieval, recommend, artist, compare, evaluate and CLI suite 266 passed (19.14 seconds); three
+  additional fusion hide/reject/identity safety regressions passed. Ruff lint and mypy passed
+  (52 source files). Final post-edit verification is recorded below.
+- Final self-review regression: constructing a fusion walk must not remove Last.fm-only identity
+  compatibility when direct evidence passes but walk's distinct-seed gate fails. RED reproduced
+  `identity_below_minimum` versus the admitted control; GREEN retains direct OR walk compatibility
+  for fusion while leaving both controls unchanged. This was found after the 771-test full pass;
+  the final post-fix run below includes the new regression.
+- Final post-fix verification: focused fusion/retrieval/recommend/artist/compare/evaluate/CLI suite
+  **270 passed** (20.06 seconds); full suite **772 passed** (43.38 seconds), no failures or warnings.
+  Ruff lint passed; Ruff format check reported 97 formatted files; mypy passed for 52 source files;
+  `git diff --check` passed. All Python verification used the repository virtualenv interpreter.
+  Self-review checked exact RRF/family accounting, row quarantine, source availability, source-view
+  ablations, target bounds, snapshot/fatigue fairness, strict persistence, policy separation,
+  frozen general control, Task 7 defaults and the explicit non-promotion record.
+
+
+### Task 8 fix round 1 — six review findings
+
+- I1: retained legacy all-row evaluation metrics and added separately named selected-slate
+  recall@50, NDCG@50 and tag-diversity@20 fields to evaluation, rolling reports and CLI output.
+  Selected diversity filters `candidate_only` before top-k, matching ranking metrics. A real
+  mixed plausible/tail regression was RED for missing fields and GREEN; the tail remains a
+  legacy hit but is absent from selected metrics, including a filter-before-top-k assertion.
+- I2: artist conditioning now retains incoming quarantine diagnostics, with source-artist IDs
+  allowing target-origin versus unrelated rows to be distinguished. Tag diagnostics are scoped
+  to the target/neighborhood. RED lost both normalized and legacy diagnostics; GREEN keeps both
+  target rows, excludes an unrelated malformed source row, and retains valid sibling evidence.
+- I3: `personal_relevance.score` now equals persisted pre-policy relevance. Raw candidate score
+  and components are accurately named, and identity multiplier plus serendipity are explicit.
+  General and artist regressions were RED for raw/relevance mismatch; GREEN reconciles explained
+  relevance, persisted relevance and policy-adjusted final score.
+- B1: fusion source membership/counts now use persisted source ranks/contributions and unranked
+  memberships, with legacy counter fallback for older runs. Last.fm direct/walk/semantic tags
+  map to one provider. Walk-only ablation was RED at concentration zero; GREEN reports 1.0 and
+  nonzero `lastfm_walk` counts, with the ablated direct source absent.
+- B2: validate parsed nested provider JSON with strict finite serialization at each fusion legacy
+  row boundary, before scoring or canonicalization. Nested NaN/positive/negative Infinity were
+  three RED run failures; GREEN quarantines each malformed row while valid siblings persist
+  finite features/evidence and stored provider payloads remain untouched.
+- B3: production generation and context-driven retrieval build fusion query profiles from the
+  validated, canonically ordered legacy view also used by candidate scoring. Invalid seed tags
+  are diagnosed before normalization. Two RED entry-path insertion-order regressions are GREEN:
+  valid semantic ranks/features persist identically for valid-first and invalid-first order.
+  Legacy/walk controls retain their existing profile-loading path and compatibility behavior.
+- No tracked import-cycle refactor, later-task implementation, tuning or promotion occurred.
+  Fusion remains disabled by default and explicitly not promoted. Final verification follows.
+- Fix-round final verification: focused fusion/retrieval/recommend/artist/compare/evaluate/CLI
+  **280 passed** (20.11 seconds); full suite **782 passed** (39.78 seconds), no failures or warnings.
+  Ruff lint passed, format check reported 97 formatted files, mypy passed for 52 source files,
+  and `git diff --check` passed. Verification used the repository virtualenv interpreter.
+  Self-review confirmed consistent selected-slate populations and rolling means, scoped artist
+  malformed diagnostics, exact relevance/policy reconciliation, walk/provider attribution with
+  old-run fallback, strict nested legacy payload rejection, deterministic pre-profile tag
+  quarantine, frozen controls, unchanged default-off/non-promotion state and unchanged cycle debt.

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from math import isfinite, log, sqrt
-from typing import Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 from duckdb import DuckDBPyConnection
 
@@ -16,6 +16,7 @@ from scrobble_recs.config import ScrobbleRecsConfig
 from scrobble_recs.models.evidence import (
     AdmissionDecision,
     CandidateEvidence,
+    EvidenceFamily,
     EvidenceObservation,
     LegacyEvidenceRows,
     is_legacy_compatible,
@@ -28,6 +29,7 @@ from scrobble_recs.models.feedback import (
     apply_feedback_to_tag_profile,
     load_feedback_profile,
 )
+from scrobble_recs.models.fusion import FusedCandidate, SourceCandidate, fuse_source_results
 from scrobble_recs.models.knownness import ArtistListeningInput, compute_artist_listening_scores
 from scrobble_recs.models.modes import RecommendationModeSettings, resolve_recommendation_mode
 from scrobble_recs.models.profile import SeedArtist
@@ -98,12 +100,16 @@ class LegacyRetrievalInputs:
     tag_profile: dict[str, float]
     as_of: datetime
     mode: RecommendationModeSettings
+    legacy_rows: LegacyEvidenceRows | None = None
+    invalid_legacy_rows: tuple[dict[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "seeds", tuple(self.seeds))
         object.__setattr__(self, "feedback_profile", deepcopy(self.feedback_profile))
         object.__setattr__(self, "idf_weights", deepcopy(self.idf_weights))
         object.__setattr__(self, "tag_profile", dict(self.tag_profile))
+        object.__setattr__(self, "legacy_rows", deepcopy(self.legacy_rows))
+        object.__setattr__(self, "invalid_legacy_rows", deepcopy(self.invalid_legacy_rows))
 
 
 @dataclass(frozen=True)
@@ -122,6 +128,8 @@ class RetrievalResult:
     legacy: LegacyRetrievalDetails | None = field(default=None, repr=False, compare=True)
     evidence: dict[int, CandidateEvidence] = field(default_factory=dict)
     admissions: dict[int, AdmissionDecision] = field(default_factory=dict)
+    source_candidates: tuple[SourceCandidate, ...] = ()
+    fused_candidates: tuple[FusedCandidate, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "candidates", deepcopy(tuple(self.candidates)))
@@ -237,21 +245,25 @@ def _load_user_tag_profile(
     weak_tags: list[str] | None = None,
     weak_tag_penalty: float = 1.0,
     evidence_cutoff: datetime | None = None,
+    legacy_rows: LegacyEvidenceRows | None = None,
 ) -> dict[str, float]:
     profile: dict[str, float] = {}
     seed_weight_by_id = {seed.artist_id: seed.seed_weight for seed in seeds}
     if not seed_weight_by_id:
         return profile
 
-    rows = conn.execute(
-        """
-        SELECT artist_id, tag, normalized_weight
-        FROM artist_tag
-        WHERE source = 'lastfm'
-          AND (? IS NULL OR fetched_at <= ?)
-        """,
-        [evidence_cutoff, evidence_cutoff],
-    ).fetchall()
+    if legacy_rows is not None:
+        rows = [(artist, tag, weight) for _, artist, tag, _, weight, _ in legacy_rows.artist_tags]
+    else:
+        rows = conn.execute(
+            """
+            SELECT artist_id, tag, normalized_weight
+            FROM artist_tag
+            WHERE source = 'lastfm'
+              AND (? IS NULL OR fetched_at <= ?)
+            """,
+            [evidence_cutoff, evidence_cutoff],
+        ).fetchall()
 
     normalized_weak_tags = {
         _normalize_tag_key(tag) for tag in (weak_tags or []) if _normalize_tag_key(tag) != ""
@@ -622,8 +634,22 @@ def retrieve_legacy_candidates(
     inputs: LegacyRetrievalInputs | None = None,
 ) -> RetrievalResult:
     """Read persisted legacy facts. Bare calls use the history-window end as as_of."""
-    inputs = inputs or _inputs_from_context(conn, context, config)
-    legacy_rows = load_legacy_evidence_rows(conn, cutoff=context.feedback_cutoff)
+    supplied_view = inputs is not None and inputs.legacy_rows is not None
+    legacy_rows = (
+        inputs.legacy_rows
+        if supplied_view and inputs is not None
+        else load_legacy_evidence_rows(conn, cutoff=context.feedback_cutoff)
+    )
+    assert legacy_rows is not None
+    invalid_legacy_rows = list(inputs.invalid_legacy_rows) if inputs is not None else []
+    if config.recommendation.scoring.engine == "fusion" and not supplied_view:
+        legacy_rows = _fusion_legacy_rows(legacy_rows, invalid_legacy_rows)
+    inputs = inputs or _inputs_from_context(
+        conn,
+        context,
+        config,
+        legacy_rows=legacy_rows if config.recommendation.scoring.engine == "fusion" else None,
+    )
     seed_ids = {seed.artist_id for seed in inputs.seeds}
     data = _load_scoring_data(
         conn,
@@ -640,20 +666,25 @@ def retrieve_legacy_candidates(
             seed_weights=inputs.idf_weights.effective_weight_by_seed,
             config=config.recommendation.walk,
         )
-        if config.recommendation.scoring.engine == "walk" and context.query_kind == "general"
+        if config.recommendation.scoring.engine in ("walk", "fusion")
+        and context.query_kind == "general"
+        and seed_ids
+        and data.similarity_by_target
         else None
     )
+    invalid_observations: list[dict[str, object]] = []
     candidates = tuple(
         _retrieval_candidate(artist_id, data) for artist_id in sorted(data.candidates)
     )
-    return RetrievalResult(
+    result = RetrievalResult(
         candidates,
-        {"candidate_count": len(candidates)},
+        {"candidate_count": len(candidates), "invalid_observations": invalid_observations},
         LegacyRetrievalDetails(inputs, data, walk),
         load_candidate_evidence(
             conn,
             context=context,
             legacy_rows=legacy_rows,
+            invalid_observations=invalid_observations,
             allowed_catalog_relationship_types=frozenset(
                 config.recommendation.catalog_evidence.allowed_relationship_types
                 if config.apis.musicbrainz.enabled
@@ -670,6 +701,15 @@ def retrieve_legacy_candidates(
             ),
         ),
     )
+    if invalid_legacy_rows:
+        result = replace(
+            result, diagnostics={**result.diagnostics, "invalid_legacy_rows": invalid_legacy_rows}
+        )
+    if not invalid_observations:
+        diagnostics = dict(result.diagnostics)
+        diagnostics.pop("invalid_observations", None)
+        result = replace(result, diagnostics=diagnostics)
+    return result
 
 
 def _retrieval_candidate(artist_id: int, data: _ScoringData) -> RetrievalCandidate:
@@ -725,6 +765,13 @@ def retrieve_with_backoff(
         details = result.legacy
         evidence = result.evidence
         seeds = {seed.artist_id for seed in details.inputs.seeds}
+    if (
+        config.recommendation.scoring.engine == "fusion"
+        and config.recommendation.fusion.excluded_sources
+    ):
+        result = _ablate_retrieval(result, config.recommendation.fusion.excluded_sources)
+        assert result.legacy is not None
+        details, evidence = result.legacy, result.evidence
     candidate_ids = ({row.artist_id for row in result.candidates} | set(evidence)) - seeds
     # Artist tags alone do not introduce new legacy candidates.
     legacy_ids = {row.artist_id for row in result.candidates}
@@ -792,7 +839,11 @@ def retrieve_with_backoff(
             legacy_policy_passed = (
                 artist in legacy_ids
                 and legacy_only
-                and (walk_supported if details.walk_result is not None else legacy_gate.passed)
+                and (
+                    (legacy_gate.passed or walk_supported)
+                    if config.recommendation.scoring.engine == "fusion"
+                    else (walk_supported if details.walk_result is not None else legacy_gate.passed)
+                )
             )
             confidence = (
                 data.identity_confidence_by_artist.get(artist, 0.5)
@@ -829,7 +880,7 @@ def retrieve_with_backoff(
         )
         if admitted_count >= limit:
             break
-    return RetrievalResult(
+    result = RetrievalResult(
         tuple(_retrieval_candidate(artist, data) for artist in sorted(candidate_ids)),
         {
             **result.diagnostics,
@@ -843,10 +894,19 @@ def retrieve_with_backoff(
         evidence,
         admissions,
     )
+    return (
+        _with_source_lists(result, config=config, context=context)
+        if config.recommendation.scoring.engine == "fusion"
+        else result
+    )
 
 
 def _inputs_from_context(
-    conn: DuckDBPyConnection, context: QueryContext, config: ScrobbleRecsConfig
+    conn: DuckDBPyConnection,
+    context: QueryContext,
+    config: ScrobbleRecsConfig,
+    *,
+    legacy_rows: LegacyEvidenceRows | None = None,
 ) -> LegacyRetrievalInputs:
     rows = conn.execute(
         "SELECT artist_id, canonical_name, artist_key, "
@@ -881,6 +941,7 @@ def _inputs_from_context(
         weak_tags=config.recommendation.tag_profile.weak_tags,
         weak_tag_penalty=config.recommendation.tag_profile.weak_tag_penalty,
         evidence_cutoff=context.feedback_cutoff,
+        legacy_rows=legacy_rows,
     )
     profile = apply_feedback_to_tag_profile(_apply_tag_focus(profile, mode), feedback)
     return LegacyRetrievalInputs(
@@ -1082,7 +1143,9 @@ def _condition_on_artist(
     return RetrievalResult(
         tuple(_retrieval_candidate(artist, data) for artist in sorted(features)),
         {
+            **result.diagnostics,
             "candidate_count": len(features),
+            **_artist_quarantine_diagnostics(result.diagnostics, target, set(features)),
             "target_artist_id": target,
             "target_neighborhood": sorted(features),
             "invalid_similarity_rows": invalid_rows,
@@ -1121,3 +1184,263 @@ def _target_observations(
         ):
             observations.append(row)
     return tuple(observations)
+
+
+def _with_source_lists(
+    result: RetrievalResult, *, config: ScrobbleRecsConfig, context: QueryContext
+) -> RetrievalResult:
+    """Rank each retriever only inside the final query pool (never provider raw values)."""
+    from scrobble_recs.models.ranking import _lastfm_similarity_score
+
+    assert result.legacy is not None
+    details = result.legacy
+    data, inputs = details.scoring_data, details.inputs
+    ids = sorted(row.artist_id for row in result.candidates)
+    weights = inputs.idf_weights.effective_weight_by_seed
+    definitions: dict[str, tuple[EvidenceFamily, str]] = {
+        "lastfm_similarity": ("collaborative", "seed-weighted-normalized-v1"),
+        "lastfm_walk": ("collaborative", "walk-lift-v1"),
+        "semantic": ("semantic", "query-tag-overlap-v1"),
+    }
+    values = {
+        "lastfm_similarity": {
+            artist: _lastfm_similarity_score(
+                artist, weights, sum(weights.values()) or 1.0, data.similarity_by_target
+            )
+            for artist in ids
+        },
+        "lastfm_walk": {
+            artist: node.lift
+            for artist in ids
+            if details.walk_result is not None
+            and (node := details.walk_result.nodes.get(artist)) is not None
+            and node.hop_distance > 0
+        },
+        "semantic": {
+            artist: _tag_similarity_score(artist, inputs.tag_profile, data) for artist in ids
+        },
+    }
+    excluded = set(config.recommendation.fusion.excluded_sources)
+    rows: list[SourceCandidate] = []
+    diagnostics: dict[str, object] = {}
+    for source, (family, version) in definitions.items():
+        ordered = sorted(
+            (
+                (artist, value)
+                for artist, value in values[source].items()
+                if isfinite(value) and (value > 0 or source == "lastfm_walk")
+            ),
+            key=lambda pair: (-pair[1], pair[0]),
+        )
+        if source not in excluded:
+            rows.extend(
+                SourceCandidate(artist, source, family, rank, True, 1.0)
+                for rank, (artist, _) in enumerate(ordered, 1)
+            )
+        facts = [
+            fact
+            for artist in ids
+            for fact in result.evidence.get(artist, CandidateEvidence(artist, ())).observations
+            if fact.family == family
+            and fact.source == "lastfm"
+            and (
+                family == "semantic" or source == "lastfm_walk" or fact.source_artist_id in weights
+            )
+        ]
+        latest = max(
+            (fact.fetched_at for fact in facts if fact.fetched_at is not None), default=None
+        )
+        stale = bool(
+            ordered
+            and latest is not None
+            and (inputs.as_of - latest).total_seconds() > config.apis.lastfm.cache_ttl_days * 86400
+        )
+        diagnostics[source] = {
+            "status": "disabled"
+            if source in excluded
+            else "stale"
+            if stale
+            else "present_ranked"
+            if ordered
+            else "missing",
+            "calibration": version,
+            "ranked": True,
+            "stale": stale if source not in excluded else False,
+            "latest_at": latest.isoformat() if latest is not None else None,
+        }
+    for source, enabled, ttl in (
+        (
+            "listenbrainz",
+            config.apis.listenbrainz.enabled
+            and config.apis.listenbrainz.candidate_generation_enabled,
+            config.apis.listenbrainz.cache_ttl_days,
+        ),
+        (
+            "musicbrainz",
+            config.apis.musicbrainz.enabled and config.recommendation.catalog_evidence.enabled,
+            config.apis.musicbrainz.cache_ttl_days,
+        ),
+        ("local_feedback", True, None),
+    ):
+        facts = [
+            fact
+            for artist in ids
+            for fact in result.evidence.get(artist, CandidateEvidence(artist, ())).observations
+            if fact.source == source
+            and (fact.source_artist_id in weights or fact.family == "personal")
+        ]
+        stale = bool(
+            facts
+            and ttl is not None
+            and all(
+                fact.fetched_at is not None
+                and (inputs.as_of - fact.fetched_at).total_seconds() > ttl * 86400
+                for fact in facts
+            )
+        )
+        active = enabled and source not in excluded
+        if active:
+            rows.extend(
+                SourceCandidate(
+                    fact.target_artist_id,
+                    source,
+                    fact.family,
+                    None,
+                    False,
+                    fact.identity_confidence,
+                )
+                for fact in facts
+            )
+        diagnostics[source] = {
+            "status": "disabled"
+            if not active
+            else "stale"
+            if stale
+            else "present_unranked"
+            if facts
+            else "missing",
+            "ranked": False,
+            "stale": stale if active else False,
+        }
+    if details.walk_result is None and "lastfm_walk" not in excluded:
+        diagnostics["lastfm_walk"] = {
+            "status": "unavailable",
+            "ranked": True,
+            "calibration": "walk-lift-v1",
+        }
+    return replace(
+        result,
+        source_candidates=tuple(rows),
+        fused_candidates=fuse_source_results(
+            rows,
+            rrf_constant=config.recommendation.fusion.rrf_constant,
+            source_weights=config.recommendation.fusion.source_weights,
+            family_caps=config.recommendation.fusion.family_caps,
+        ),
+        diagnostics={
+            **result.diagnostics,
+            "fusion_sources": diagnostics,
+            "fusion_config": config.recommendation.fusion.model_dump(mode="json"),
+        },
+    )
+
+
+def _ablate_retrieval(result: RetrievalResult, excluded: Sequence[str]) -> RetrievalResult:
+    """Remove derived source views without changing persisted provider evidence."""
+    assert result.legacy is not None
+    details, evidence = result.legacy, {}
+    for artist, facts in result.evidence.items():
+        kept = tuple(
+            row
+            for row in facts.observations
+            if row.source not in excluded
+            and not (row.family == "semantic" and "semantic" in excluded)
+            and not (
+                row.source == "lastfm"
+                and row.relationship_kind == "similar_artist"
+                and "lastfm_similarity" in excluded
+            )
+        )
+        if kept:
+            evidence[artist] = CandidateEvidence(artist, kept)
+    data = details.scoring_data
+    if "lastfm_similarity" in excluded:
+        data = replace(data, similarity_by_target={})
+    if "semantic" in excluded:
+        data = replace(data, direct_tags_by_artist={}, tag_ranks_by_artist={})
+    walk = None if "lastfm_walk" in excluded else details.walk_result
+    ids = {
+        artist
+        for artist in data.candidates
+        if artist in evidence
+        or (walk is not None and artist in walk.nodes and walk.nodes[artist].hop_distance > 0)
+    }
+    return replace(
+        result,
+        candidates=tuple(row for row in result.candidates if row.artist_id in ids),
+        evidence=evidence,
+        legacy=replace(details, scoring_data=replace(data, candidates=ids), walk_result=walk),
+    )
+
+
+def _fusion_legacy_rows(
+    rows: LegacyEvidenceRows, invalid: list[dict[str, object]]
+) -> LegacyEvidenceRows:
+    """Quarantine malformed rows before they poison a candidate's aggregates."""
+
+    def keep(row: tuple[Any, ...], fields: tuple[int, ...], target: int, kind: str) -> bool:
+        valid = all(row[index] is None or isfinite(row[index]) for index in fields)
+        if kind == "similarity":
+            valid = valid and row[4] is not None
+            try:
+                payload = json.loads(row[6]) if row[6] is not None else None
+                json.dumps(payload, allow_nan=False)
+            except (ValueError, TypeError):
+                valid = False
+        elif kind == "tag":
+            valid = valid and row[4] is not None
+        else:
+            valid = valid and type(row[3]) is int and row[3] > 0
+        if not valid:
+            invalid.append(
+                {
+                    "source": row[0],
+                    "source_artist_id": row[1] if kind == "similarity" else None,
+                    "target_artist_id": row[target],
+                    "kind": kind,
+                }
+            )
+        return valid
+
+    return LegacyEvidenceRows(
+        tuple(
+            sorted(
+                (row for row in rows.similarities if keep(row, (3, 4), 2, "similarity")), key=repr
+            )
+        ),
+        tuple(sorted((row for row in rows.artist_tags if keep(row, (3, 4), 1, "tag")), key=repr)),
+        tuple(
+            sorted(
+                (row for row in rows.tag_memberships if keep(row, (4,), 1, "membership")), key=repr
+            )
+        ),
+    )
+
+
+def _artist_quarantine_diagnostics(
+    diagnostics: dict[str, object], target: int, neighbors: set[int]
+) -> dict[str, object]:
+    scoped: dict[str, object] = {}
+    for key in ("invalid_observations", "invalid_legacy_rows"):
+        records = diagnostics.get(key)
+        if isinstance(records, list):
+            scoped[key] = [
+                row
+                for row in records
+                if row.get("source_artist_id") == target
+                or (
+                    row.get("source_artist_id") is None
+                    and row.get("target_artist_id") in neighbors | {target}
+                )
+            ]
+    return scoped

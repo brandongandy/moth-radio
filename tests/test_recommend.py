@@ -3355,3 +3355,72 @@ class TestIdentityConfidence:
         )
         assert conf == pytest.approx(0.40)
         assert "multiple_possible_local_matches" in warnings
+
+
+def test_fusion_general_quarantines_nonfinite_provider_row_and_preserves_control(tmp_path):
+    from scrobble_recs.models.evidence import EvidenceObservation, persist_evidence_observation
+
+    config = load_config(write_config(tmp_path))
+    config.recommendation.scoring.engine = "fusion"
+    config.recommendation.fusion.enabled = True
+    config.apis.listenbrainz.enabled = True
+    config.apis.listenbrainz.candidate_generation_enabled = True
+    conn = initialize_database(config)
+    try:
+        import_lastfm_csv(conn, Path("tests/fixtures/tiny_lastfm_export.csv"))
+        conn.execute(
+            "INSERT INTO artist (artist_id, canonical_name, artist_key, "
+            "identity_confidence) VALUES (99, 'Candidate', 'candidate', .95)"
+        )
+        seed = conn.execute(
+            "SELECT artist_id FROM artist WHERE artist_key = 'the cure'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO artist_similarity_edge (source_artist_id, "
+            "target_artist_id, source, normalized_score, fetched_at) VALUES (?, "
+            "99, 'lastfm', .9, '2000-01-01')",
+            [seed],
+        )
+        persist_evidence_observation(
+            conn,
+            EvidenceObservation(
+                "listenbrainz",
+                "collaborative",
+                "artist_radio_membership",
+                seed,
+                99,
+                None,
+                None,
+                "easy",
+                datetime(2000, 1, 1),
+                0.95,
+                {},
+            ),
+            observation_key="bad",
+        )
+        conn.execute("UPDATE artist_evidence_observation SET raw_score = 'NaN'")
+        stats = generate_recommendations(
+            conn,
+            config,
+            limit=10,
+            as_of=datetime(2025, 1, 1),
+            history_window=_FIXTURE_HISTORY_WINDOW,
+        )
+        record = json.loads(
+            conn.execute(
+                "SELECT feature_record FROM recommendation_candidate WHERE "
+                "run_id = ? AND artist_id = 99",
+                [stats.run_id],
+            ).fetchone()[0]
+        )
+        assert record["schema_version"] == "fusion-features-v1"
+        assert record["values"]["fusion_source_lastfm_similarity"] == 1 / 61
+        summary = json.loads(
+            conn.execute(
+                "SELECT seed_summary FROM recommendation_run WHERE run_id = ?", [stats.run_id]
+            ).fetchone()[0]
+        )
+        assert len(summary["retrieval_diagnostics"]["invalid_observations"]) == 1
+        assert record["values"]["fusion_status_listenbrainz"] == "missing"
+    finally:
+        conn.close()

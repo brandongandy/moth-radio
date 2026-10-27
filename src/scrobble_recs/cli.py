@@ -44,7 +44,7 @@ from scrobble_recs.enrichment.queue import (
 )
 from scrobble_recs.export import ExportFormat, export_recommendations
 from scrobble_recs.importers.lastfm_csv import ImportStats, get_import_stats, import_lastfm_csv
-from scrobble_recs.models.compare import ScorerComparison, compare_scorers
+from scrobble_recs.models.compare import ScorerComparison, _with_engine, compare_scorers
 from scrobble_recs.models.evaluate import (
     ArtistEvaluationResult,
     ArtistRollingEvaluationReport,
@@ -783,11 +783,9 @@ def _apply_scorer_override(config: ScrobbleRecsConfig, scorer: str | None) -> Sc
     """Return a config whose scoring engine is overridden by ``--scorer``."""
     if scorer is None:
         return config
-    if scorer not in ("legacy", "walk"):
-        raise typer.BadParameter("--scorer must be 'legacy' or 'walk'")
-    scoring = config.recommendation.scoring.model_copy(update={"engine": scorer})
-    recommendation = config.recommendation.model_copy(update={"scoring": scoring})
-    return config.model_copy(update={"recommendation": recommendation})
+    if scorer not in ("legacy", "walk", "fusion"):
+        raise typer.BadParameter("--scorer must be 'legacy', 'walk', or 'fusion'")
+    return _with_engine(config, scorer)
 
 
 _WEIGHT_ABLATIONS = {
@@ -832,7 +830,9 @@ def recommend_command(
     ] = None,
     scorer: Annotated[
         str | None,
-        typer.Option("--scorer", help="Scoring engine: 'legacy' or 'walk'."),
+        typer.Option(
+            "--scorer", help="Scoring engine: legacy, walk, or fusion (explicit challenger opt-in)."
+        ),
     ] = None,
     since: Annotated[
         str | None,
@@ -971,7 +971,9 @@ def evaluate_command(
     ] = None,
     scorer: Annotated[
         str | None,
-        typer.Option("--scorer", help="Scoring engine: 'legacy' or 'walk'."),
+        typer.Option(
+            "--scorer", help="Scoring engine: legacy, walk, or fusion (explicit challenger opt-in)."
+        ),
     ] = None,
     ablate: Annotated[
         str | None,
@@ -980,15 +982,23 @@ def evaluate_command(
     ablate_source: Annotated[
         str | None,
         typer.Option(
-            "--ablate-source", help="Measure without ListenBrainz on the same persisted snapshot."
+            "--ablate-source",
+            help="Exclude a provider or ranked fusion source without changing evidence.",
         ),
     ] = None,
 ) -> None:
     """Evaluate recommendation quality using a train/test split."""
     from datetime import timedelta
 
-    if ablate_source not in (None, "listenbrainz"):
-        raise typer.BadParameter("--ablate-source must be listenbrainz")
+    if ablate_source not in (
+        None,
+        "listenbrainz",
+        "musicbrainz",
+        "lastfm_similarity",
+        "lastfm_walk",
+        "semantic",
+    ):
+        raise typer.BadParameter("unknown --ablate-source")
     resolved_config = _apply_ablation(_apply_scorer_override(load_config(config), scorer), ablate)
     conn = initialize_database(resolved_config)
     try:
@@ -1045,6 +1055,12 @@ def evaluate_command(
     console.print(f"recall@100: {result.recall_at_100:.3f}")
     console.print(f"ndcg@50: {result.ndcg_at_50:.3f}")
     console.print(f"tag_diversity@20: {result.tag_diversity_at_20:.3f}")
+    console.print(f"selected_slate_recall_at_50: {result.selected_slate_recall_at_50:.3f}")
+    console.print(f"selected_slate_ndcg_at_50: {result.selected_slate_ndcg_at_50:.3f}")
+    console.print(
+        f"selected_slate_tag_diversity_at_20: {result.selected_slate_tag_diversity_at_20:.3f}"
+    )
+
     console.print(f"knownness median: {result.knownness_median:.3f}")
     console.print(f"obviousness median: {result.obviousness_median:.3f}")
     console.print(f"rediscovery_hit_rate: {result.rediscovery_hit_rate:.3f}")
@@ -1094,7 +1110,8 @@ def evaluate_rolling_command(
         console.print(f"mean graded adoption ndcg@50: {report.mean_graded_adoption_ndcg_at_50:.3f}")
     prefix = "target_id | " if report.evaluation_task == "artist" else ""
     console.print(
-        prefix + "cutoff | test_until | recall@50 | recall@100 | ndcg@50 | identity_resolved_rate"
+        prefix + "cutoff | test_until | recall@50 | recall@100 | ndcg@50 | identity_resolved_rate "
+        "| selected_slate_recall@50 | selected_slate_ndcg@50 | selected_slate_diversity@20"
     )
     for result in report.windows:
         prefix = (
@@ -1103,12 +1120,22 @@ def evaluate_rolling_command(
         console.print(
             prefix + f"{result.train_until} | {result.test_until} | "
             f"{result.recall_at_50:.3f} | {result.recall_at_100:.3f} | "
-            f"{result.ndcg_at_50:.3f} | {result.identity_resolved_rate:.3f}"
+            f"{result.ndcg_at_50:.3f} | {result.identity_resolved_rate:.3f} | "
+            f"{result.selected_slate_recall_at_50:.3f} | {result.selected_slate_ndcg_at_50:.3f} | "
+            f"{result.selected_slate_tag_diversity_at_20:.3f}"
         )
     console.print(f"mean recall@50: {report.mean_recall_at_50:.3f}")
     console.print(f"mean recall@100: {report.mean_recall_at_100:.3f}")
     console.print(f"mean ndcg@50: {report.mean_ndcg_at_50:.3f}")
     console.print(f"mean identity_resolved_rate: {report.mean_identity_resolved_rate:.3f}")
+    console.print(
+        f"mean selected_slate_recall_at_50: {report.mean_selected_slate_recall_at_50:.3f}"
+    )
+    console.print(f"mean selected_slate_ndcg_at_50: {report.mean_selected_slate_ndcg_at_50:.3f}")
+    console.print(
+        "mean selected_slate_tag_diversity_at_20: "
+        f"{report.mean_selected_slate_tag_diversity_at_20:.3f}"
+    )
 
 
 @app.command("compare")
@@ -1134,6 +1161,12 @@ def compare_command(
         str,
         typer.Option("--scorers", help="Comma-separated engines to compare."),
     ] = "legacy,walk",
+    ablate_source: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--ablate-source", help="Repeat for fusion source ablations on the same captured state."
+        ),
+    ] = None,
 ) -> None:
     """Run several scoring engines over one identical split and print deltas."""
     from datetime import timedelta
@@ -1141,8 +1174,8 @@ def compare_command(
     resolved_config = load_config(config)
     scorer_list = [item.strip() for item in scorers.split(",") if item.strip()]
     for scorer in scorer_list:
-        if scorer not in ("legacy", "walk"):
-            raise typer.BadParameter("--scorers may only contain 'legacy' and 'walk'")
+        if scorer not in ("legacy", "walk", "fusion"):
+            raise typer.BadParameter("--scorers may only contain legacy, walk, and fusion")
 
     conn = initialize_database(resolved_config)
     try:
@@ -1158,6 +1191,9 @@ def compare_command(
         test_end_dt = _parse_timestamp(test_until) if test_until else test_dt + timedelta(days=90)
 
         console.print("Comparing scorers over identical split...")
+        comparison_options: dict[str, Any] = (
+            {"ablate_sources": ablate_source} if ablate_source else {}
+        )
         results = compare_scorers(
             conn,
             resolved_config,
@@ -1165,6 +1201,7 @@ def compare_command(
             test_from=test_dt,
             test_until=test_end_dt,
             scorers=scorer_list,
+            **comparison_options,
         )
     finally:
         conn.close()
@@ -1186,6 +1223,17 @@ def _print_comparison(results: list[ScorerComparison]) -> None:
         ("knownness_median", [r.knownness_median for r in results]),
         ("tag_entropy", [r.tag_entropy for r in results]),
         ("mean_hop_distance", [r.mean_hop_distance for r in results]),
+        ("pool_recall", [r.pool_recall for r in results]),
+        ("eligible_recall", [r.eligible_recall for r in results]),
+        ("pool_coverage", [r.pool_coverage for r in results]),
+        ("eligible_coverage", [r.eligible_coverage for r in results]),
+        ("ndcg@50", [r.ndcg_at_50 for r in results]),
+        ("identity_resolved", [r.identity_resolved_rate for r in results]),
+        ("novelty", [r.novelty_rate for r in results]),
+        ("tag_diversity@20", [r.tag_diversity_at_20 for r in results]),
+        ("provider_concentration", [r.provider_concentration for r in results]),
+        ("multi_family_share", [r.multi_family_share for r in results]),
+        ("runtime_seconds", [r.runtime_seconds for r in results]),
     ]
     header = "metric".ljust(20) + "".join(r.scorer.rjust(12) for r in results)
     delta_header = "delta".rjust(12) if len(results) == 2 else ""
@@ -1198,6 +1246,23 @@ def _print_comparison(results: list[ScorerComparison]) -> None:
         if len(results) == 2 and values[0] is not None and values[1] is not None:
             line += fmt(values[1] - values[0]).rjust(12)
         console.print(line)
+    for row in results:
+        console.print(
+            json.dumps(
+                {
+                    "scorer": row.scorer,
+                    "evidence_snapshot_id": row.evidence_snapshot_id,
+                    "stable_state_id": row.stable_state_id,
+                    "popularity_distribution": row.popularity_distribution,
+                    "candidate_count_by_source": row.candidate_count_by_source,
+                    "candidate_added_by_source": row.candidate_added_by_source,
+                    "candidate_removed_by_source": row.candidate_removed_by_source,
+                    "promotion_status": row.promotion_status,
+                    "missing_promotion_evidence": row.missing_promotion_evidence,
+                },
+                sort_keys=True,
+            )
+        )
 
 
 @app.command("feedback")

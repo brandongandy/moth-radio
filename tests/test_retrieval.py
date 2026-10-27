@@ -149,3 +149,221 @@ def test_feedback_seed_expansion_preserves_current_candidates_and_snapshot(stage
     result = retrieve_legacy_candidates(conn, context=context, config=config)
     assert [item.artist_id for item in result.candidates] == [2, 3]
     assert {edge["seed_artist_id"] for edge in result.candidates[1].provenance} == {1, 2, 4}
+
+
+def test_fusion_source_lists_are_query_local_ranked_and_membership_unranked(stage_database):
+    from scrobble_recs.models.evidence import EvidenceObservation, persist_evidence_observation
+    from scrobble_recs.models.retrieval import retrieve_with_backoff
+
+    conn, config, context = stage_database
+    config.recommendation.scoring.engine = "fusion"
+    config.recommendation.fusion.enabled = True
+    config.apis.listenbrainz.enabled = True
+    config.apis.listenbrainz.candidate_generation_enabled = True
+    persist_evidence_observation(
+        conn,
+        EvidenceObservation(
+            "listenbrainz",
+            "collaborative",
+            "artist_radio_membership",
+            1,
+            2,
+            None,
+            None,
+            "easy",
+            datetime(2020, 1, 1),
+            0.95,
+            {"raw_provider": {"artist": "Zulu"}},
+        ),
+        observation_key="radio-test",
+    )
+    result = retrieve_with_backoff(conn, context=context, config=config, limit=10)
+    direct = [r for r in result.source_candidates if r.source == "lastfm_similarity"]
+    assert [(r.artist_id, r.source_rank) for r in direct] == [(2, 1), (3, 2)]
+    radio = [r for r in result.source_candidates if r.source == "listenbrainz"]
+    assert len(radio) == 1 and radio[0].source_rank is None and not radio[0].ranked
+    assert result.diagnostics["fusion_sources"]["listenbrainz"]["status"] == "stale"
+    assert result.diagnostics["fusion_sources"]["musicbrainz"]["status"] == "disabled"
+    assert (
+        result.diagnostics["fusion_sources"]["lastfm_similarity"]["calibration"]
+        == "seed-weighted-normalized-v1"
+    )
+    assert result.legacy.walk_result is not None
+
+
+@pytest.mark.parametrize("corruption", ["raw_score = 'NaN'", "family = 'semantic'"])
+def test_fusion_quarantines_malformed_observations_without_losing_valid_rows(
+    stage_database, corruption
+):
+    from scrobble_recs.models.evidence import EvidenceObservation, persist_evidence_observation
+    from scrobble_recs.models.retrieval import retrieve_with_backoff
+
+    conn, config, context = stage_database
+    config.recommendation.scoring.engine = "fusion"
+    config.recommendation.fusion.enabled = True
+    config.apis.listenbrainz.enabled = True
+    config.apis.listenbrainz.candidate_generation_enabled = True
+    for target in (2, 3):
+        persist_evidence_observation(
+            conn,
+            EvidenceObservation(
+                "listenbrainz",
+                "collaborative",
+                "artist_radio_membership",
+                1,
+                target,
+                None,
+                None,
+                "easy",
+                datetime(2020, 1, 1),
+                0.95,
+                {},
+            ),
+            observation_key=str(target),
+        )
+    conn.execute(f"UPDATE artist_evidence_observation SET {corruption} WHERE target_artist_id = 3")
+    result = retrieve_with_backoff(conn, context=context, config=config, limit=10)
+    assert [r.artist_id for r in result.source_candidates if r.source == "listenbrainz"] == [2]
+    assert result.diagnostics["invalid_observations"] == [
+        {
+            "source": "listenbrainz",
+            "source_artist_id": 1,
+            "target_artist_id": 3,
+            "reason": "invalid_observation",
+        }
+    ]
+    assert any(r.source == "lastfm_similarity" for r in result.source_candidates)
+
+
+def test_fusion_excludes_only_invalid_legacy_edge_and_uses_seed_weighted_order(stage_database):
+    from scrobble_recs.models.retrieval import retrieve_with_backoff
+
+    conn, config, context = stage_database
+    config.recommendation.scoring.engine = "fusion"
+    config.recommendation.fusion.enabled = True
+    conn.execute(
+        "INSERT INTO artist_similarity_edge "
+        "(source_artist_id, target_artist_id, source, normalized_score) "
+        "VALUES (2, 3, 'lastfm', .1), (2, 4, 'lastfm', .8), (4, 3, 'lastfm', 'NaN')"
+    )
+    context = replace(
+        context,
+        taste_region_seeds=(TasteRegionSeed(1, 1, ("core",)), TasteRegionSeed(2, 9, ("core",))),
+    )
+    result = retrieve_with_backoff(conn, context=context, config=config, limit=10)
+    assert [
+        (r.artist_id, r.source_rank)
+        for r in result.source_candidates
+        if r.source == "lastfm_similarity"
+    ] == [(4, 1), (3, 2)]
+    assert len(result.diagnostics["invalid_legacy_rows"]) == 1
+    assert result.legacy.scoring_data.similarity_by_target[3] == [(1, 0.9), (2, 0.1)]
+
+
+def test_fusion_source_availability_keeps_missing_disabled_and_unavailable_distinct(stage_database):
+    from scrobble_recs.models.retrieval import retrieve_with_backoff
+
+    conn, config, context = stage_database
+    config.recommendation.scoring.engine = "fusion"
+    config.recommendation.fusion.enabled = True
+    config.recommendation.fusion.excluded_sources = ["semantic"]
+    config.apis.listenbrainz.enabled = True
+    config.apis.listenbrainz.candidate_generation_enabled = True
+    conn.execute("DELETE FROM artist_similarity_edge")
+    result = retrieve_with_backoff(conn, context=context, config=config, limit=10)
+    statuses = result.diagnostics["fusion_sources"]
+    assert statuses["lastfm_similarity"]["status"] == "missing"
+    assert statuses["lastfm_walk"]["status"] == "unavailable"
+    assert statuses["semantic"]["status"] == "disabled"
+    assert statuses["listenbrainz"]["status"] == "missing"
+    assert statuses["musicbrainz"]["status"] == "disabled"
+
+
+def test_fusion_source_lists_ignore_legacy_insertion_order(stage_database):
+    from scrobble_recs.models.retrieval import retrieve_with_backoff
+
+    conn, config, context = stage_database
+    config.recommendation.scoring.engine = "fusion"
+    config.recommendation.fusion.enabled = True
+    first = retrieve_with_backoff(conn, context=context, config=config, limit=10)
+    conn.execute("CREATE TEMP TABLE edges AS SELECT * FROM artist_similarity_edge")
+    conn.execute("DELETE FROM artist_similarity_edge")
+    conn.execute(
+        "INSERT INTO artist_similarity_edge SELECT * FROM edges ORDER BY target_artist_id DESC"
+    )
+    second = retrieve_with_backoff(conn, context=context, config=config, limit=10)
+    assert first.source_candidates == second.source_candidates
+    assert first.fused_candidates == second.fused_candidates
+    assert first.diagnostics == second.diagnostics
+
+
+def test_fusion_walk_does_not_remove_lastfm_only_compatibility_admission(stage_database):
+    from scrobble_recs.models.retrieval import retrieve_with_backoff
+
+    conn, config, context = stage_database
+    legacy = retrieve_with_backoff(conn, context=context, config=config, limit=10)
+    assert legacy.admissions[2].admitted is True
+    config.recommendation.scoring.engine = "fusion"
+    config.recommendation.fusion.enabled = True
+    # The single-seed graph fails walk's two-seed gate but passes direct admission.
+    fusion = retrieve_with_backoff(conn, context=context, config=config, limit=10)
+    assert fusion.admissions[2] == legacy.admissions[2]
+
+
+@pytest.mark.parametrize("production", [False, True])
+def test_fusion_seed_tag_quarantine_precedes_profile_and_is_order_independent(
+    stage_database, production
+):
+    import json
+
+    from scrobble_recs.models.recommend import generate_recommendations
+    from scrobble_recs.models.retrieval import retrieve_with_backoff
+
+    conn, config, context = stage_database
+    config.recommendation.scoring.engine = "fusion"
+    config.recommendation.fusion.enabled = True
+    config.recommendation.fatigue.enabled = False
+    conn.execute(
+        "INSERT INTO scrobble (scrobble_id, artist_key, track_key, "
+        "played_at, played_date, is_duplicate) VALUES (900, 'seed', 'one', "
+        "'2024-01-01', '2024-01-01', false), (901, 'seed', 'two', "
+        "'2024-01-02', '2024-01-02', false)"
+    )
+    results = []
+    for reverse in (False, True):
+        conn.execute("DELETE FROM artist_tag")
+        facts = [(1, "valid", 1.0), (1, "bad", float("nan")), (2, "valid", 1.0)]
+        conn.executemany(
+            "INSERT INTO artist_tag (artist_id, tag, source, "
+            "normalized_weight, fetched_at) VALUES (?, ?, 'lastfm', ?, "
+            "'2020-01-01')",
+            list(reversed(facts)) if reverse else facts,
+        )
+        if production:
+            stats = generate_recommendations(
+                conn,
+                config,
+                limit=10,
+                as_of=datetime(2025, 1, 1),
+                history_window=context.history_window,
+            )
+            evidence, feature = conn.execute(
+                "SELECT evidence, feature_record FROM "
+                "recommendation_candidate WHERE run_id = ? AND artist_id = 2",
+                [stats.run_id],
+            ).fetchone()
+            diagnostics = json.loads(
+                conn.execute(
+                    "SELECT seed_summary FROM recommendation_run WHERE run_id = ?", [stats.run_id]
+                ).fetchone()[0]
+            )["retrieval_diagnostics"]
+            result = (json.loads(evidence)["fusion"]["source_ranks"]["semantic"], feature)
+        else:
+            retrieval = retrieve_with_backoff(conn, context=context, config=config, limit=10)
+            assert retrieval.legacy.inputs.tag_profile == {"valid": 1.0}
+            diagnostics = retrieval.diagnostics
+            result = tuple(r for r in retrieval.source_candidates if r.source == "semantic")
+            assert [(r.artist_id, r.source_rank) for r in result] == [(2, 1)]
+        assert [r["kind"] for r in diagnostics["invalid_legacy_rows"]] == ["tag"]
+        results.append(result)
+    assert results[0] == results[1]

@@ -5,6 +5,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from time import perf_counter
 from typing import Literal
 
 from duckdb import DuckDBPyConnection
@@ -51,6 +52,20 @@ class EvaluationResult:
     identity_resolved_rate: float = 0.0
     identity_ambiguous_rate: float = 0.0
 
+    pool_candidate_count: int = 0
+    eligible_candidate_count: int = 0
+    pool_recall: float = 0.0
+    eligible_recall: float = 0.0
+    pool_coverage: float = 0.0
+    eligible_coverage: float = 0.0
+    provider_concentration: float = 0.0
+    multi_family_share: float = 0.0
+    popularity_distribution: dict[str, float] = field(default_factory=dict)
+    runtime_seconds: float = 0.0
+    selected_slate_recall_at_50: float = 0.0
+    selected_slate_ndcg_at_50: float = 0.0
+    selected_slate_tag_diversity_at_20: float = 0.0
+
     @property
     def evaluation_task(self) -> str:
         return "general"
@@ -72,6 +87,9 @@ class RollingEvaluationReport:
     mean_recall_at_100: float
     mean_ndcg_at_50: float
     mean_identity_resolved_rate: float
+    mean_selected_slate_recall_at_50: float = 0.0
+    mean_selected_slate_ndcg_at_50: float = 0.0
+    mean_selected_slate_tag_diversity_at_20: float = 0.0
 
     @property
     def evaluation_task(self) -> str:
@@ -118,6 +136,14 @@ def evaluate_rolling_recommendations(
         mean_recall_at_100=sum(item.recall_at_100 for item in results) / count,
         mean_ndcg_at_50=sum(item.ndcg_at_50 for item in results) / count,
         mean_identity_resolved_rate=sum(item.identity_resolved_rate for item in results) / count,
+        mean_selected_slate_recall_at_50=sum(item.selected_slate_recall_at_50 for item in results)
+        / count,
+        mean_selected_slate_ndcg_at_50=sum(item.selected_slate_ndcg_at_50 for item in results)
+        / count,
+        mean_selected_slate_tag_diversity_at_20=sum(
+            item.selected_slate_tag_diversity_at_20 for item in results
+        )
+        / count,
     )
 
 
@@ -132,14 +158,34 @@ def evaluate_recommendations(
     evaluation_task: Literal["general", "artist"] = "general",
     target_artist_id: int | None = None,
 ) -> EvaluationResult:
+    started = perf_counter()
     if evaluation_task not in ("general", "artist"):
         raise ValueError("evaluation_task must be general or artist")
     request = RecommendationRequest(evaluation_task, target_artist_id)
-    if ablate_source not in (None, "listenbrainz"):
-        raise ValueError("ablate_source must be listenbrainz")
+    allowed_sources = (
+        "listenbrainz",
+        "musicbrainz",
+        "lastfm_similarity",
+        "lastfm_walk",
+        "semantic",
+    )
+    if ablate_source is not None and ablate_source not in allowed_sources:
+        raise ValueError(
+            "ablate_source must be listenbrainz, musicbrainz, lastfm_similarity, "
+            "lastfm_walk, or semantic"
+        )
     if ablate_source:
         config = config.model_copy(deep=True)
-        config.apis.listenbrainz.enabled = False
+        if config.recommendation.scoring.engine == "fusion":
+            config.recommendation.fusion = type(config.recommendation.fusion).model_validate(
+                {**config.recommendation.fusion.model_dump(), "excluded_sources": [ablate_source]}
+            )
+        elif ablate_source == "listenbrainz":
+            config.apis.listenbrainz.enabled = False
+        else:
+            raise ValueError(
+                "ranked/catalog/personal source ablations require scoring.engine=fusion"
+            )
     train_until = normalize_timestamp(train_until)
     test_from = normalize_timestamp(test_from)
     test_until = normalize_timestamp(test_until)
@@ -207,7 +253,7 @@ def evaluate_recommendations(
     novelty_rate = _novelty_rate(conn, rec_artist_ids, train_until)
     cooldown_or_repeat_rate = _cooldown_or_repeat_rate(conn, run_id)
     memberships = _source_memberships(conn, run_id)
-    if config.apis.listenbrainz.enabled:
+    if config.apis.listenbrainz.enabled and config.recommendation.scoring.engine != "fusion":
         _add_radio_memberships(conn, run_id, train_until, memberships)
     if ablate_source:
         memberships.pop(ablate_source, None)
@@ -223,12 +269,18 @@ def evaluate_recommendations(
     assert snapshot is not None
     families = {
         "collaborative": len(
-            memberships.get("lastfm", set()) | memberships.get("listenbrainz", set())
+            memberships.get("lastfm", set())
+            | memberships.get("listenbrainz", set())
+            | memberships.get("lastfm_similarity", set())
+            | memberships.get("lastfm_walk", set())
         ),
-        "semantic": len(memberships.get("lastfm_tag", set())),
+        "semantic": len(memberships.get("lastfm_tag", set()) | memberships.get("semantic", set())),
     }
     identity_resolved_rate, identity_ambiguous_rate = _identity_coverage(conn, run_id)
 
+    from scrobble_recs.models.compare import run_quality_metrics
+
+    quality = run_quality_metrics(conn, run_id, test_artists, cutoff=train_until)
     result = EvaluationResult(
         train_until=train_until.isoformat(),
         test_from=test_from.isoformat(),
@@ -258,6 +310,24 @@ def evaluate_recommendations(
         ablated_source=ablate_source,
         identity_resolved_rate=identity_resolved_rate,
         identity_ambiguous_rate=identity_ambiguous_rate,
+        **{
+            key: quality[key]
+            for key in (
+                "pool_candidate_count",
+                "eligible_candidate_count",
+                "pool_recall",
+                "eligible_recall",
+                "pool_coverage",
+                "eligible_coverage",
+                "provider_concentration",
+                "multi_family_share",
+                "popularity_distribution",
+                "selected_slate_recall_at_50",
+                "selected_slate_ndcg_at_50",
+                "selected_slate_tag_diversity_at_20",
+            )
+        },
+        runtime_seconds=perf_counter() - started,
     )
 
     if evaluation_task == "artist":
@@ -276,20 +346,34 @@ def evaluate_recommendations(
 
 
 def _source_memberships(conn: DuckDBPyConnection, run_id: str) -> dict[str, set[int]]:
-    memberships: dict[str, set[int]] = {"lastfm": set(), "lastfm_tag": set()}
+    memberships: dict[str, set[int]] = {}
     rows = conn.execute(
         "SELECT artist_id, appeared_from_seed_count, appeared_from_tag_count, evidence "
         "FROM recommendation_candidate WHERE run_id = ?",
         [run_id],
     ).fetchall()
     for artist_id, seed_count, tag_count, payload in rows:
+        evidence = json.loads(payload or "{}")
+        fusion = evidence.get("fusion")
+        if isinstance(fusion, dict):
+            sources = (
+                set(fusion.get("source_ranks", {}))
+                | set(fusion.get("source_contributions", {}))
+                | set(fusion.get("unranked_sources", []))
+            )
+            for source in sources:
+                memberships.setdefault(source, set()).add(int(artist_id))
+            continue
         for source, count in (("lastfm", seed_count), ("lastfm_tag", tag_count)):
             if count is not None and count > 0:
-                memberships[source].add(int(artist_id))
-        for observation in json.loads(payload or "{}").get("observations", []):
+                memberships.setdefault(source, set()).add(int(artist_id))
+        for observation in evidence.get("observations", []):
             source = observation["source"]
             if source not in ("lastfm", "local_feedback"):
                 memberships.setdefault(source, set()).add(int(artist_id))
+    if not rows or not any("fusion" in json.loads(row[3] or "{}") for row in rows):
+        memberships.setdefault("lastfm", set())
+        memberships.setdefault("lastfm_tag", set())
     return memberships
 
 
@@ -408,16 +492,18 @@ def _tag_diversity_at_k(
     conn: DuckDBPyConnection,
     run_id: str,
     k: int,
+    *,
+    selected_only: bool = False,
 ) -> float:
     rows = conn.execute(
         """
         SELECT explanation
         FROM recommendation
-        WHERE run_id = ?
+        WHERE run_id = ? AND (NOT ? OR score_band != 'candidate_only')
         ORDER BY rank
         LIMIT ?
         """,
-        [run_id, k],
+        [run_id, selected_only, k],
     ).fetchall()
     unique_tags: set[str] = set()
     total_tags = 0
@@ -601,6 +687,14 @@ def _evaluate_artist_windows(
         mean_recall_at_100=sum(row.recall_at_100 for row in results) / denominator,
         mean_ndcg_at_50=sum(row.ndcg_at_50 for row in results) / denominator,
         mean_identity_resolved_rate=sum(row.identity_resolved_rate for row in results)
+        / denominator,
+        mean_selected_slate_recall_at_50=sum(row.selected_slate_recall_at_50 for row in results)
+        / denominator,
+        mean_selected_slate_ndcg_at_50=sum(row.selected_slate_ndcg_at_50 for row in results)
+        / denominator,
+        mean_selected_slate_tag_diversity_at_20=sum(
+            row.selected_slate_tag_diversity_at_20 for row in results
+        )
         / denominator,
         target_count=len(target_ids),
         run_count=len(results),

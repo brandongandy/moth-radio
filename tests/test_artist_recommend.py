@@ -711,3 +711,229 @@ def test_artist_challenger_persists_actual_tunables_contributions_and_enabled_ef
             == effects["components"]["relationship_popularity"]
             == 0
         )
+
+
+def test_artist_fusion_persists_separate_accounting_and_is_deterministic(artist_database):
+    conn, config = artist_database
+    config.recommendation.scoring.engine = "fusion"
+    config.recommendation.fusion.enabled = True
+    first, second = run(conn, config), run(conn, config)
+    query = (
+        "SELECT artist_id, evidence, feature_record, candidate_score, relevance_score, "
+        "policy_effects FROM recommendation_candidate WHERE run_id = ? ORDER BY artist_id"
+    )
+    a = conn.execute(query, [first.run_id]).fetchall()
+    b = conn.execute(query, [second.run_id]).fetchall()
+    assert a == b and {r[0] for r in a} == {2, 3, 4}
+    assert rows(conn, first.run_id) == rows(conn, second.run_id)
+    records = [json.loads(r[2]) for r in a]
+    assert json.loads(a[0][1])["fusion"]["source_ranks"]["lastfm_similarity"] == 1
+    assert records[0]["values"]["fusion_confidence_lastfm_similarity"] == 1.0
+    assert all(r["schema_version"] == "fusion-features-v1" for r in records)
+    assert all("fusion_score" in r["values"] for r in records)
+    assert records[0]["values"]["fusion_source_lastfm_similarity"] == 1 / 61
+    assert records[0]["values"]["fusion_family_collaborative"] <= 1 / 61
+    versions = conn.execute(
+        "SELECT fusion_version, ranker_version FROM recommendation_run WHERE run_id = ?",
+        [first.run_id],
+    ).fetchone()
+    assert versions == ("fusion-v1", "fusion-v1")
+    explanations = [json.loads(r[2]) for r in rows(conn, first.run_id)]
+    assert explanations and all(
+        "retrieval_fusion" in e and "personal_relevance" in e for e in explanations
+    )
+
+
+def test_fusion_unranked_radio_and_catalog_reinforce_semantic_without_rank(artist_database):
+    conn, config = artist_database
+    config.recommendation.scoring.engine = "fusion"
+    config.recommendation.fusion.enabled = True
+    config.apis.listenbrainz.enabled = True
+    config.apis.listenbrainz.candidate_generation_enabled = True
+    config.apis.musicbrainz.enabled = True
+    config.recommendation.catalog_evidence.enabled = True
+    config.recommendation.discovery_evidence.catalog_relationships_enabled = True
+    config.recommendation.catalog_evidence.allowed_relationship_types = ["member of band"]
+    observation(conn, "listenbrainz", 4)
+    observation(
+        conn,
+        "musicbrainz",
+        4,
+        family="catalog",
+        kind="catalog_relationship",
+        payload={"relationship_type": "member of band", "supported_relationship": True},
+    )
+    stats = run(conn, config)
+    feature, evidence, admission = conn.execute(
+        "SELECT feature_record, evidence, admission FROM "
+        "recommendation_candidate WHERE run_id = ? AND artist_id = 4",
+        [stats.run_id],
+    ).fetchone()
+    values = json.loads(feature)["values"]
+    assert json.loads(admission)["admitted"] is True
+    assert values["fusion_independent_family_count"] == 3
+    assert values["fusion_member_listenbrainz"] and values["fusion_member_musicbrainz"]
+    assert values["fusion_score"] == values["fusion_source_semantic"]
+    assert "fusion_source_listenbrainz" not in values and "fusion_source_musicbrainz" not in values
+    facts = json.loads(evidence)["observations"]
+    assert all(r["source_rank"] is None for r in facts if r["source"] != "lastfm")
+    assert values["fusion_stale_lastfm_similarity"] is True
+    assert values["fusion_missing_listenbrainz"] is False
+
+
+def test_artist_fusion_comparison_keeps_identical_target_and_state(artist_database):
+    from scrobble_recs.models.compare import compare_scorers
+
+    conn, config = artist_database
+    result = compare_scorers(
+        conn,
+        config,
+        train_until=CUTOFF,
+        test_from=CUTOFF,
+        test_until=datetime(2026, 1, 1),
+        scorers=["legacy", "walk", "fusion"],
+        ablate_sources=["semantic"],
+        request=RecommendationRequest("artist", 1),
+    )
+    assert all(r.query_kind == "artist" and r.target_artist_id == 1 for r in result)
+    assert len({r.stable_state_id for r in result}) == 1
+    assert len({r.evidence_snapshot_id for r in result}) == 1
+    assert all(r.pool_candidate_count <= 3 for r in result)
+
+
+@pytest.mark.parametrize("action,artist", [("hide_artist", 2), ("reject", 3), ("identity", 4)])
+def test_fusion_never_restores_hidden_rejected_or_unsafe_identity(artist_database, action, artist):
+    conn, config = artist_database
+    config.recommendation.scoring.engine = "fusion"
+    config.recommendation.fusion.enabled = True
+    if action == "identity":
+        conn.execute("UPDATE artist SET identity_confidence = .1 WHERE artist_id = ?", [artist])
+    else:
+        record_feedback_event(
+            conn,
+            run_id="00000000-0000-0000-0000-000000000001",
+            artist_id=artist,
+            action=action,
+            created_at=datetime(2024, 12, 31),
+        )
+    stats = run(conn, config)
+    assert artist not in {r[0] for r in rows(conn, stats.run_id)}
+    state, effects = conn.execute(
+        "SELECT eligibility_state, policy_effects FROM recommendation_candidate "
+        "WHERE run_id = ? AND artist_id = ?",
+        [stats.run_id, artist],
+    ).fetchone()
+    assert state == "excluded" and json.loads(effects)["included"] is False
+
+
+def test_artist_fusion_retains_query_scoped_quarantine_diagnostics(artist_database):
+    conn, config = artist_database
+    config.recommendation.scoring.engine = "fusion"
+    config.recommendation.fusion.enabled = True
+    config.apis.listenbrainz.enabled = True
+    config.apis.listenbrainz.candidate_generation_enabled = True
+    observation(conn, "listenbrainz", 2)
+    observation(conn, "listenbrainz", 4)
+    observation(conn, "listenbrainz", 5, origin=6)
+    conn.execute(
+        "UPDATE artist_evidence_observation SET raw_score = 'NaN' WHERE target_artist_id IN (2, 5)"
+    )
+    conn.execute(
+        "UPDATE artist_similarity_edge SET normalized_score = 'NaN' WHERE "
+        "source_artist_id = 1 AND target_artist_id = 3"
+    )
+    stats = run(conn, config)
+    summary = json.loads(
+        conn.execute(
+            "SELECT seed_summary FROM recommendation_run WHERE run_id = ?", [stats.run_id]
+        ).fetchone()[0]
+    )["retrieval_diagnostics"]
+    assert (
+        summary["candidate_count"]
+        == conn.execute(
+            "SELECT count(*) FROM recommendation_candidate WHERE run_id = ?", [stats.run_id]
+        ).fetchone()[0]
+    )
+    assert [r["target_artist_id"] for r in summary["invalid_observations"]] == [2]
+    assert [r["target_artist_id"] for r in summary["invalid_legacy_rows"]] == [3]
+    evidence = json.loads(
+        conn.execute(
+            "SELECT evidence FROM recommendation_candidate WHERE run_id = ? AND artist_id = 4",
+            [stats.run_id],
+        ).fetchone()[0]
+    )
+    assert any(r["source"] == "listenbrainz" for r in evidence["observations"])
+    assert 2 in {r[0] for r in rows(conn, stats.run_id)}
+
+
+@pytest.mark.parametrize("kind", ["general", "artist"])
+def test_fusion_relevance_explanation_reconciles_identity_serendipity_and_policy(
+    artist_database, kind
+):
+    conn, config = artist_database
+    config.recommendation.scoring.engine = "fusion"
+    config.recommendation.fusion.enabled = True
+    stats = generate_recommendations(
+        conn,
+        config,
+        limit=20,
+        as_of=CUTOFF,
+        history_window=WINDOW,
+        historical_cutoff=CUTOFF,
+        local_history_end=CUTOFF,
+        request=RecommendationRequest(kind, 1 if kind == "artist" else None),
+    )
+    result = conn.execute(
+        "SELECT r.explanation, c.candidate_score, c.relevance_score, "
+        "c.policy_adjustment, r.final_score FROM recommendation r JOIN "
+        "recommendation_candidate c USING (run_id, artist_id) WHERE "
+        "r.run_id = ?",
+        [stats.run_id],
+    ).fetchall()
+    assert result
+    for explanation, candidate, relevance, adjustment, final in result:
+        personal = json.loads(explanation)["personal_relevance"]
+        assert personal["score"] == pytest.approx(relevance)
+        assert personal["raw_candidate_score"] == candidate
+        assert (
+            personal["identity_multiplier"]
+            == 0.5 + 0.5 * json.loads(explanation)["identity_confidence"]
+        )
+        assert sum(personal["components"].values()) == pytest.approx(relevance)
+        assert personal["score"] + adjustment == pytest.approx(final)
+
+
+@pytest.mark.parametrize("invalid", ["NaN", "Infinity", "-Infinity"])
+def test_fusion_quarantines_nested_nonfinite_legacy_json_before_scoring(artist_database, invalid):
+    conn, config = artist_database
+    config.recommendation.scoring.engine = "fusion"
+    config.recommendation.fusion.enabled = True
+    payload = '{"provider":{"nested":[{"bad":' + invalid + "}]}}"
+    conn.execute(
+        "UPDATE artist_similarity_edge SET evidence = ? WHERE "
+        "source_artist_id = 1 AND target_artist_id = 3",
+        [payload],
+    )
+    stats = run(conn, config)
+    assert 2 in {r[0] for r in rows(conn, stats.run_id)}
+    summary = json.loads(
+        conn.execute(
+            "SELECT seed_summary FROM recommendation_run WHERE run_id = ?", [stats.run_id]
+        ).fetchone()[0]
+    )
+    assert [
+        r["target_artist_id"] for r in summary["retrieval_diagnostics"]["invalid_legacy_rows"]
+    ] == [3]
+    for evidence, features in conn.execute(
+        "SELECT evidence, feature_record FROM recommendation_candidate WHERE run_id = ?",
+        [stats.run_id],
+    ).fetchall():
+        json.dumps(json.loads(evidence), allow_nan=False)
+        json.dumps(json.loads(features), allow_nan=False)
+    assert (
+        conn.execute(
+            "SELECT evidence FROM artist_similarity_edge WHERE "
+            "source_artist_id = 1 AND target_artist_id = 3"
+        ).fetchone()[0]
+        == payload
+    )

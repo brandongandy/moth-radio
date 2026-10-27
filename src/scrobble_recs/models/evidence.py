@@ -229,6 +229,7 @@ def load_candidate_evidence(
     legacy_rows: LegacyEvidenceRows | None = None,
     excluded_sources: frozenset[str] = frozenset(),
     allowed_catalog_relationship_types: frozenset[str] | None = None,
+    invalid_observations: list[dict[str, object]] | None = None,
 ) -> dict[int, CandidateEvidence]:
     cutoff = normalize_timestamp(context.feedback_cutoff) if context.feedback_cutoff else None
     legacy_rows = legacy_rows or load_legacy_evidence_rows(conn, cutoff=cutoff)
@@ -332,34 +333,54 @@ def load_candidate_evidence(
     ).fetchall():
         if stored[0] in excluded_sources:
             continue
-        stored_payload = {
-            key: value
-            for key, value in json.loads(stored[10]).items()
-            if key not in _RESERVED_LEGACY_KEYS
-        }
-        if stored[1] == "catalog" and allowed_catalog_relationship_types is not None:
-            if (
-                stored[2] != "catalog_relationship"
-                or stored_payload.get("relationship_type") not in allowed_catalog_relationship_types
-            ):
-                continue
-            # Stored policy is acquisition-time provenance; current policy controls admission.
-            stored_payload["supported_relationship"] = True
-        observations.append(
-            EvidenceObservation(
-                source=stored[0],
-                family=stored[1],
-                relationship_kind=stored[2],
-                source_artist_id=stored[3],
-                target_artist_id=stored[4],
-                raw_score=stored[5],
-                source_rank=stored[6],
-                provider_mode=stored[7],
-                fetched_at=stored[8],
-                identity_confidence=stored[9],
-                evidence=stored_payload,
+        try:
+            expected_family = {
+                "listenbrainz": "collaborative",
+                "musicbrainz": "catalog",
+                "local_feedback": "personal",
+            }.get(stored[0])
+            if expected_family is not None and stored[1] != expected_family:
+                raise ValueError("provider source and family disagree")
+            stored_payload = {
+                key: value
+                for key, value in json.loads(stored[10]).items()
+                if key not in _RESERVED_LEGACY_KEYS
+            }
+            json.dumps(stored_payload, allow_nan=False)
+            if stored[1] == "catalog" and allowed_catalog_relationship_types is not None:
+                if (
+                    stored[2] != "catalog_relationship"
+                    or stored_payload.get("relationship_type")
+                    not in allowed_catalog_relationship_types
+                ):
+                    continue
+                # Stored policy is acquisition-time provenance; current policy controls admission.
+                stored_payload["supported_relationship"] = True
+            observations.append(
+                EvidenceObservation(
+                    source=stored[0],
+                    family=stored[1],
+                    relationship_kind=stored[2],
+                    source_artist_id=stored[3],
+                    target_artist_id=stored[4],
+                    raw_score=stored[5],
+                    source_rank=stored[6],
+                    provider_mode=stored[7],
+                    fetched_at=stored[8],
+                    identity_confidence=stored[9],
+                    evidence=stored_payload,
+                )
             )
-        )
+        except (ValueError, TypeError, AttributeError):
+            if invalid_observations is not None:
+                invalid_observations.append(
+                    {
+                        "source": stored[0],
+                        "source_artist_id": stored[3],
+                        "target_artist_id": stored[4],
+                        "reason": "invalid_observation",
+                    }
+                )
     for event_id, created, target, action, value, payload in conn.execute(
         "SELECT feedback_id::VARCHAR, created_at, artist_id, action, value, context "
         "FROM feedback_event WHERE artist_id IS NOT NULL AND (? IS NULL OR created_at < ?)",

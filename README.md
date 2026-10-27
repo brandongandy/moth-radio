@@ -175,7 +175,7 @@ including diversity, clipping and exclusion, so `relevance + sum(policy componen
 Challenger popularity/obviousness effects honor `obviousness.enabled`, and its additional known-neighbor
 reduction honors `knownness.enabled`. Disabling the challenger restores the existing control;
 activation is explicit and no promotion happens automatically. Changing the default requires the
-comparison evidence specified by the design; no fusion, exposure, or promotion workflow is added here.
+comparison evidence specified by the design; the Task 8 fusion challenger below is a separate explicit opt-in. Exposure and full promotion workflows remain deferred.
 
 `recommend` reads the current local evidence snapshot and persists the run, including considered candidates and inspectable evidence/admission/ranking/policy data. It does not call provider APIs.
 
@@ -205,7 +205,7 @@ Available modes include
 - `old`
 - `anti-obvious`
 
-`--since` and `--until` accept ISO dates or timestamps. `--scorer` accepts `legacy` or `walk`. Recommendation runs retain the query window, evidence snapshot, source-aware admission record, missing signals, raw and calibrated components, policy effects, and serendipity evidence.
+`--since` and `--until` accept ISO dates or timestamps. `--scorer` accepts `legacy`, `walk`, or the explicit `fusion` challenger. Recommendation runs retain the query window, evidence snapshot, source-aware admission record, missing signals, raw and calibrated components, policy effects, and serendipity evidence.
 
 ### Inspect and rebuild your local profile
 
@@ -373,7 +373,7 @@ scrobble-recs evaluate \
   --test-until 2023-04-01
 ```
 
-`--split-date` is one shared boundary: training ends there and the outcome horizon begins there. Otherwise provide both `--train-until` and `--test-from`. Without `--test-until`, Moth Radio evaluates the next 90 days. `--scorer` selects `legacy` or `walk`; `--ablate` can disable one supported weight or toggle. Evaluation uses listening, feedback, and provider evidence available at the historical cutoff.
+`--split-date` is one shared boundary: training ends there and the outcome horizon begins there. Otherwise provide both `--train-until` and `--test-from`. Without `--test-until`, Moth Radio evaluates the next 90 days. `--scorer` selects `legacy`, `walk`, or `fusion`; `--ablate` can disable one supported weight or toggle. Evaluation uses listening, feedback, and provider evidence available at the historical cutoff.
 
 Compare the two scoring engines over exactly the same split:
 
@@ -416,6 +416,12 @@ listen, 2 for repeat plays, or 3 for listening on multiple UTC days, with gain `
 Duplicates, pre-cutoff known artists, and plays outside the horizon earn no adoption credit.
 This retrospective result is supplementary: history does not establish discovery through the target.
 
+Evaluation preserves the legacy all-row `recall_at_50`, `recall_at_100`, `ndcg_at_50`, and
+`tag_diversity_at_20` fields. Separately named `selected_slate_recall_at_50`,
+`selected_slate_ndcg_at_50`, and `selected_slate_tag_diversity_at_20` exclude `candidate_only`
+rows before top-k. Single-window and rolling CLI output include these fields, and rolling
+reports include their means over the same window/target denominator as the other metrics.
+
 The Python evaluation results also include candidate and future-hit counts for `lastfm` (seed similarity evidence) and `lastfm_tag` (tag evidence). A candidate with both kinds of evidence counts in both groups, including candidates excluded from the final recommendations. Legacy `candidate_sources` stores seed IDs, so these diagnostics use the persisted seed/tag evidence counts. Identity rates cover all candidate artists: `resolved_musicbrainz` counts as resolved; `ambiguous_musicbrainz` and `provisional_mbid_conflict` count as ambiguous. Provisional MBIDs alone do not establish resolution. Empty candidate populations report zero rates.
 
 ## Development
@@ -439,6 +445,69 @@ Moth Radio is a local, graph-based recommender. Each `recommend` run computes ca
 Listening history → seed artists → graph/tag candidates → eligibility gate
 → calibrated scoring → novelty penalties/bonuses → diversity rerank → persisted run
 ```
+
+### Optional source-family fusion challenger
+
+Generated config keeps `scoring.engine="legacy"` and `fusion.enabled=false`. To select the
+reversible challenger for either general or artist recommendations, use `--scorer fusion` or
+set both `recommendation.scoring.engine="fusion"` and `recommendation.fusion.enabled=true`.
+Selecting fusion in a config without enabling it fails clearly. Task 7's numerical artist
+challenger remains independently disabled; fusion uses the same target-bounded artist pool.
+
+Fusion creates three query-local lists after the pool is fixed:
+
+- `lastfm_similarity`: sum of each seed's effective IDF-adjusted weight times its persisted
+  normalized edge score, divided by total effective seed weight;
+- `lastfm_walk`: descending finite walk lift for reachable neighbors;
+- `semantic`: descending cosine overlap of the query tag profile and candidate tag vector.
+
+Each list breaks ties by artist ID. Weighted RRF is exactly `weight / (60 + rank)` by default;
+confidence never multiplies it. All three initial source weights are `1.0`. Direct Last.fm
+and its walk share the collaborative family; semantic is independent. Contributions sum within
+each family before the initial cap of `1/61` per family. The caps are an explicit bounded
+baseline, not measured tuned weights. ListenBrainz radio and MusicBrainz catalog facts remain
+unranked memberships with zero RRF. They can support admission and independent-family agreement.
+No catalog rank or ListenBrainz rank is invented.
+
+Personal relevance uses the capped fusion sum (with the existing mode similarity multiplier),
+existing weighted feedback and rediscovery, then existing identity scaling and serendipity.
+Knownness, obviousness, trial-listen, fatigue, and diversity remain policy effects. Persisted
+candidate evidence contains raw observations plus separate fusion ranks, uncapped source
+contributions, capped family totals, and unranked membership. Relevance explanations name the raw
+candidate contribution separately and reconcile identity scaling plus serendipity to persisted
+pre-policy relevance; relevance plus the persisted policy adjustment equals the final score. Feature records include confidence,
+family count, rank disagreement (`(max_rank-min_rank)/max_rank`, zero without ranks), source
+freshness and missing/disabled/unavailable status.
+Stale facts remain usable and are marked against provider cache TTLs; malformed rows are
+quarantined individually with diagnostics. Ranked-source calibration versions are persisted.
+
+```bash
+scrobble-recs compare --config ./config.json --split-date 2024-01-01 \
+  --scorers legacy,walk,fusion --ablate-source lastfm_walk --ablate-source semantic
+scrobble-recs evaluate --config ./config.json --split-date 2024-01-01 \
+  --scorer fusion --ablate-source listenbrainz
+```
+
+`compare` captures one temporary DuckDB export under a read transaction, checks a full content
+hash (including legacy evidence and prior runs), and imports a fresh temporary database per
+variant. Query targets, history/evidence cutoffs, and prior-run fatigue are identical. Comparison
+runs are temporary and do not enter the user's persisted recommendation history. Equal snapshot
+IDs alone do not prove a frozen database; the content checks and isolated copies provide that
+extra assurance. Reports preserve existing metrics and add pool/eligible recall and coverage (coverage uses all persisted artist identities),
+slate recall/NDCG, identity, novelty, tag diversity, popularity distribution (tag-chart affinity
+proxy with missing share), provider concentration, independent-family share, runtime, and source
+candidate counts. Runtime covers generation and metric calculation, excluding temporary database
+materialization. Ablation rows report candidates added/removed when enabling that source,
+relative to the full fusion pool. Source ablations change derived views, never stored evidence.
+Fusion source counts use persisted retriever ranks/contributions and unranked memberships, including
+walk-only candidates; older runs retain seed/tag-counter fallback. Last.fm direct, walk, and semantic
+tag retrieval map to the same Last.fm provider. Ranked/provider source names are `lastfm_similarity`, `lastfm_walk`, `semantic`, `listenbrainz`,
+and `musicbrainz`; direct local feedback membership is also inspectable.
+
+**Promotion status: not promoted.** Blinded local judgments and complete guardrails do not yet
+exist (`missing_blinded_evidence`, `incomplete_guardrails`). Deterministic offline fixtures verify
+behavior and isolation; they are not quality or promotion evidence. Existing production defaults
+remain unchanged and no weights are tuned from these fixtures.
 
 ### 1. Seed selection
 

@@ -948,9 +948,9 @@ def test_artist_rolling_replay_uses_ascending_targets_and_separate_run_denominat
             conn, config, windows=[window], evaluation_task="artist"
         )
         for first, second in zip(report.windows, repeated.windows, strict=True):
-            assert {k: v for k, v in asdict(first).items() if k != "run_id"} == {
-                k: v for k, v in asdict(second).items() if k != "run_id"
-            }
+            assert {
+                k: v for k, v in asdict(first).items() if k not in ("run_id", "runtime_seconds")
+            } == {k: v for k, v in asdict(second).items() if k not in ("run_id", "runtime_seconds")}
     finally:
         conn.close()
 
@@ -1015,5 +1015,94 @@ def test_artist_adoption_gains_are_horizon_only_and_duplicate_free(tmp_path):
         assert gains == {9700: 3.0, 9701: 1.0}
         assert evaluate_model._adoption_ndcg_at_k(gains, [9701, 9700], 50) < 1.0
         assert evaluate_model._adoption_ndcg_at_k(gains, [9700, 9701], 50) == 1.0
+    finally:
+        conn.close()
+
+
+def test_fusion_evaluation_supports_ranked_source_ablation_and_quality_metrics(tmp_path):
+    from scrobble_recs.models.compare import _with_engine
+
+    conn, config = _setup_db(tmp_path)
+    try:
+        fusion = _with_engine(config, "fusion")
+        arguments = dict(
+            train_until=datetime(2024, 6, 1),
+            test_from=datetime(2024, 6, 1),
+            test_until=datetime(2025, 1, 1),
+        )
+        full = evaluate_recommendations(conn, fusion, **arguments)
+        ablated = evaluate_recommendations(conn, fusion, ablate_source="lastfm_walk", **arguments)
+        assert full.evidence_snapshot_id == ablated.evidence_snapshot_id
+        assert full.pool_candidate_count >= full.eligible_candidate_count
+        assert 0 <= full.provider_concentration <= 1
+        assert 0 <= full.multi_family_share <= 1
+        assert full.runtime_seconds >= 0
+        assert ablated.ablated_source == "lastfm_walk"
+        assert fusion.recommendation.fusion.excluded_sources == []
+    finally:
+        conn.close()
+
+
+def test_selected_slate_metrics_filter_tail_before_ranking_and_diversity(tmp_path, monkeypatch):
+    conn, config = _setup_db(tmp_path)
+    real_generate = evaluate_model.generate_recommendations
+    try:
+        ids = dict(conn.execute("SELECT canonical_name, artist_id FROM artist").fetchall())
+        selected, tail = ids["Siouxsie and the Banshees"], ids["Bauhaus"]
+        key = conn.execute("SELECT artist_key FROM artist WHERE artist_id = ?", [tail]).fetchone()[
+            0
+        ]
+        conn.execute(
+            "INSERT INTO scrobble (scrobble_id, artist_key, track_key, "
+            "played_at, played_date, is_duplicate) VALUES (999, ?, "
+            "'future', '2024-02-01', '2024-02-01', false)",
+            [key],
+        )
+
+        def mixed_run(*args, **kwargs):
+            stats = real_generate(*args, **kwargs)
+            conn.execute(
+                "DELETE FROM recommendation WHERE run_id = ? AND artist_id NOT IN (?, ?)",
+                [stats.run_id, selected, tail],
+            )
+            conn.execute(
+                "UPDATE recommendation SET rank = CASE artist_id WHEN ? "
+                "THEN 1 ELSE 2 END, score_band = CASE artist_id WHEN ? THEN "
+                "'plausible' ELSE 'candidate_only' END, explanation = CASE "
+                "artist_id WHEN ? THEN '{\"tags\":[]}' ELSE "
+                '\'{"tags":[{"tag":"tail-only"}]}\' END WHERE run_id = ?',
+                [selected, selected, selected, stats.run_id],
+            )
+            assert (
+                conn.execute(
+                    "SELECT count(*) FROM recommendation WHERE run_id = ?", [stats.run_id]
+                ).fetchone()[0]
+                == 2
+            )
+            return stats
+
+        monkeypatch.setattr(evaluate_model, "generate_recommendations", mixed_run)
+        window = evaluate_model.EvaluationWindow(
+            datetime(2024, 1, 3), datetime(2024, 1, 3), datetime(2024, 4, 3)
+        )
+        report = evaluate_model.evaluate_rolling_recommendations(conn, config, windows=[window])
+        result = report.windows[0]
+        assert result.ndcg_at_50 > 0 and result.recall_at_50 > 0  # legacy all-row semantics
+        assert result.selected_slate_ndcg_at_50 == 0
+        assert result.selected_slate_recall_at_50 == 0
+        assert result.selected_slate_tag_diversity_at_20 == 0
+        assert report.mean_selected_slate_ndcg_at_50 == 0
+        assert report.mean_selected_slate_recall_at_50 == 0
+        assert report.mean_selected_slate_tag_diversity_at_20 == 0
+        run_id = conn.execute(
+            "SELECT run_id FROM recommendation_run ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE recommendation SET rank = CASE artist_id WHEN ? THEN 2 ELSE 1 END, "
+            "explanation = ? WHERE run_id = ?",
+            [selected, json.dumps({"tags": [{"tag": "selected"}]}), run_id],
+        )
+        assert evaluate_model._tag_diversity_at_k(conn, run_id, 1, selected_only=True) == 1
+
     finally:
         conn.close()

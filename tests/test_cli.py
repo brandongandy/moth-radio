@@ -1884,3 +1884,15 @@ def test_evaluate_rolling_artist_nonempty_runs_are_local_and_identified(tmp_path
     assert result.exit_code == 0, result.output
     assert "target_id | cutoff" in result.output
     assert "targets: 1" in result.output and "runs: 1" in result.output
+
+
+def test_cli_fusion_override_is_explicit_and_reversible(tmp_path):
+    from scrobble_recs.cli import _apply_scorer_override
+    from scrobble_recs.config import load_config
+
+    config = load_config(write_config(tmp_path))
+    challenger = _apply_scorer_override(config, "fusion")
+    assert challenger.recommendation.scoring.engine == "fusion"
+    assert challenger.recommendation.fusion.enabled is True
+    assert config.recommendation.fusion.enabled is False
+    assert _apply_scorer_override(challenger, "legacy").recommendation.fusion.enabled is False

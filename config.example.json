@@ -198,6 +198,22 @@
         "popularity_preference": -0.05,
         "obviousness_penalty_weight": 0.15
       }
+    },
+    "fusion": {
+      "enabled": false,
+      "rrf_constant": 60.0,
+      "source_weights": {
+        "lastfm_similarity": 1.0,
+        "lastfm_walk": 1.0,
+        "semantic": 1.0
+      },
+      "family_caps": {
+        "collaborative": 0.01639344262295082,
+        "semantic": 0.01639344262295082,
+        "catalog": 0.01639344262295082,
+        "personal": 0.01639344262295082
+      },
+      "excluded_sources": []
     }
   }
 }

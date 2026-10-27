@@ -135,3 +135,120 @@ def test_compare_runs_both_engines_over_identical_split(tmp_path: Path) -> None:
     # Legacy never records hop distance; walk does.
     assert by_scorer["legacy"].mean_hop_distance is None
     assert by_scorer["walk"].mean_hop_distance == 1.0
+
+
+def test_compare_fusion_ablations_share_stable_state_and_do_not_contaminate_runs(tmp_path):
+    from dataclasses import asdict
+
+    conn, config = _setup(tmp_path)
+    try:
+        config.recommendation.profile_window_months = 120
+        arguments = dict(
+            train_until=datetime(2030, 1, 3),
+            test_from=datetime(2030, 1, 3),
+            test_until=datetime(2030, 4, 3),
+        )
+        before = conn.execute("SELECT count(*) FROM recommendation_run").fetchone()
+        forward = compare_scorers(
+            conn,
+            config,
+            scorers=["legacy", "walk", "fusion"],
+            ablate_sources=["lastfm_walk"],
+            **arguments,
+        )
+        reverse = compare_scorers(
+            conn,
+            config,
+            scorers=["fusion", "walk", "legacy"],
+            ablate_sources=["lastfm_walk"],
+            **arguments,
+        )
+        assert conn.execute("SELECT count(*) FROM recommendation_run").fetchone() == before
+        assert len({r.evidence_snapshot_id for r in forward + reverse}) == 1
+        assert len({r.stable_state_id for r in forward + reverse}) == 1
+
+        def comparable(rows):
+            return {
+                r.scorer: {k: v for k, v in asdict(r).items() if k != "runtime_seconds"}
+                for r in rows
+            }
+
+        assert comparable(forward) == comparable(reverse)
+        assert {r.scorer for r in forward} == {
+            "legacy",
+            "walk",
+            "fusion",
+            "fusion-without-lastfm_walk",
+        }
+        fusion = next(r for r in forward if r.scorer == "fusion")
+        assert fusion.recommendations > 0
+        assert (
+            fusion.pool_candidate_count >= fusion.eligible_candidate_count >= fusion.recommendations
+        )
+        assert 0 <= fusion.provider_concentration <= 1
+        assert 0 <= fusion.multi_family_share <= 1
+        assert fusion.runtime_seconds >= 0
+        assert fusion.promotion_status == "not_promoted"
+        assert "missing_blinded_evidence" in fusion.missing_promotion_evidence
+        assert config.recommendation.fusion.enabled is False
+    finally:
+        conn.close()
+
+
+def test_provider_concentration_counts_lastfm_direct_and_tags_as_one_provider(tmp_path):
+    from scrobble_recs.models.compare import run_quality_metrics
+
+    conn, config = _setup(tmp_path)
+    try:
+        _new_artist(conn, "Catalogue Only", "catalogue only")
+        conn.execute(
+            "INSERT INTO artist_tag (artist_id, tag, source, normalized_weight, fetched_at) "
+            "SELECT artist_id, 'facet', 'lastfm', 1, '2000-01-01' FROM artist"
+        )
+        conn.execute(
+            "INSERT INTO tag_top_artist (artist_id, tag, source, tag_rank, fetched_at) "
+            "SELECT artist_id, 'facet', 'lastfm', 10, '2000-01-01' FROM artist"
+        )
+        from scrobble_recs.models.profile_window import ListeningWindow
+        from scrobble_recs.models.recommend import generate_recommendations
+
+        stats = generate_recommendations(
+            conn,
+            config,
+            limit=10,
+            as_of=datetime(2024, 1, 3),
+            history_window=ListeningWindow(datetime(2023, 1, 1), datetime(2024, 1, 3)),
+            historical_cutoff=datetime(2024, 1, 3),
+            local_history_end=datetime(2024, 1, 3),
+        )
+        metrics = run_quality_metrics(conn, stats.run_id, set(), cutoff=datetime(2024, 1, 3))
+        assert metrics["provider_concentration"] == 1
+        assert (
+            metrics["pool_coverage"]
+            == metrics["pool_candidate_count"]
+            / conn.execute("SELECT count(*) FROM artist").fetchone()[0]
+        )
+    finally:
+        conn.close()
+
+
+def test_walk_only_fusion_attribution_uses_persisted_retriever_membership(tmp_path):
+    conn, config = _setup(tmp_path)
+    try:
+        config.recommendation.obviousness.enabled = False
+        results = compare_scorers(
+            conn,
+            config,
+            train_until=datetime(2024, 1, 3),
+            test_from=datetime(2024, 1, 3),
+            test_until=datetime(2024, 4, 3),
+            scorers=["fusion"],
+            ablate_sources=["lastfm_similarity"],
+        )
+        ablated = results[1]
+        assert ablated.recommendations > 0
+        assert ablated.provider_concentration == 1
+        assert ablated.candidate_count_by_source["lastfm_walk"] > 0
+        assert ablated.candidate_count_by_source.get("lastfm_similarity", 0) == 0
+    finally:
+        conn.close()

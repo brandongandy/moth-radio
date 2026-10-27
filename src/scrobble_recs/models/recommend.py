@@ -10,6 +10,7 @@ from uuid import uuid4
 from duckdb import DuckDBPyConnection
 
 from scrobble_recs.config import ScrobbleRecsConfig
+from scrobble_recs.models.evidence import load_legacy_evidence_rows
 from scrobble_recs.models.feedback import apply_feedback_to_tag_profile, load_feedback_profile
 from scrobble_recs.models.listening import refresh_artist_listening_scores
 from scrobble_recs.models.modes import resolve_recommendation_mode
@@ -54,6 +55,7 @@ from scrobble_recs.models.retrieval import (
     LegacyRetrievalInputs,
     _add_feedback_seed_artists,
     _apply_tag_focus,
+    _fusion_legacy_rows,
     _load_seed_popularity,
     _load_user_tag_profile,
     _report_progress,
@@ -92,6 +94,11 @@ def generate_recommendations(
 ) -> RecommendationStats:
     if limit < 1:
         raise ValueError("limit must be at least 1")
+    if (
+        config.recommendation.scoring.engine == "fusion"
+        and not config.recommendation.fusion.enabled
+    ):
+        raise ValueError("scoring.engine=fusion requires fusion.enabled=true")
     resolved_request = request or RecommendationRequest()
 
     mode_settings = resolve_recommendation_mode(mode, config)
@@ -207,8 +214,16 @@ def generate_recommendations(
         evidence_freshness=evidence_snapshot.freshness,
         versions=RecommendationVersions(
             ranker=f"{config.recommendation.scoring.engine}-v1",
+            fusion="fusion-v1"
+            if config.recommendation.scoring.engine == "fusion"
+            else "legacy-direct-v1",
             **(
-                {"feature_schema": "artist-features-v1", "slate_policy": settings.version}
+                {
+                    "feature_schema": "fusion-features-v1",
+                    **({"slate_policy": settings.version} if settings else {}),
+                }
+                if config.recommendation.scoring.engine == "fusion"
+                else {"feature_schema": "artist-features-v1", "slate_policy": settings.version}
                 if settings
                 else {}
             ),
@@ -237,12 +252,19 @@ def generate_recommendations(
         subject="tags and feedback",
         status="processing",
     )
+    fusion_rows = None
+    invalid_legacy_rows: list[dict[str, object]] = []
+    if config.recommendation.scoring.engine == "fusion":
+        fusion_rows = _fusion_legacy_rows(
+            load_legacy_evidence_rows(conn, cutoff=historical_cutoff), invalid_legacy_rows
+        )
     tag_profile = _load_user_tag_profile(
         conn,
         seeds,
         weak_tags=config.recommendation.tag_profile.weak_tags,
         weak_tag_penalty=config.recommendation.tag_profile.weak_tag_penalty,
         evidence_cutoff=historical_cutoff,
+        legacy_rows=fusion_rows,
     )
     effective_tag_profile = apply_feedback_to_tag_profile(
         _apply_tag_focus(tag_profile, mode_settings),
@@ -276,6 +298,8 @@ def generate_recommendations(
             effective_tag_profile,
             resolved_as_of,
             mode_settings,
+            legacy_rows=fusion_rows,
+            invalid_legacy_rows=tuple(invalid_legacy_rows),
         ),
     )
     _report_progress(

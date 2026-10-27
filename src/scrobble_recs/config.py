@@ -296,7 +296,7 @@ class RecommendationWeightsConfig(BaseModel):
 class ScoringConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    engine: Literal["legacy", "walk"] = "legacy"
+    engine: Literal["legacy", "walk", "fusion"] = "legacy"
     seed_idf_alpha: float = 0.0
 
     @field_validator("seed_idf_alpha")
@@ -305,6 +305,40 @@ class ScoringConfig(BaseModel):
         if value < 0.0:
             raise ValueError("seed_idf_alpha must be non-negative")
         return value
+
+
+class FusionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    rrf_constant: float = 60.0
+    source_weights: dict[str, float] = Field(
+        default={"lastfm_similarity": 1.0, "lastfm_walk": 1.0, "semantic": 1.0}
+    )
+    family_caps: dict[Literal["collaborative", "semantic", "catalog", "personal"], float] = Field(
+        default={"collaborative": 1 / 61, "semantic": 1 / 61, "catalog": 1 / 61, "personal": 1 / 61}
+    )
+    excluded_sources: list[
+        Literal[
+            "lastfm_similarity",
+            "lastfm_walk",
+            "semantic",
+            "listenbrainz",
+            "musicbrainz",
+        ]
+    ] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_fusion(self) -> FusionConfig:
+        _positive_finite(self.rrf_constant, field_name="rrf_constant")
+        if set(self.source_weights) - {"lastfm_similarity", "lastfm_walk", "semantic"}:
+            raise ValueError("source weights require an actually ranked retriever")
+        if any(
+            not isfinite(v) or v < 0
+            for v in (*self.source_weights.values(), *self.family_caps.values())
+        ):
+            raise ValueError("fusion weights and caps must be finite and nonnegative")
+        return self
 
 
 class WalkConfig(BaseModel):
@@ -598,6 +632,7 @@ class RecommendationConfig(BaseModel):
     obviousness: ObviousnessConfig = Field(default_factory=ObviousnessConfig)
     knownness: KnownnessConfig = Field(default_factory=KnownnessConfig)
     scoring: ScoringConfig = Field(default_factory=ScoringConfig)
+    fusion: FusionConfig = Field(default_factory=FusionConfig)
     walk: WalkConfig = Field(default_factory=WalkConfig)
     weights: RecommendationWeightsConfig = Field(default_factory=RecommendationWeightsConfig)
     diversity: DiversityConfig = Field(default_factory=DiversityConfig)
@@ -611,6 +646,8 @@ class RecommendationConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_operational_defaults(self) -> RecommendationConfig:
+        if self.scoring.engine == "fusion" and not self.fusion.enabled:
+            raise ValueError("scoring.engine=fusion requires fusion.enabled=true")
         if self.seed_artist_limit < 1:
             raise ValueError("seed_artist_limit must be at least 1")
         if self.similar_artists_per_seed < 1:
@@ -711,6 +748,7 @@ def default_config_document() -> dict[str, Any]:
                 "threshold": 0.65,
                 "penalty_weight": 0.40,
             },
+            "fusion": FusionConfig().model_dump(mode="json"),
             "scoring": {
                 "engine": "legacy",
                 "seed_idf_alpha": 0.0,

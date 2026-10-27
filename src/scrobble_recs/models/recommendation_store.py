@@ -247,6 +247,9 @@ def _candidate_detail_values(
     admission = candidate.admission or AdmissionDecision(score is not None, 0, ())
     evidence = candidate.evidence or CandidateEvidence(candidate.artist_id, ())
     features = asdict(candidate.features)
+    evidence_payload = candidate_evidence_json(evidence)
+    if "retrieval_fusion" in candidate.explanation:
+        evidence_payload["fusion"] = candidate.explanation["retrieval_fusion"]
     effects: dict[str, object] = {
         "included": decision.included if decision is not None and score is not None else False,
         "final_rank": decision.final_rank if decision is not None and score is not None else None,
@@ -269,7 +272,7 @@ def _candidate_detail_values(
     if "known_status" in candidate.features.values:
         known_status = str(candidate.features.values["known_status"])
     return [
-        json.dumps(candidate_evidence_json(evidence), sort_keys=True, allow_nan=False),
+        json.dumps(evidence_payload, sort_keys=True, allow_nan=False),
         json.dumps(features, sort_keys=True, allow_nan=False),
         json.dumps(asdict(admission), sort_keys=True, allow_nan=False),
         json.dumps(effects, sort_keys=True, allow_nan=False),

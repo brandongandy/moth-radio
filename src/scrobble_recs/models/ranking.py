@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from math import isfinite
 
@@ -16,6 +16,7 @@ from scrobble_recs.models.feedback import (
     feedback_obviousness_for_candidate,
     load_cooldown_artist_ids,
 )
+from scrobble_recs.models.fusion import FusedCandidate, SourceCandidate
 from scrobble_recs.models.modes import RecommendationModeSettings
 from scrobble_recs.models.policy import (
     PolicyDecision,
@@ -109,6 +110,7 @@ def _score_candidates(
     progress_callback: RecommendationProgressCallback | None = None,
     admissions: dict[int, AdmissionDecision] | None = None,
     context: QueryContext | None = None,
+    fused: dict[int, FusedCandidate] | None = None,
 ) -> tuple[list[_CandidateScore], list[_CandidateDiagnostic]]:
     # Inverse-popularity weighting is applied at aggregation only. At
     # ``seed_idf_alpha == 0`` these equal the raw seed weights exactly, so the
@@ -342,7 +344,21 @@ def _score_candidates(
             calibrated_feedback,
         )
         relevance_components = {}
-        if artist_query:
+        if fused is not None:
+            fusion_score = fused.get(candidate.artist_id)
+            relevance_components = {
+                "fusion_retrieval_contribution": (
+                    fusion_score.fusion_score if fusion_score else 0.0
+                )
+                * mode.lastfm_similarity_multiplier,
+                "fusion_feedback_contribution": config.recommendation.weights.feedback_model
+                * calibrated_feedback,
+                "fusion_rediscovery_contribution": config.recommendation.weights.rediscovery
+                * candidate.rediscovery_score
+                * mode.rediscovery_multiplier,
+            }
+            raw_score = sum(relevance_components.values())
+        if artist_query and fused is None:
             assert context is not None and context.artist_settings is not None
             settings = context.artist_settings
             target_features = scoring_data.target_features[candidate.artist_id]
@@ -805,6 +821,11 @@ def rank_candidates(
         days=config.recommendation.feedback_cooldown_days,
         until=context.feedback_cutoff,
     )
+    fused = (
+        {row.artist_id: row for row in retrieval.fused_candidates}
+        if config.recommendation.scoring.engine == "fusion"
+        else None
+    )
     scores, diagnostics = _score_candidates(
         config,
         inputs.mode,
@@ -821,10 +842,15 @@ def rank_candidates(
         progress_callback=progress_callback,
         admissions=retrieval.admissions,
         context=context,
+        fused=fused,
     )
     score_by_id = {score.artist_id: score for score in scores}
+    source_rows_by_artist: dict[int, list[SourceCandidate]] = {}
+    for row in retrieval.source_candidates:
+        source_rows_by_artist.setdefault(row.artist_id, []).append(row)
     result = []
     for order, diagnostic in enumerate(diagnostics):
+        source_rows = source_rows_by_artist.get(diagnostic.artist_id, [])
         score = score_by_id.get(diagnostic.artist_id)
         values: dict[str, float | int | bool | str | None] = {}
         if score is not None:
@@ -846,11 +872,60 @@ def rank_candidates(
             values["target_obviousness"] = None if score is None else score.obviousness
             if score is not None:
                 values.update(score.relevance_components)
+        if fused is not None:
+            item = fused.get(diagnostic.artist_id)
+            values.update(
+                {
+                    "fusion_score": item.fusion_score if item else 0.0,
+                    "fusion_independent_family_count": item.independent_family_count if item else 0,
+                    "fusion_unranked_membership": bool(item and item.unranked_sources),
+                    "fusion_disagreement": _fusion_disagreement(source_rows),
+                }
+            )
+            if item:
+                values.update(
+                    {
+                        f"fusion_source_{key}": value
+                        for key, value in item.source_contributions.items()
+                    }
+                )
+                values.update(
+                    {
+                        f"fusion_family_{key}": value
+                        for key, value in item.family_contributions.items()
+                    }
+                )
+                values.update({f"fusion_member_{source}": True for source in item.unranked_sources})
+            statuses = retrieval.diagnostics.get("fusion_sources", {})
+            assert isinstance(statuses, dict)
+            for source, status in statuses.items():
+                values[f"fusion_status_{source}"] = status["status"]
+                values[f"fusion_missing_{source}"] = status["status"] in (
+                    "missing",
+                    "disabled",
+                    "unavailable",
+                )
+                values[f"fusion_stale_{source}"] = bool(status.get("stale", False))
+            if score is not None:
+                values.update(score.relevance_components)
+        if fused is not None:
+            for row in source_rows:
+                values[f"fusion_rank_{row.source}"] = row.source_rank
+                values[f"fusion_confidence_{row.source}"] = max(
+                    float(values.get(f"fusion_confidence_{row.source}", 0.0) or 0.0), row.confidence
+                )
         missing = _missing_signals(diagnostic.artist_id, details)
         explanation: dict[str, object] = {
             "eligibility_state": diagnostic.state,
             "eligibility_reasons": list(diagnostic.reasons),
         }
+        if fused is not None:
+            item = fused.get(diagnostic.artist_id)
+            explanation["retrieval_fusion"] = {
+                **(asdict(item) if item is not None else {}),
+                "source_ranks": {row.source: row.source_rank for row in source_rows},
+                "disagreement": values["fusion_disagreement"],
+            }
         if score is not None:
             explanation.update(
                 raw_components=score.raw_components,
@@ -959,4 +1034,46 @@ def build_policy_explanations(
             else decision
             for decision in result
         )
+    if retrieval.source_candidates:
+        fusion = {row.artist_id: row for row in retrieval.fused_candidates}
+        result = tuple(
+            replace(
+                decision,
+                legacy_score=replace(
+                    decision.legacy_score,
+                    explanation={
+                        **decision.legacy_score.explanation,
+                        "retrieval_fusion": asdict(fusion[decision.artist_id])
+                        if decision.artist_id in fusion
+                        else {},
+                        "personal_relevance": _personal_relevance_explanation(
+                            decision.legacy_score
+                        ),
+                    },
+                ),
+            )
+            if decision.legacy_score is not None
+            else decision
+            for decision in result
+        )
     return result
+
+
+def _fusion_disagreement(rows: list[SourceCandidate]) -> float:
+    ranks = [row.source_rank for row in rows if row.source_rank is not None]
+    return (max(ranks) - min(ranks)) / max(ranks) if ranks else 0.0
+
+
+def _personal_relevance_explanation(score: _CandidateScore) -> dict[str, object]:
+    identity_multiplier = 0.5 + 0.5 * score.identity_confidence
+    components = {
+        "identity_scaled_candidate": score.raw_score * identity_multiplier,
+        "serendipity_bonus": score.serendipity.calibrated_bonus,
+    }
+    return {
+        "score": sum(components.values()),
+        "raw_candidate_score": score.raw_score,
+        "raw_candidate_components": score.relevance_components,
+        "identity_multiplier": identity_multiplier,
+        "components": components,
+    }

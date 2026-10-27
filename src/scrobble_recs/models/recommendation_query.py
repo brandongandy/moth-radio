@@ -6,6 +6,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from hashlib import sha256
+from math import isfinite
 from typing import Literal
 
 from duckdb import DuckDBPyConnection
@@ -128,6 +129,8 @@ class QueryContext:
 
 
 def _json_value(value: object) -> object:
+    if isinstance(value, float) and not isfinite(value):
+        return {"invalid_nonfinite": str(value)}
     if isinstance(value, datetime):
         return normalize_timestamp(value).isoformat()
     if isinstance(value, dict):
@@ -230,11 +233,13 @@ def capture_evidence_snapshot(
         latest = max((row[0] for row in rows if row[0] is not None), default=None)
         canonical = sorted(
             json.dumps(
-                [
-                    _json_value(row[0]),
-                    *row[1:-1],
-                    json.loads(row[-1]) if row[-1] is not None else None,
-                ],
+                _json_value(
+                    [
+                        row[0],
+                        *row[1:-1],
+                        json.loads(row[-1]) if row[-1] is not None else None,
+                    ]
+                ),
                 sort_keys=True,
                 separators=(",", ":"),
                 default=str,

@@ -1,8 +1,10 @@
 """Deterministic contracts for normalized persisted evidence."""
 
+import csv
 from dataclasses import replace
 from datetime import datetime
 from importlib import import_module, util
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -988,7 +990,7 @@ def test_backoff_counts_usable_candidates_after_mode_exclusions(stage_database, 
 
 
 @pytest.mark.parametrize("extra,expected_rows", [(0, 3), (998, 1001)])
-def test_candidate_details_are_written_in_one_set_insert(stage_database, extra, expected_rows):
+def test_candidate_details_are_written_in_one_bulk_load(stage_database, extra, expected_rows):
     from scrobble_recs.models.policy import apply_slate_policy
     from scrobble_recs.models.ranking import rank_candidates
     from scrobble_recs.models.recommendation_store import (
@@ -1022,13 +1024,19 @@ def test_candidate_details_are_written_in_one_set_insert(stage_database, extra, 
         tuple(row.legacy.diagnostic for row in ranked),
         "explicit",
     )
-    inserts, updates = [], []
+    copied_rows, stage_paths, updates = [], [], []
 
     class ObservedConnection:
         def execute(self, sql, parameters=None):
             normalized = " ".join(sql.lower().split())
-            if normalized.startswith("insert into recommendation_candidate "):
-                inserts.append(len(parameters[0]))
+            if normalized.startswith("insert into recommendation_candidate ") and (
+                "from read_csv(" in normalized
+            ):
+                assert parameters is not None
+                stage_path = Path(parameters[0])
+                stage_paths.append(stage_path)
+                with stage_path.open(newline="", encoding="utf-8") as stage_file:
+                    copied_rows.append(sum(1 for _ in csv.reader(stage_file)))
             if "update recommendation_candidate" in normalized:
                 updates.append(sql)
             return conn.execute(sql, parameters) if parameters is not None else conn.execute(sql)
@@ -1037,7 +1045,9 @@ def test_candidate_details_are_written_in_one_set_insert(stage_database, extra, 
             raise AssertionError("candidate persistence must not use executemany")
 
     persist_recommendation_run(ObservedConnection(), payload=payload)
-    assert inserts == [expected_rows]
+    assert copied_rows == [expected_rows]
+    assert len(stage_paths) == 1
+    assert not stage_paths[0].exists()
     assert updates == []
     assert conn.execute(
         "SELECT count(*) FROM recommendation_candidate "

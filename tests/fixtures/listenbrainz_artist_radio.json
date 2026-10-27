@@ -1,0 +1,9 @@
+{
+  "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb": [
+    {"recording_mbid": "dddddddd-dddd-4ddd-8ddd-dddddddddddd", "similar_artist_mbid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "similar_artist_name": "Radio Candidate", "total_listen_count": 42},
+    {"recording_mbid": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", "similar_artist_mbid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "similar_artist_name": "Radio Candidate", "total_listen_count": 12}
+  ],
+  "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": [
+    {"recording_mbid": "ffffffff-ffff-4fff-8fff-ffffffffffff", "similar_artist_mbid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "similar_artist_name": "Other Candidate", "total_listen_count": 5}
+  ]
+}

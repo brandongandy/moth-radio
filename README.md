@@ -6,7 +6,7 @@
 
 Moth Radio is a single-listener artist recommendation workbench. It is for getting better recommendations from your own listening history without friends, follows, shared playlists, public profiles, or other social-platform features.
 
-It imports a Last.fm CSV export into DuckDB, builds long-term and recent taste regions, and optionally enriches the local catalog with cache-first Last.fm and MusicBrainz data. Recommendation runs consume persisted local evidence rather than live APIs. Each run records its immutable query context, evidence snapshot, admission decisions, feature values, ranking scores, and slate-policy effects so results can be inspected, exported, replayed, and compared.
+It imports a Last.fm CSV export into DuckDB, builds long-term and recent taste regions, and optionally enriches the local catalog with cache-first Last.fm, MusicBrainz, and ListenBrainz data. Recommendation runs consume persisted local evidence rather than live APIs. Each run records its immutable query context, evidence snapshot, admission decisions, feature values, ranking scores, and slate-policy effects so results can be inspected, exported, replayed, and compared.
 
 The current CLI produces general artist discovery and rediscovery lists. Its source-aware pipeline is designed to accept additional persisted evidence without comparing unrelated providers' raw scores. Acquisition may use the network when you explicitly run enrichment; recommendation generation, evaluation, export, and TUI browsing use local data.
 
@@ -161,6 +161,53 @@ scrobble-recs cache-expire --config ./config.json --older-than-days 180
 ```
 
 `enrich-plan` is local-only. Use `enrich-status` and `enrich-retry` to inspect or reset queued work. Cache commands inspect or expire persisted HTTP responses; `cache-expire` defaults to 180 days and accepts an optional `--source` filter. None of these commands runs as part of recommendation generation.
+
+### Measure optional ListenBrainz evidence
+
+Set `apis.listenbrainz.enabled` to `true` to acquire public aggregate
+[ListenBrainz artist-radio data](https://listenbrainz.readthedocs.io/en/latest/users/api/core.html).
+Only local seeds with a resolved MusicBrainz artist MBID and identity confidence of at least
+0.9 are requested. Provisional and ambiguous identities are skipped. No ListenBrainz account,
+username, token, or local listening-history upload is required.
+
+```bash
+scrobble-recs enrich-plan --config ./config.json --source listenbrainz
+scrobble-recs enrich --config ./config.json --source listenbrainz
+scrobble-recs enrich-status --config ./config.json --source listenbrainz
+scrobble-recs enrich-retry --config ./config.json --source listenbrainz
+scrobble-recs evaluate --config ./config.json --split-date 2024-01-03
+scrobble-recs evaluate --config ./config.json --split-date 2024-01-03 --ablate-source listenbrainz
+```
+
+ListenBrainz is disabled by default. Its settings default to `mode: "easy"` (`easy`, `medium`,
+`hard`), `max_similar_artists: 100`, `max_recordings_per_artist: 3`, `pop_begin: 0`, and
+`pop_end: 100`. Limits must be positive and popularity bounds must satisfy
+`0 <= pop_begin <= pop_end <= 100`. Requests use `base_url: "https://api.listenbrainz.org/1/"`,
+`rate_limit_per_second: 1.0`, `cache_ttl_days: 30`, `max_retries: 2`, and
+`timeout_seconds: 20.0`. `stale_cache_on_error: true` permits the last successful response
+following exhausted transport, HTTP 429, or server-error retries. Retries wait 1, 2, ... seconds;
+other HTTP client errors fail immediately. Remove the obsolete `dump_dir` and
+`use_recommendation_api` fields from older configurations.
+
+The local queue uses `artist-radio`; explicit reruns refresh completed work through the cache
+and replace memberships for the same seed and request settings. Outstanding queued/running work
+must drain before a new refresh cycle starts, so bounded calls eventually process every seed.
+Skipped seeds are requeued when planning finds them eligible again. A new synchronous `enrich`
+invocation recovers interrupted `running` rows before planning; planning itself leaves active work
+untouched. Failed work remains failed until `enrich-retry`. Candidate MBIDs are matched before names;
+a conflicting name preserves separate identities with an inspectable warning. Observations preserve provider mode, response
+position, bounded recording MBIDs/listen counts, cache key, fetch time, and provider payload hash.
+Response position and listen counts are provenance, with no similarity score or source rank.
+
+`candidate_generation_enabled` remains `false`: acquisition adds measurable unranked evidence
+without changing production admission, scoring, or calibration. Leave it false until a separately
+evaluated fusion challenger is available. Evaluation reports distinct candidate and future-hit
+counts per source, unique additions, and the evidence snapshot ID. ListenBrainz coverage measures
+its unranked memberships from the run's seeds before the historical cutoff, including candidates
+outside the production pool. Source ablation excludes ListenBrainz from those measurements and
+retrieval without deleting stored evidence; paired reports over unchanged local evidence have
+the same snapshot ID. Freeze enrichment between comparisons. Last.fm-only recommendation output
+is preserved when ListenBrainz is disabled, unavailable, or collected with candidate generation off.
 
 ### Export a persisted run
 

@@ -204,7 +204,8 @@ def test_load_config_includes_lastfm_and_recommendation_defaults(tmp_path: Path)
     assert config.apis.lastfm.rate_limit_per_second == 2.0
     assert config.apis.lastfm.cache_ttl_days == 180
     assert config.apis.musicbrainz.enabled is False
-    assert config.apis.listenbrainz.dump_dir == Path("~/datasets/listenbrainz").expanduser()
+    assert config.apis.listenbrainz.enabled is False
+    assert config.apis.listenbrainz.candidate_generation_enabled is False
     assert config.recommendation.seed_artist_limit == 250
     assert config.recommendation.similar_artists_per_seed == 100
     assert config.recommendation.min_seed_scrobbles == 3
@@ -664,3 +665,47 @@ def test_source_aware_evidence_config_rejects_unsafe_bounds(settings):
 
     with pytest.raises(ValueError):
         DiscoveryEvidenceConfig(**settings)
+
+
+def test_listenbrainz_bounded_defaults_and_generated_config() -> None:
+    from scrobble_recs.config import ListenBrainzApiConfig
+
+    settings = ListenBrainzApiConfig()
+    assert settings.model_dump() == default_config_document()["apis"]["listenbrainz"]
+    assert settings.candidate_generation_enabled is False
+    assert settings.base_url == "https://api.listenbrainz.org/1/"
+    assert settings.mode == "easy"
+    assert settings.max_similar_artists == 100
+    assert settings.max_recordings_per_artist == 3
+    assert settings.pop_begin == 0 and settings.pop_end == 100
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"mode": "other"},
+        {"rate_limit_per_second": 0},
+        {"timeout_seconds": float("inf")},
+        {"cache_ttl_days": 0},
+        {"max_retries": -1},
+        {"max_similar_artists": 0},
+        {"max_recordings_per_artist": 0},
+        {"pop_begin": -1},
+        {"pop_end": 101},
+        {"pop_begin": 80, "pop_end": 20},
+    ],
+)
+def test_listenbrainz_rejects_invalid_bounds(settings) -> None:
+    from scrobble_recs.config import ListenBrainzApiConfig
+
+    with pytest.raises(ValidationError) as error:
+        ListenBrainzApiConfig(**settings)
+    assert "extra_forbidden" not in str(error.value)
+
+
+@pytest.mark.parametrize("field", ["dump_dir", "use_recommendation_api"])
+def test_listenbrainz_obsolete_config_has_migration_message(field) -> None:
+    from scrobble_recs.config import ListenBrainzApiConfig
+
+    with pytest.raises(ValidationError, match="remove.*" + field):
+        ListenBrainzApiConfig(**{field: None})

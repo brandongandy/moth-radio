@@ -39,8 +39,18 @@
     },
     "listenbrainz": {
       "enabled": false,
-      "dump_dir": "~/datasets/listenbrainz",
-      "use_recommendation_api": false
+      "candidate_generation_enabled": false,
+      "base_url": "https://api.listenbrainz.org/1/",
+      "rate_limit_per_second": 1.0,
+      "cache_ttl_days": 30,
+      "max_retries": 2,
+      "timeout_seconds": 20.0,
+      "stale_cache_on_error": true,
+      "mode": "easy",
+      "max_similar_artists": 100,
+      "max_recordings_per_artist": 3,
+      "pop_begin": 0,
+      "pop_end": 100
     }
   },
   "enrichment": {

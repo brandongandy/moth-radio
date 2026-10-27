@@ -758,3 +758,146 @@ def test_rolling_evaluation_uses_each_historical_cutoff(tmp_path: Path) -> None:
         )
     finally:
         conn.close()
+
+
+def _insert_radio_observations(conn, seed, target):
+    from scrobble_recs.models.evidence import EvidenceObservation, persist_evidence_observation
+
+    for mode in ("easy", "medium"):
+        persist_evidence_observation(
+            conn,
+            EvidenceObservation(
+                "listenbrainz",
+                "collaborative",
+                "artist_radio_membership",
+                seed,
+                target,
+                None,
+                None,
+                mode,
+                datetime(2000, 1, 1),
+                0.9,
+                {"response_position": 0},
+            ),
+            observation_key=f"radio-{seed}-{target}-{mode}",
+        )
+
+
+def test_listenbrainz_unranked_measurement_unique_future_hits_and_snapshot_ablation(tmp_path):
+    conn, config = _setup_db(tmp_path)
+    try:
+        seed = conn.execute(
+            "SELECT artist_id FROM artist WHERE artist_key = 'the cure'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO artist (artist_id, canonical_name, artist_key, "
+            "identity_confidence) VALUES (9901, 'Radio Only', 'radio only', "
+            ".95)"
+        )
+        conn.execute(
+            "INSERT INTO scrobble (scrobble_id, played_at, artist_key, "
+            "track_key, is_duplicate) VALUES (9901, '2024-01-10', 'radio "
+            "only', 'radio-track', false)"
+        )
+        _insert_radio_observations(conn, seed, 9901)
+        shared = conn.execute(
+            "SELECT artist_id FROM artist WHERE artist_key = 'bauhaus'"
+        ).fetchone()[0]
+        _insert_radio_observations(conn, seed, shared)
+        config.apis.listenbrainz.enabled = True
+        kwargs = dict(
+            train_until=datetime(2024, 1, 3),
+            test_from=datetime(2024, 1, 3),
+            test_until=datetime(2024, 4, 3),
+        )
+        full = evaluate_recommendations(conn, config, **kwargs)
+        assert full.candidate_count_by_source["listenbrainz"] == 2
+        assert full.future_hit_count_by_source["listenbrainz"] == 1
+        assert full.unique_candidate_count_by_source["listenbrainz"] == 1
+        assert full.unique_future_hit_count_by_source["listenbrainz"] == 1
+        ablated = evaluate_recommendations(conn, config, ablate_source="listenbrainz", **kwargs)
+        assert "listenbrainz" not in ablated.candidate_count_by_source
+        assert full.evidence_snapshot_id == ablated.evidence_snapshot_id
+        assert full.recall_at_50 == ablated.recall_at_50
+        assert conn.execute("SELECT count(*) FROM artist_evidence_observation").fetchone()[0] == 4
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_optional_unranked_listenbrainz_keeps_lastfm_control_byte_identical(tmp_path, enabled):
+    from test_recommend import _legacy_run_fingerprint
+
+    from scrobble_recs.models.recommend import generate_recommendations
+
+    conn, config = _setup_db(tmp_path)
+    try:
+        kwargs = dict(limit=10, as_of=datetime(2024, 1, 3), historical_cutoff=datetime(2024, 1, 3))
+        control = generate_recommendations(conn, config, **kwargs)
+        expected = _legacy_run_fingerprint(conn, control.run_id)
+        seed = conn.execute(
+            "SELECT artist_id FROM artist WHERE artist_key = 'the cure'"
+        ).fetchone()[0]
+        target = conn.execute(
+            "SELECT artist_id FROM artist WHERE artist_key = 'bauhaus'"
+        ).fetchone()[0]
+        _insert_radio_observations(conn, seed, target)
+        conn.execute(
+            "INSERT INTO artist (artist_id, canonical_name, artist_key, "
+            "identity_confidence) VALUES (9901, 'Radio Only', 'radio only', "
+            ".95)"
+        )
+        _insert_radio_observations(conn, seed, 9901)
+        config.apis.listenbrainz.enabled = enabled
+        optional = generate_recommendations(conn, config, **kwargs)
+        assert _legacy_run_fingerprint(conn, optional.run_id) == expected
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM recommendation_candidate WHERE run_id = ? "
+                "AND artist_id = 9901",
+                [optional.run_id],
+            ).fetchone()[0]
+            == 0
+        )
+    finally:
+        conn.close()
+
+
+def test_unavailable_listenbrainz_retains_previous_observations_and_lastfm_control(tmp_path):
+    from test_recommend import _legacy_run_fingerprint
+
+    from scrobble_recs.enrichment.listenbrainz import run_listenbrainz_enrichment
+    from scrobble_recs.models.recommend import generate_recommendations
+
+    conn, config = _setup_db(tmp_path)
+    try:
+        kwargs = dict(limit=10, as_of=datetime(2024, 1, 3), historical_cutoff=datetime(2024, 1, 3))
+        seed = conn.execute(
+            "SELECT artist_id FROM artist WHERE artist_key = 'the cure'"
+        ).fetchone()[0]
+        target = conn.execute(
+            "SELECT artist_id FROM artist WHERE artist_key = 'bauhaus'"
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE artist SET musicbrainz_artist_mbid = "
+            "'cccccccc-cccc-4ccc-8ccc-cccccccccccc', resolution_status = "
+            "'resolved_musicbrainz', identity_confidence = .95 WHERE "
+            "artist_id = ?",
+            [seed],
+        )
+        control = generate_recommendations(conn, config, **kwargs)
+        expected = _legacy_run_fingerprint(conn, control.run_id)
+        _insert_radio_observations(conn, seed, target)
+        config.apis.listenbrainz.enabled = True
+
+        class Offline:
+            def get_artist_radio(self, seed_artist_mbid):
+                raise RuntimeError("offline")
+
+        assert run_listenbrainz_enrichment(conn, config, client=Offline()).observations_written == 0
+        unavailable = generate_recommendations(conn, config, **kwargs)
+        assert expected
+        assert _legacy_run_fingerprint(conn, unavailable.run_id) == expected
+        assert conn.execute("SELECT count(*) FROM artist_evidence_observation").fetchone()[0] == 2
+    finally:
+        conn.close()

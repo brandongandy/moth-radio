@@ -646,7 +646,19 @@ def retrieve_legacy_candidates(
         candidates,
         {"candidate_count": len(candidates)},
         LegacyRetrievalDetails(inputs, data, walk),
-        load_candidate_evidence(conn, context=context, legacy_rows=legacy_rows),
+        load_candidate_evidence(
+            conn,
+            context=context,
+            legacy_rows=legacy_rows,
+            excluded_sources=(
+                frozenset()
+                if (
+                    config.apis.listenbrainz.enabled
+                    and config.apis.listenbrainz.candidate_generation_enabled
+                )
+                else frozenset({"listenbrainz"})
+            ),
+        ),
     )
 
 

@@ -109,6 +109,7 @@ class RecommendationDetail:
     trial_penalty: float = 0.0
     top_seed_artists: tuple[str, ...] = ()
     lastfm_url: str | None = None
+    start_here: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -302,7 +303,8 @@ class TuiRecommendationStore:
                 r.trial_penalty,
                 r.identity_confidence,
                 r.identity_warnings,
-                r.lastfm_url
+                r.lastfm_url,
+                r.start_here
             FROM recommendation r
             JOIN artist a ON a.artist_id = r.artist_id
             WHERE r.run_id = ?
@@ -366,6 +368,7 @@ class TuiRecommendationStore:
             trial_penalty=float(row[21] or 0.0),
             top_seed_artists=tuple(str(s) for s in top_seed),
             lastfm_url=str(row[24]) if row[24] else None,
+            start_here=_parse_json(row[25]) if row[25] is not None else None,
         )
 
     def feedback_history(self, run_id: str, artist_id: int) -> tuple[str, ...]:

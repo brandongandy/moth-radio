@@ -1,12 +1,277 @@
 """Persistence is exposed through a transaction-owning run payload."""
 
+import json
 from copy import deepcopy
 from dataclasses import replace
+from datetime import datetime
 from importlib import import_module, util
 from pathlib import Path
 
 import pytest
 from test_retrieval import stage_database as stage_database
+
+
+def recording_payload(stage_database):
+    from test_representative import ARTIST, radio
+
+    from scrobble_recs.apis.cache import ApiCache
+    from scrobble_recs.apis.musicbrainz import recording_params
+    from scrobble_recs.models.evidence import CandidateEvidence
+
+    conn, payload = make_payload(stage_database)
+    conn.execute(
+        "UPDATE artist SET musicbrainz_artist_mbid = ?, "
+        "resolution_status = 'external_listenbrainz', "
+        "identity_confidence = .9, identity_warnings = '[]' WHERE artist_id = 2",
+        [ARTIST],
+    )
+    raw = json.loads(Path("tests/fixtures/musicbrainz_recording.json").read_text())
+    ApiCache(conn).write_response(
+        source="musicbrainz",
+        endpoint=f"recording/{raw['id']}",
+        request_url="https://example.test",
+        request_params=recording_params(),
+        response_status=200,
+        response_json=raw,
+        fetched_at=datetime(2024, 1, 2),
+        expires_at=datetime(2024, 2, 1),
+        error_message=None,
+    )
+    observations = (radio(fetched=datetime(2024, 1, 1)),)
+    return conn, replace(
+        payload,
+        retrieval=replace(
+            payload.retrieval,
+            evidence={
+                **payload.retrieval.evidence,
+                2: CandidateEvidence(2, observations),
+            },
+        ),
+    )
+
+
+def test_recording_snapshot_has_dual_provenance_and_never_changes_ranking(stage_database):
+    import hashlib
+
+    from scrobble_recs.models.recommendation_store import persist_recommendation_run
+
+    conn, payload = recording_payload(stage_database)
+    persist_recommendation_run(conn, payload=payload)
+    before = conn.execute(
+        "SELECT artist_id, rank, final_score FROM recommendation ORDER BY rank"
+    ).fetchall()
+    value = conn.execute("SELECT start_here FROM recommendation WHERE artist_id = 2").fetchone()[0]
+    item = json.loads(value)
+    assert set(item) == {"kind", "title", "musicbrainz_id", "source", "reason", "evidence"}
+    assert item["evidence"]["listenbrainz"]["cache_key"] == "radio-key"
+    corroboration = item["evidence"]["musicbrainz"]
+    assert corroboration["fetched_at"] == "2024-01-02T00:00:00"
+    assert corroboration["expires_at"] == "2024-02-01T00:00:00"
+    assert corroboration["stale_policy"] == "validated_success_allowed"
+    assert corroboration["cache_key"].startswith("musicbrainz:recording/")
+    raw = json.loads(Path("tests/fixtures/musicbrainz_recording.json").read_text())
+    assert (
+        corroboration["payload_hash"]
+        == hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()
+    )
+    assert conn.execute(
+        "SELECT start_here IS NULL FROM recommendation WHERE artist_id = 3"
+    ).fetchone()[0]
+    refreshed = dict(raw, title="Refreshed title")
+    conn.execute("UPDATE api_cache SET response_json = ?::JSON", [json.dumps(refreshed)])
+    assert (
+        conn.execute("SELECT start_here FROM recommendation WHERE artist_id = 2").fetchone()[0]
+        == value
+    )
+    conn.execute("DELETE FROM api_cache")
+    persist_recommendation_run(
+        conn, payload=replace(payload, run_id="00000000-0000-0000-0000-000000000002")
+    )
+    assert (
+        conn.execute(
+            "SELECT artist_id, rank, final_score FROM recommendation "
+            "WHERE run_id = ? ORDER BY rank",
+            ["00000000-0000-0000-0000-000000000002"],
+        ).fetchall()
+        == before
+    )
+    assert (
+        conn.execute(
+            "SELECT start_here FROM recommendation WHERE run_id = ? AND artist_id = 2",
+            [payload.run_id],
+        ).fetchone()[0]
+        == value
+    )
+    assert (
+        conn.execute(
+            "SELECT count(*) FROM recommendation WHERE run_id != ? AND start_here IS NOT NULL",
+            [payload.run_id],
+        ).fetchone()[0]
+        == 0
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "UPDATE artist SET identity_confidence = .89 WHERE artist_id = 2",
+        "UPDATE artist SET identity_warnings = '[\"conflict\"]' WHERE artist_id = 2",
+        "UPDATE artist SET identity_warnings = '{}' WHERE artist_id = 2",
+        "UPDATE artist SET resolution_status = 'provisional_mbid' WHERE artist_id = 2",
+        "UPDATE artist SET resolution_status = 'ambiguous_musicbrainz' WHERE artist_id = 2",
+        "UPDATE artist SET musicbrainz_artist_mbid = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' "
+        "WHERE artist_id = 2",
+        "UPDATE artist SET musicbrainz_artist_mbid = '{AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA}' "
+        "WHERE artist_id = 3",
+        "UPDATE api_cache SET request_params = '{}'",
+        "UPDATE api_cache SET response_json = '{}'",
+        "UPDATE api_cache SET response_status = 404",
+    ],
+)
+def test_recording_attachment_fails_closed_without_affecting_artist(stage_database, mutation):
+    from scrobble_recs.models.recommendation_store import persist_recommendation_run
+
+    conn, payload = recording_payload(stage_database)
+    conn.execute(mutation)
+    persist_recommendation_run(conn, payload=payload)
+    assert conn.execute(
+        "SELECT artist_id, start_here FROM recommendation ORDER BY rank"
+    ).fetchall() == [(2, None), (3, None)]
+
+
+def test_recording_attachment_honors_metadata_cutoff_and_scoped_observations(stage_database):
+    from scrobble_recs.models.evidence import persist_evidence_observation
+    from scrobble_recs.models.recommendation_store import persist_recommendation_run
+
+    conn, payload = recording_payload(stage_database)
+    cutoff = replace(
+        payload, context=replace(payload.context, feedback_cutoff=datetime(2024, 1, 1))
+    )
+    persist_recommendation_run(conn, payload=cutoff)
+    assert (
+        conn.execute("SELECT count(*) FROM recommendation WHERE start_here IS NOT NULL").fetchone()[
+            0
+        ]
+        == 0
+    )
+    persist_evidence_observation(
+        conn, payload.retrieval.evidence[2].observations[0], observation_key="unscoped"
+    )
+    scoped = replace(
+        payload,
+        run_id="00000000-0000-0000-0000-000000000002",
+        retrieval=replace(payload.retrieval, evidence={}),
+    )
+    persist_recommendation_run(conn, payload=scoped)
+    assert (
+        conn.execute("SELECT count(*) FROM recommendation WHERE start_here IS NOT NULL").fetchone()[
+            0
+        ]
+        == 0
+    )
+
+
+def test_representative_migration_is_additive_historical_and_replay_safe(stage_database):
+    from scrobble_recs.db import apply_migrations
+    from scrobble_recs.models.recommendation_store import persist_recommendation_run
+
+    conn, payload = make_payload(stage_database)
+    persist_recommendation_run(conn, payload=payload)
+    for (name,) in conn.execute(
+        "SELECT index_name FROM duckdb_indexes() WHERE table_name = 'recommendation'"
+    ).fetchall():
+        conn.execute(f'DROP INDEX "{name}"')
+    conn.execute("ALTER TABLE recommendation DROP COLUMN IF EXISTS start_here")
+    apply_migrations(conn)
+    apply_migrations(conn)
+    assert conn.execute("SELECT start_here FROM recommendation").fetchall() == [(None,), (None,)]
+
+
+def test_present_recording_generation_export_and_tui_never_construct_clients(
+    stage_database,
+    monkeypatch,
+    tmp_path,
+):
+    import httpx
+
+    from scrobble_recs.apis.lastfm import LastFmClient
+    from scrobble_recs.apis.listenbrainz import ListenBrainzClient
+    from scrobble_recs.apis.musicbrainz import MusicBrainzClient
+    from scrobble_recs.export import export_recommendations
+    from scrobble_recs.models.evidence import persist_evidence_observation
+    from scrobble_recs.models.feedback import rerank_recommendation_run
+    from scrobble_recs.models.recommend import generate_recommendations
+    from scrobble_recs.tui.app import _detail_text
+    from scrobble_recs.tui.data import TuiRecommendationStore
+
+    conn, payload = recording_payload(stage_database)
+    config = payload.config
+    config.apis.listenbrainz.enabled = config.apis.musicbrainz.enabled = True
+    config.apis.listenbrainz.candidate_generation_enabled = True
+    config.recommendation.min_seed_scrobbles = 1
+    conn.execute(
+        "INSERT INTO scrobble (scrobble_id, artist_key, track_key, played_at, played_date, "
+        "is_duplicate) VALUES (1, 'seed', 'song', '2024-01-01', '2024-01-01', false)"
+    )
+    persist_evidence_observation(
+        conn, payload.retrieval.evidence[2].observations[0], observation_key="offline-radio"
+    )
+    # Independent semantic evidence admits the artist under the existing source-aware policy.
+    semantic = replace(
+        payload.retrieval.evidence[2].observations[0],
+        source="lastfm",
+        family="semantic",
+        relationship_kind="artist_tag",
+        evidence={"tag": "rock", "strength": "moderate"},
+    )
+    persist_evidence_observation(conn, semantic, observation_key="offline-semantic")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("HTTP/provider use in offline generation or presentation")
+
+    monkeypatch.setattr(httpx, "Client", forbidden)
+    monkeypatch.setattr(httpx, "AsyncClient", forbidden)
+    for cls in (LastFmClient, ListenBrainzClient, MusicBrainzClient):
+        monkeypatch.setattr(cls, "__init__", forbidden)
+        for name in vars(cls):
+            if name.startswith(("lookup_", "get_", "search_")):
+                monkeypatch.setattr(cls, name, forbidden)
+    stats = generate_recommendations(conn, config, limit=2, as_of=datetime(2025, 1, 1))
+    snapshot = conn.execute(
+        "SELECT artist_id, start_here FROM recommendation WHERE run_id = ? ORDER BY artist_id",
+        [stats.run_id],
+    ).fetchall()
+    item = json.loads(next(item for artist, item in snapshot if artist == 2))
+    assert item["title"] == 'A, "literal" [recording]\r\n雪'
+    config.apis.listenbrainz.candidate_generation_enabled = False
+    excluded = generate_recommendations(conn, config, limit=2, as_of=datetime(2025, 1, 1))
+    assert (
+        conn.execute(
+            "SELECT count(*) FROM recommendation WHERE run_id = ? AND start_here IS NOT NULL",
+            [excluded.run_id],
+        ).fetchone()[0]
+        == 0
+    )
+    conn.execute("DELETE FROM api_cache")
+    conn.execute("DELETE FROM artist_evidence_observation")
+    conn.execute("UPDATE artist SET resolution_status = 'ambiguous_musicbrainz'")
+    rerank_recommendation_run(conn, stats.run_id)
+    assert (
+        conn.execute(
+            "SELECT artist_id, start_here FROM recommendation WHERE run_id = ? ORDER BY artist_id",
+            [stats.run_id],
+        ).fetchall()
+        == snapshot
+    )
+    path = tmp_path / "offline.jsonl"
+    export_recommendations(conn, path, format_name="jsonl", run_id=stats.run_id)
+    exported = next(
+        row for row in map(json.loads, path.read_text().splitlines()) if row["artist"] == "Zulu"
+    )
+    assert exported["start_here"] == item
+    detail = TuiRecommendationStore(conn).get_detail(stats.run_id, artist_id=2)
+    assert detail.start_here == item
+    assert "[recording]" in _detail_text(detail).plain
 
 
 def make_payload(stage_database):

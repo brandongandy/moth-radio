@@ -47,6 +47,35 @@ class ApiCache:
     def __init__(self, conn: DuckDBPyConnection) -> None:
         self._conn = conn
 
+    def get_success_entry(
+        self,
+        source: str,
+        endpoint: str,
+        request_params: JsonObject,
+    ) -> ApiCacheEntry | None:
+        """Keep row presence distinct from a malformed JSON-null response payload."""
+        key = build_cache_key(source, endpoint, request_params)
+        row = self._conn.execute(
+            "SELECT request_url, request_params, response_status, response_json, fetched_at, "
+            "expires_at, error_message FROM api_cache WHERE cache_key = ? AND source = ? "
+            "AND endpoint = ? AND response_status BETWEEN 200 AND 299",
+            [key, source, endpoint],
+        ).fetchone()
+        if row is None:
+            return None
+        return ApiCacheEntry(
+            key,
+            source,
+            endpoint,
+            row[0],
+            json.loads(row[1]),
+            row[2],
+            json.loads(row[3]),
+            row[4],
+            row[5],
+            row[6],
+        )
+
     def get_fresh(
         self,
         source: str,

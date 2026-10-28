@@ -683,6 +683,17 @@ def _detail_text(detail: RecommendationDetail | None) -> Text:
         lines.append(f"Classification: {_join_or_none(labels)}")
     if detail.feedback_history:
         lines.append(f"Feedback history: {_join_or_none(detail.feedback_history)}")
+    if detail.start_here is not None:
+        item = detail.start_here
+        lines.extend(
+            [
+                "",
+                f"Start here ({item.get('kind', '')}): {item.get('title', '')}",
+                f"Source: {item.get('source', '')}",
+                f"Reason: {item.get('reason', '')}",
+                f"MusicBrainz ID: {item.get('musicbrainz_id', '')}",
+            ]
+        )
     return Text("\n".join(lines))
 
 

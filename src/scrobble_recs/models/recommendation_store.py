@@ -23,6 +23,12 @@ from scrobble_recs.models.policy import PolicyDecision, _CandidateDiagnostic, _C
 from scrobble_recs.models.profile import SeedArtist
 from scrobble_recs.models.ranking import RankedCandidate
 from scrobble_recs.models.recommendation_query import QueryContext
+from scrobble_recs.models.representative import (
+    load_recording_metadata,
+    load_safe_artist_mbids,
+    radio_recording_evidence,
+    select_start_here_item,
+)
 from scrobble_recs.models.retrieval import (
     RecommendationProgressCallback,
     RetrievalResult,
@@ -81,7 +87,7 @@ def persist_recommendation_run(
             payload,
             progress_callback=progress_callback,
         )
-        _persist_recommendations(conn, payload.run_id, selected)
+        _persist_recommendations(conn, payload, selected)
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -387,10 +393,29 @@ def _insert_run(conn: DuckDBPyConnection, payload: RecommendationRunPayload) -> 
 
 def _persist_recommendations(
     conn: DuckDBPyConnection,
-    run_id: str,
+    payload: RecommendationRunPayload,
     ranked: list[_CandidateScore],
 ) -> None:
+    run_id = payload.run_id
     candidate_only_offset = 999900
+
+    safe_identities = load_safe_artist_mbids(conn)
+    observations = {
+        score.artist_id: payload.retrieval.evidence.get(
+            score.artist_id, CandidateEvidence(score.artist_id, ())
+        ).observations
+        for score in ranked
+    }
+    identifiers = [
+        row.recording_mbid
+        for artist, facts in observations.items()
+        for row in radio_recording_evidence(safe_identities.get(artist), facts)
+    ]
+    metadata, corroboration = load_recording_metadata(
+        conn,
+        identifiers,
+        cutoff=payload.context.feedback_cutoff,
+    )
 
     artist_identity = {
         int(aid): (
@@ -421,6 +446,16 @@ def _persist_recommendations(
         mbid_val = identity[1]
         lastfm_url_val = f"https://www.last.fm/music/{quote(score.artist_name, safe='')}"
         musicbrainz_url_val = f"https://musicbrainz.org/artist/{mbid_val}" if mbid_val else ""
+        item = select_start_here_item(
+            recommended_artist_mbid=safe_identities.get(score.artist_id),
+            observations=observations[score.artist_id],
+            recording_metadata=metadata,
+        )
+        start_here = None
+        if item is not None:
+            serialized = asdict(item)
+            serialized["evidence"]["musicbrainz"].update(corroboration[item.musicbrainz_id])
+            start_here = json.dumps(serialized, sort_keys=True, allow_nan=False)
         rows.append(
             {
                 "run_id": run_id,
@@ -455,6 +490,7 @@ def _persist_recommendations(
                 "identity_confidence": identity[2],
                 "identity_warnings": identity[3],
                 "hop_distance": score.hop_distance,
+                "start_here": start_here,
             }
         )
     if rows:
@@ -492,7 +528,8 @@ def _persist_recommendations(
                 musicbrainz_url,
                 identity_confidence,
                 identity_warnings,
-                hop_distance
+                hop_distance,
+                start_here
             )
             SELECT
                 row.run_id::UUID,
@@ -526,7 +563,8 @@ def _persist_recommendations(
                 row.musicbrainz_url::VARCHAR,
                 row.identity_confidence::DOUBLE,
                 row.identity_warnings::VARCHAR,
-                row.hop_distance::INTEGER
+                row.hop_distance::INTEGER,
+                row.start_here::JSON
             FROM unnest(?) AS recommendation_rows(row)
             """,
             [rows],

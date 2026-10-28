@@ -37,6 +37,7 @@ from scrobble_recs.enrichment.listenbrainz import (
 from scrobble_recs.enrichment.musicbrainz import (
     plan_musicbrainz_catalog_enrichment,
     run_musicbrainz_catalog_enrichment,
+    run_musicbrainz_recording_enrichment,
 )
 from scrobble_recs.enrichment.queue import (
     enrichment_queue_status,
@@ -783,6 +784,10 @@ def _run_musicbrainz_enrichment(
             progress=lambda done, total: console.print(f"  catalog progress: {done}/{total}"),
         )
         for label, value in vars(stats).items():
+            console.print(f"{label}: {value}")
+        console.print("MusicBrainz recording lookup (bounded persisted radio candidates)")
+        recording_stats = run_musicbrainz_recording_enrichment(conn, resolved_config, client=client)
+        for label, value in vars(recording_stats).items():
             console.print(f"{label}: {value}")
     finally:
         client.close()

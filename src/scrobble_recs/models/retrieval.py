@@ -769,7 +769,9 @@ def retrieve_with_backoff(
         config.recommendation.scoring.engine == "fusion"
         and config.recommendation.fusion.excluded_sources
     ):
-        result = _ablate_retrieval(result, config.recommendation.fusion.excluded_sources)
+        result = _ablate_retrieval(
+            result, config.recommendation.fusion.excluded_sources, context=context
+        )
         assert result.legacy is not None
         details, evidence = result.legacy, result.evidence
     candidate_ids = ({row.artist_id for row in result.candidates} | set(evidence)) - seeds
@@ -1101,7 +1103,9 @@ def _condition_on_artist(
             )
             / total_personal
         )
-        personal = max(personal, _tag_similarity_score(artist, details.inputs.tag_profile, data))
+        personal_collaborative = personal
+        personal_semantic = _tag_similarity_score(artist, details.inputs.tag_profile, data)
+        personal = max(personal, personal_semantic)
         features[artist] = {
             "target_direct_strength": direct,
             "target_hop_distance": hop,
@@ -1111,6 +1115,8 @@ def _condition_on_artist(
             "target_relationship_state": context.target_relationship.state,
             "known_status": "known" if known else "new",
             "target_personal_agreement": personal,
+            "target_personal_collaborative_agreement": personal_collaborative,
+            "target_personal_semantic_agreement": personal_semantic,
             "target_relevance": max(
                 direct,
                 context.artist_settings.hop_proximity_scale / (hop + 1) if hop else 0.0,
@@ -1345,7 +1351,9 @@ def _with_source_lists(
     )
 
 
-def _ablate_retrieval(result: RetrievalResult, excluded: Sequence[str]) -> RetrievalResult:
+def _ablate_retrieval(
+    result: RetrievalResult, excluded: Sequence[str], *, context: QueryContext
+) -> RetrievalResult:
     """Remove derived source views without changing persisted provider evidence."""
     assert result.legacy is not None
     details, evidence = result.legacy, {}
@@ -1365,10 +1373,44 @@ def _ablate_retrieval(result: RetrievalResult, excluded: Sequence[str]) -> Retri
             evidence[artist] = CandidateEvidence(artist, kept)
     data = details.scoring_data
     if "lastfm_similarity" in excluded:
-        data = replace(data, similarity_by_target={})
+        data = replace(
+            data, similarity_by_target={}, feedback_similarity_by_target={}, seed_graph={}
+        )
     if "semantic" in excluded:
         data = replace(data, direct_tags_by_artist={}, tag_ranks_by_artist={})
+        details = replace(details, inputs=replace(details.inputs, tag_profile={}))
     walk = None if "lastfm_walk" in excluded else details.walk_result
+    if context.query_kind == "artist":
+        assert context.artist_settings is not None
+        features = deepcopy(data.target_features)
+        for values in features.values():
+            if "lastfm_similarity" in excluded:
+                values["target_direct_strength"] = 0.0
+                values["target_personal_collaborative_agreement"] = 0.0
+            if "semantic" in excluded:
+                values["target_semantic_overlap"] = 0.0
+                values["target_personal_semantic_agreement"] = 0.0
+            if "lastfm_walk" in excluded:
+                values["target_hop_distance"] = None
+            if "listenbrainz" in excluded:
+                values["target_radio_membership"] = False
+            if "musicbrainz" in excluded:
+                values["target_catalog_relationship"] = False
+            hop = values.get("target_hop_distance")
+            values["target_personal_agreement"] = max(
+                float(values.get("target_personal_collaborative_agreement") or 0),
+                float(values.get("target_personal_semantic_agreement") or 0),
+            )
+            values["target_relevance"] = max(
+                float(values.get("target_direct_strength") or 0),
+                float(values.get("target_semantic_overlap") or 0),
+                context.artist_settings.hop_proximity_scale / (float(hop) + 1) if hop else 0,
+                context.artist_settings.structural_membership_prior
+                if values.get("target_radio_membership")
+                or values.get("target_catalog_relationship")
+                else 0,
+            )
+        data = replace(data, target_features=features)
     ids = {
         artist
         for artist in data.candidates

@@ -13,6 +13,7 @@ from urllib.parse import quote
 from duckdb import DuckDBPyConnection
 
 from scrobble_recs.config import ScrobbleRecsConfig
+from scrobble_recs.models.evaluation_identity import artifact_manifest
 from scrobble_recs.models.evidence import (
     AdmissionDecision,
     CandidateEvidence,
@@ -326,6 +327,9 @@ def _insert_run(conn: DuckDBPyConnection, payload: RecommendationRunPayload) -> 
             config.recommendation.scoring.engine,
             json.dumps(
                 {
+                    "evaluation_artifact": artifact_manifest(
+                        config, asdict(query_context.versions)
+                    ),
                     "seed_count": len(seeds),
                     "history_window": {
                         "start": history_window.start.isoformat(),

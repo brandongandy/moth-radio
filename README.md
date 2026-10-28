@@ -228,7 +228,7 @@ including diversity, clipping and exclusion, so `relevance + sum(policy componen
 Challenger popularity/obviousness effects honor `obviousness.enabled`, and its additional known-neighbor
 reduction honors `knownness.enabled`. Disabling the challenger restores the existing control;
 activation is explicit and no promotion happens automatically. Changing the default requires the
-comparison evidence specified by the design; the Task 8 fusion challenger below is a separate explicit opt-in. Exposure and full promotion workflows remain deferred.
+comparison evidence specified by the design; the Task 8 fusion challenger below is a separate explicit opt-in. Blinded exposure and promotion decision reports are available below; learned ranking and activation remain separate work.
 
 `recommend` reads the current local evidence snapshot and persists the run, including considered candidates and inspectable evidence/admission/ranking/policy data. It does not call provider APIs.
 
@@ -525,6 +525,136 @@ rows before top-k. Single-window and rolling CLI output include these fields, an
 reports include their means over the same window/target denominator as the other metrics.
 
 The Python evaluation results also include candidate and future-hit counts for `lastfm` (seed similarity evidence) and `lastfm_tag` (tag evidence). A candidate with both kinds of evidence counts in both groups, including candidates excluded from the final recommendations. Legacy `candidate_sources` stores seed IDs, so these diagnostics use the persisted seed/tag evidence counts. Identity rates cover all candidate artists: `resolved_musicbrainz` counts as resolved; `ambiguous_musicbrainz` and `provisional_mbid_conflict` count as ambiguous. Provisional MBIDs alone do not establish resolution. Empty candidate populations report zero rates.
+
+### Graded reports and promotion evidence
+
+Export a complete report while retaining console output:
+
+```bash
+scrobble-recs evaluate-rolling --config ./config.json \
+  --cutoff 2023-01-01 --cutoff 2023-04-01 --cutoff 2023-07-01 \
+  --output-json ./evaluation.json
+```
+
+Reports carry `evaluation-report-v1` and explicit general/artist task identity. JSON uses sorted
+mapping keys, semantic window/rank order, UTC ISO timestamps, UTF-8, finite numbers and a final
+newline. The same in-memory report encodes identically twice; fresh run IDs and measured elapsed
+times can differ between evaluations. Export encodes first, writes and closes a temporary sibling,
+then atomically replaces the destination. Serialization, missing-parent, write or replace failures
+exit nonzero and preserve existing destination bytes. Parent directories must already exist.
+Export failures do not undo completed replay runs; the database connection still closes.
+
+New selected-slate fields are additive to every legacy metric and to the original implicit-only
+artist `graded_adoption_ndcg_at_50`. `graded_ndcg_at_10/25/50` use unique selected artists ordered
+by persisted rank then artist ID, exponential gain `2**grade - 1`, discount `log2(position+1)` and
+an ideal ordering over the entire discovery relevance universe. Relevance is 0 without evidence,
+1 for any first play/day/month, 2 for at least two plays, and 3 for at least two UTC calendar days
+or distinct UTC `(year, month)` pairs. `want_to_try`, `strong_fit` and `surprising_good` supply
+grades 1, 2 and 3; explicit positives take the maximum. `reject` or `wrong_direction` overrides
+all positives with 0. `already_known` is neutral and reported separately. Counts exclude duplicate
+imports and use the half-open outcome horizon. Replay defaults to implicit-only relevance.
+`evaluate_recommendations(..., judgment_experiment_ids=[...])` can explicitly include compatible
+frozen exposures and their latest replacement judgments, without passing those labels to ranking.
+Label-only discoveries are included if they have no pre-cutoff listening. Judgment identity/time
+and the current-effective-snapshot basis remain inspectable; the horizon bounds listening only.
+
+At 50, repeated-listen recall divides selected new artists with at least two future plays by all
+new horizon artists with at least two plays. Multi-day adoption divides selected discoveries with
+at least two future active days by selected discoveries. One-great-find is 1 when a query slate
+contains a grade-3 discovery, otherwise 0; rolling means divide by evaluated queries (artist target
+runs for artist reports). Numerators, denominators, relevance counts and availability accompany
+the rates. Empty support has numeric 0 and unavailable evidence, never a promotion pass.
+
+`models.rolling_compare.compare_rolling_recommendations(conn, control_config,
+challenger_config, windows=[EvaluationWindow(...)], evaluation_task="general")` provides the
+paired local path. Each control, challenger and ablation starts from a fresh import of one complete
+captured state, including feedback and prior runs. The source database and configs stay unchanged.
+Artist target populations must match at each cutoff. The manifest enumerates whole Last.fm,
+ListenBrainz and MusicBrainz removals plus direct similarity, walk, semantic, ListenBrainz,
+MusicBrainz and local-feedback signals. Fusion removals clear derived inputs and target features;
+local feedback removes optional positive preferences while retaining reject/hide/cooldown safety.
+Disabled/noncontributing sources disclose zero quality effect; unsupported active legacy ablations
+remain explicit and block eligibility. Set-difference candidate/future-hit counts are distinct from
+descriptive exclusive source membership. All-zero ablations cannot explain gain, and elapsed-time
+noise cannot supply that explanation.
+
+Guardrail envelopes include value/null, availability, support/coverage, definition/version, cutoff
+and snapshot. Missing is not zero. They cover candidate/selected identity, selected novelty and
+separate mean `1-knownness`, source-status staleness, external provider concentration (Last.fm
+aliases deduplicated; local feedback excluded), all four evidence families, top-20 persisted primary
+tag entropy and catalog relationship-type entropy. Catalog artists split weight across canonical
+relationship types in one namespace. Popularity is the cutoff-scoped Last.fm chart rank-affinity
+proxy, with supported-artist coverage, mean and interpolated q25/q50/q75/q90 at `(n-1)*p`; missing
+artists are not zero-filled. Mutable acquisition queues cannot establish historical failure rates.
+Persisted start-here items report attachment coverage/provenance only, never recording conversion.
+Current graph/identity facts are captured present-state retrospective screening, not reconstructed
+historical truth or leakage-free causal evidence. Existing frozen experiment facts are not backfilled.
+
+Promotion is a pure call to `models.promotion.promotion_decision(config=..., comparison=...,
+blinded_experiments=[experiment_report(...)], reversibility=...)`, returning
+`PromotionDecision(eligible, reasons, metrics)`. Export the decision and comparison together with
+`models.report_json.export_report(Path(...), {"comparison": comparison, "decision": decision})`.
+A plain CLI replay marks promotion unevaluated. Nothing trains, installs, switches or activates a
+scorer, and fusion remains default-off. New persisted runs freeze a portable artifact/content,
+feature-schema, slate-policy and behavior-config identity; machine destinations, secrets and
+evaluation bounds are excluded from the behavior fingerprint, while provider flags and weights
+remain included. Older unattested experiments remain readable and ineligible for this gate.
+
+Generated config includes these conservative operational bounds under `recommendation.promotion`:
+
+```json
+{
+  "minimum_cutoffs": 3,
+  "max_runtime_multiplier": 2.0,
+  "max_storage_growth_mb": 512,
+  "max_single_provider_share": 0.80,
+  "minimum_identity_resolved_rate": 0.90
+}
+```
+
+Fields are strict: reject unknown/null values, booleans as numbers, numeric strings and nonfinite
+numbers. Cutoffs must be integral and positive, runtime finite and positive, storage finite and
+nonnegative, and rates within `[0,1]`. Nondefault bounds require an identified policy experiment.
+Eligibility requires at least three distinct supported UTC cutoffs by default, with no regression
+on any paired cutoff/target in pool/eligible recall and coverage, selected recall or graded NDCG.
+No averages, rounding or epsilon conceal a regression. Every claimed target needs linked blinded
+evidence. All frozen artists must be exposed and every exposure must have an effective answered
+list choice. Only list choice votes count: challenger choices must be at least control choices;
+an explicit tie counts, `none` abstains, null is unanswered. Preferred side, labels and best
+discovery never replace list choice. Reversed, unrelated or incompatible source artifacts fail.
+
+`promotion-guardrails-v1` requires complete comparable evidence: novelty, diversity, family
+agreement and resolved identity cannot decrease; fatigue, ambiguity, staleness, failure rates,
+popularity q50/q75/q90 and concentration cannot increase. The absolute identity/concentration
+bounds also apply. Catalog diversity is not applicable only with an explicit both-disabled and
+noncontributing manifest. Failure acquisition can be not applicable only with identical acquisition
+inputs/content and no new acquisition behavior; unavailable evidence cannot waive other guards.
+Every required ablation must be accounted for and a material contributor must explain a measured
+quality/guardrail gain. Reversibility requires exact preserved control identity, compatible feature
+schema, an explicit restore selector/config operation and an identified successful verification
+record restoring that control. The decision validates these records and never executes rollback.
+
+Promotion runtime uses one monotonic measured boundary: fresh import, generation, metrics,
+logical result export and cleanup. Shared capture/hash/export/cleanup costs are reported separately
+and allocated equally. Each challenger must cost at most the control times its configured multiplier;
+zero/missing control time is unavailable. Storage uses canonical finite UTF-8 JSON for all persisted
+table rows ordered by table name and complete row values, plus exact identified artifact bytes.
+Footprint is durable bytes + peak logical snapshot/result materialization bytes + distinct artifact
+bytes. Growth is `(challenger-control)/1_048_576` **MiB**, despite the historical config suffix
+`_mb`; savings are negative and exact threshold equality passes. These are attributable logical
+materializations, not guaranteed OS disk allocation. Every component and measurement boundary is
+exported; unknown artifact size or inconsistent provenance blocks eligibility.
+
+Stable failure reasons, emitted in category order, are `invalid_evidence`,
+`incompatible_comparison`, `insufficient_cutoffs`, `recall_regression`, `graded_ndcg_regression`,
+`candidate_coverage_regression`, `missing_blinded_evidence`, `incompatible_blinded_evidence`,
+`incomplete_blinded_evidence`, `blinded_loss`, `incomplete_guardrails`, `guardrail_regression`,
+`identity_below_minimum`, `provider_concentration_exceeded`, `missing_runtime_evidence`,
+`runtime_limit_exceeded`, `missing_storage_evidence`, `storage_limit_exceeded`,
+`missing_versioned_artifact`, `missing_reversibility_evidence`, `incomplete_ablations`, and
+`unexplained_ablation_gain`. Reasons accumulate; missing inputs do not stop independent checks.
+Eligibility is true exactly when the reason list is empty. Invalid numeric evidence is exported
+as null with error paths, keeping error-containing decisions finite JSON.
 
 ## Development
 

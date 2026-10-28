@@ -99,6 +99,188 @@ def _setup_db(tmp_path: Path) -> tuple:
     return conn, config
 
 
+def test_graded_metrics_use_selected_unique_slate_and_observed_denominators(tmp_path, monkeypatch):
+    conn, config = _setup_db(tmp_path)
+    original = evaluate_model.generate_recommendations
+    try:
+        conn.execute("DELETE FROM scrobble WHERE played_at >= TIMESTAMP '2024-01-03'")
+        ids = [
+            int(row[0])
+            for row in conn.execute(
+                "SELECT artist_id FROM artist WHERE canonical_name IN "
+                "('Bauhaus', 'Siouxsie and the Banshees') ORDER BY artist_id"
+            ).fetchall()
+        ]
+        for index, aid in enumerate(ids):
+            conn.execute(
+                "INSERT INTO scrobble "
+                "(scrobble_id, artist_key, track_key, played_at, is_duplicate) "
+                "SELECT 98000 + ? * 10 + i, artist_key, 'outcome', "
+                "TIMESTAMP '2024-01-31 23:59:00' + i * INTERVAL 2 MINUTE, false "
+                "FROM artist, range(2) AS r(i) WHERE artist_id = ?",
+                [index, aid],
+            )
+
+        def generate(*args, **kwargs):
+            result = original(*args, **kwargs)
+            conn.execute(
+                "UPDATE recommendation SET score_band = CASE WHEN artist_id = ? "
+                "THEN 'plausible' ELSE 'candidate_only' END WHERE run_id = ?",
+                [ids[0], result.run_id],
+            )
+            return result
+
+        monkeypatch.setattr(evaluate_model, "generate_recommendations", generate)
+        result = evaluate_recommendations(
+            conn,
+            config,
+            train_until=datetime(2024, 1, 3),
+            test_from=datetime(2024, 1, 3),
+            test_until=datetime(2024, 3, 1),
+        )
+        # Two equally adopted discoveries; only one is selected. IDCG includes both.
+        assert result.graded_ndcg_at_10 == pytest.approx(0.6131471927654584)
+        assert result.graded_ndcg_at_25 == result.graded_ndcg_at_50 == result.graded_ndcg_at_10
+        assert result.repeated_listen_recall_at_50 == 0.5
+        assert result.multi_day_adoption_rate_at_50 == 1
+        assert result.one_great_find_rate_at_50 == 1
+        assert result.graded_metrics["repeated_listen_recall_at_50"]["denominator"] == 2
+        assert result.graded_metrics["multi_day_adoption_rate_at_50"]["denominator"] == 1
+        assert result.graded_metrics["one_great_find_rate_at_50"]["denominator"] == 1
+        assert result.graded_metrics["relevance"][str(ids[0])]["future_active_months"] == 2
+    finally:
+        conn.close()
+
+
+def test_guardrails_keep_missing_popularity_reliability_and_catalog_unavailable(tmp_path):
+    conn, config = _setup_db(tmp_path)
+    try:
+        conn.execute("DELETE FROM tag_top_artist")
+        result = evaluate_recommendations(
+            conn,
+            config,
+            train_until=datetime(2024, 1, 3),
+            test_from=datetime(2024, 1, 3),
+            test_until=datetime(2024, 4, 3),
+        )
+        guards = result.guardrails
+        assert guards["popularity_q50"]["value"] is None
+        assert guards["popularity_q50"]["available"] is False
+        assert guards["provider_failure_rate"]["value"] is None
+        assert guards["provider_failure_rate"]["denominator"] == 0
+        assert guards["catalog_diversity"]["available"] is False
+        assert guards["identity_resolved_rate"]["available"] is True
+        assert guards["identity_resolved_rate"]["coverage"] == 1
+        assert guards["novelty"]["source"]
+        assert guards["novelty"]["snapshot_id"] == result.evidence_snapshot_id
+        assert guards["tag_diversity"]["value"] is None  # no persisted tags after chart removal
+        assert guards["start_here_attachment_coverage"]["value"] == 0
+        summary = json.loads(
+            conn.execute(
+                "SELECT seed_summary FROM recommendation_run ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()[0]
+        )
+        assert summary["evaluation_artifact"]["behavior_config_fingerprint"]
+        assert summary["evaluation_artifact"]["content_fingerprint"]
+    finally:
+        conn.close()
+
+
+def test_feedback_ablation_keeps_hard_safety_and_removes_positive_preferences(tmp_path):
+    from scrobble_recs.models.feedback import load_feedback_profile
+
+    conn, config = _setup_db(tmp_path)
+    try:
+        for action in ("save", "reject", "hide_artist", "boost_tag"):
+            conn.execute(
+                "INSERT INTO feedback_event "
+                "(feedback_id, artist_id, action, value, context, created_at) "
+                "VALUES (uuid(), ?, ?, 1, '{\"tags\":[\"gothic rock\"]}', '2024-01-01')",
+                [1 if action in ("save", "boost_tag") else 2, action],
+            )
+        profile = load_feedback_profile(conn, include_positive_preferences=False)
+        assert not profile.boosted_seed_artist_ids
+        assert 1 not in profile.artist_adjustments
+        assert "gothic rock" not in profile.tag_adjustments
+        assert profile.hidden_artist_ids == {2}
+        assert profile.suppressed_seed_artist_ids == {2}
+        assert profile.artist_adjustments[2] == -1.5
+    finally:
+        conn.close()
+
+
+def test_named_effective_labels_add_unplayed_relevance_without_changing_ranking(tmp_path):
+    from scrobble_recs.models.experiments import (
+        create_blinded_experiment,
+        next_blinded_exposure,
+        record_judgment,
+    )
+
+    conn, config = _setup_db(tmp_path)
+    try:
+        conn.execute("DELETE FROM scrobble WHERE played_at >= TIMESTAMP '2024-01-03'")
+        kwargs = dict(
+            train_until=datetime(2024, 1, 3),
+            test_from=datetime(2024, 1, 3),
+            test_until=datetime(2024, 4, 3),
+        )
+        runs = []
+        for _ in range(2):
+            evaluate_recommendations(conn, config, **kwargs)
+            runs.append(
+                str(
+                    conn.execute(
+                        "SELECT run_id FROM recommendation_run ORDER BY created_at DESC LIMIT 1"
+                    ).fetchone()[0]
+                )
+            )
+        experiment = create_blinded_experiment(
+            conn, control_run_id=runs[0], challenger_run_id=runs[1], randomization_seed=7
+        )
+        exposure = next_blinded_exposure(conn, experiment_id=experiment)
+        artist = (exposure.left + exposure.right)[0].artist_id
+        baseline = conn.execute(
+            "SELECT artist_id, final_score FROM recommendation WHERE run_id = ? ORDER BY rank",
+            [runs[1]],
+        ).fetchall()
+        record_judgment(
+            conn, exposure_id=exposure.exposure_id, labels={artist: ["surprising_good"]}
+        )
+        labeled = evaluate_recommendations(
+            conn, config, judgment_experiment_ids=[experiment], **kwargs
+        )
+        assert labeled.graded_metrics["relevance"][str(artist)]["grade"] == 3
+        assert labeled.graded_metrics["relevance"][str(artist)]["future_play_count"] == 0
+        assert labeled.one_great_find_rate_at_50 == 1
+        assert labeled.graded_metrics["judgments"][0]["experiment_id"] == experiment
+        latest = conn.execute(
+            "SELECT run_id FROM recommendation_run ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()[0]
+        assert (
+            conn.execute(
+                "SELECT artist_id, final_score FROM recommendation WHERE run_id = ? ORDER BY rank",
+                [latest],
+            ).fetchall()
+            == baseline
+        )
+        record_judgment(
+            conn, exposure_id=exposure.exposure_id, labels={artist: ["reject", "strong_fit"]}
+        )
+        replaced = evaluate_recommendations(
+            conn, config, judgment_experiment_ids=[experiment], **kwargs
+        )
+        assert replaced.graded_metrics["relevance"][str(artist)]["grade"] == 0
+        assert replaced.one_great_find_rate_at_50 == 0
+        assert replaced.graded_metrics["relevance"][str(artist)]["explicit_labels"] == [
+            "reject",
+            "strong_fit",
+        ]
+        implicit = evaluate_recommendations(conn, config, **kwargs)
+        assert implicit.graded_metrics["relevance"] == {}
+    finally:
+        conn.close()
+
+
 def _latest_seed_summary(conn) -> dict[str, object]:
     (seed_summary_json,) = conn.execute(
         "SELECT seed_summary FROM recommendation_run ORDER BY created_at DESC LIMIT 1"

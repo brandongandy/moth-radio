@@ -11,6 +11,227 @@ from scrobble_recs.db import initialize_database
 from scrobble_recs.importers.lastfm_csv import import_lastfm_csv
 from scrobble_recs.models.compare import compare_scorers
 
+
+def test_rolling_comparison_captures_same_state_complete_ablations_and_logical_costs(tmp_path):
+    from scrobble_recs.models.compare import _comparison_state_id, _with_engine
+    from scrobble_recs.models.evaluate import EvaluationWindow
+    from scrobble_recs.models.rolling_compare import ABLATIONS, compare_rolling_recommendations
+
+    conn, config = _setup(tmp_path)
+    try:
+        before = _comparison_state_id(conn)
+        config_before = config.model_dump()
+        window = EvaluationWindow(datetime(2024, 1, 3), datetime(2024, 1, 3), datetime(2024, 4, 3))
+        report = compare_rolling_recommendations(
+            conn, config, _with_engine(config, "fusion"), windows=[window]
+        )
+        assert report.evaluation_task == "general"
+        assert report.stable_state_id == before == _comparison_state_id(conn)
+        assert config.model_dump() == config_before
+        assert len(report.pairs) == 1
+        pair = report.pairs[0]
+        assert pair["control"]["stable_state_id"] == pair["challenger"]["stable_state_id"] == before
+        assert (
+            pair["control"]["result"]["evidence_snapshot_id"]
+            == pair["challenger"]["result"]["evidence_snapshot_id"]
+        )
+        assert {row["ablation_id"] for row in pair["ablations"]} == set(ABLATIONS)
+        assert all(row["evaluation_task"] == "general" for row in pair["ablations"])
+        assert all(
+            row["status"] in ("available", "disabled", "noncontributing")
+            for row in pair["ablations"]
+        )
+        assert pair["control"]["runtime"]["boundary"] == pair["challenger"]["runtime"]["boundary"]
+        for name in ("control", "challenger"):
+            cost = pair[name]
+            assert cost["runtime"]["total_seconds"] > 0
+            assert cost["runtime"]["shared_capture_seconds"] >= 0
+            assert cost["storage"]["version"] == "logical-materialized-v1"
+            assert cost["storage"]["baseline_bytes"] == report.baseline_storage["durable_bytes"]
+            assert cost["storage"]["durable_bytes"] >= 0
+            assert cost["storage"]["artifact_bytes"] > 0
+        assert pair["ablations"][0]["baseline_artifact"] == pair["challenger"]["artifact"]
+    finally:
+        conn.close()
+
+
+def test_rolling_comparison_variant_order_does_not_change_quality_or_source_database(tmp_path):
+    from scrobble_recs.models.compare import _comparison_state_id, _with_engine
+    from scrobble_recs.models.evaluate import EvaluationWindow
+    from scrobble_recs.models.rolling_compare import compare_rolling_recommendations
+
+    conn, config = _setup(tmp_path)
+    try:
+        window = EvaluationWindow(datetime(2024, 1, 3), datetime(2024, 1, 3), datetime(2024, 4, 3))
+        args = dict(windows=[window], ablations=())
+        one = compare_rolling_recommendations(conn, config, _with_engine(config, "fusion"), **args)
+        two = compare_rolling_recommendations(
+            conn,
+            config,
+            _with_engine(config, "fusion"),
+            variant_order=("challenger", "control"),
+            **args,
+        )
+        for name in ("control", "challenger"):
+            for field in (
+                "graded_ndcg_at_50",
+                "recall_at_50",
+                "candidate_count_by_source",
+                "novelty_rate",
+            ):
+                assert one.pairs[0][name]["result"][field] == two.pairs[0][name]["result"][field]
+        assert one.stable_state_id == two.stable_state_id == _comparison_state_id(conn)
+    finally:
+        conn.close()
+
+
+def test_artist_rolling_ablations_remove_derived_target_signals_without_pooling_tasks(tmp_path):
+    from scrobble_recs.models.compare import _with_engine
+    from scrobble_recs.models.evaluate import EvaluationWindow
+    from scrobble_recs.models.rolling_compare import compare_rolling_recommendations
+
+    conn, config = _setup(tmp_path)
+    try:
+        report = compare_rolling_recommendations(
+            conn,
+            config,
+            _with_engine(config, "fusion"),
+            windows=[
+                EvaluationWindow(datetime(2024, 1, 3), datetime(2024, 1, 3), datetime(2024, 4, 3))
+            ],
+            evaluation_task="artist",
+        )
+        assert report.target_artist_ids
+        for pair in report.pairs:
+            assert pair["key"]["evaluation_task"] == "artist"
+            for row in pair["ablations"]:
+                assert row["target_artist_id"] == pair["key"]["target_artist_id"]
+                assert row["metrics"]["result"]["evaluation_task"] == "artist"
+                if row["ablation_id"] == "provider:lastfm":
+                    assert not row["metrics"]["selected_ids"]
+                if row["ablation_id"] == "signal:lastfm_similarity":
+                    for features in row["metrics"]["candidate_features"].values():
+                        assert features["values"].get("target_direct_strength", 0) == 0
+                if row["ablation_id"] == "signal:lastfm_walk":
+                    for features in row["metrics"]["candidate_features"].values():
+                        assert features["values"].get("target_hop_distance") is None
+    finally:
+        conn.close()
+
+
+def test_rolling_comparison_failure_cleans_isolation_and_preserves_source(tmp_path, monkeypatch):
+    import tempfile
+
+    import pytest
+
+    from scrobble_recs.models import rolling_compare
+    from scrobble_recs.models.compare import _comparison_state_id
+    from scrobble_recs.models.evaluate import EvaluationWindow
+
+    conn, config = _setup(tmp_path)
+
+    def directory(*args, **kwargs):
+        return tempfile.TemporaryDirectory(*args, **{**kwargs, "dir": str(tmp_path)})
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("injected generation failure")
+
+    before = _comparison_state_id(conn)
+    monkeypatch.setattr(rolling_compare, "TemporaryDirectory", directory)
+    monkeypatch.setattr(rolling_compare, "evaluate_recommendations", fail)
+    try:
+        with pytest.raises(RuntimeError, match="injected"):
+            rolling_compare.compare_rolling_recommendations(
+                conn,
+                config,
+                config,
+                windows=[
+                    EvaluationWindow(
+                        datetime(2024, 1, 3), datetime(2024, 1, 3), datetime(2024, 4, 3)
+                    )
+                ],
+                ablations=(),
+            )
+        assert _comparison_state_id(conn) == before
+        assert not list(tmp_path.glob("scrobble-rolling-*"))
+        assert not list(tmp_path.glob("variant-*"))
+    finally:
+        conn.close()
+
+
+def test_active_legacy_source_ablation_is_explicitly_unsupported(tmp_path):
+    from scrobble_recs.models.evaluate import EvaluationWindow
+    from scrobble_recs.models.rolling_compare import compare_rolling_recommendations
+
+    conn, config = _setup(tmp_path)
+    try:
+        report = compare_rolling_recommendations(
+            conn,
+            config,
+            config,
+            windows=[
+                EvaluationWindow(datetime(2024, 1, 3), datetime(2024, 1, 3), datetime(2024, 4, 3))
+            ],
+        )
+        rows = {row["ablation_id"]: row for row in report.pairs[0]["ablations"]}
+        assert rows["provider:lastfm"]["status"] == "unsupported"
+        assert rows["signal:lastfm_similarity"]["status"] == "unsupported"
+    finally:
+        conn.close()
+
+
+def test_rolling_comparison_uses_generated_run_identity_with_future_prior_runs(tmp_path):
+    from scrobble_recs.models.evaluate import EvaluationWindow
+    from scrobble_recs.models.rolling_compare import compare_rolling_recommendations
+
+    conn, config = _setup(tmp_path)
+    try:
+        conn.execute(
+            "INSERT INTO recommendation_run (run_id, created_at, seed_summary) "
+            "VALUES ('00000000-0000-0000-0000-000000000099', '2099-01-01', '{}')"
+        )
+        report = compare_rolling_recommendations(
+            conn,
+            config,
+            config,
+            ablations=(),
+            windows=[
+                EvaluationWindow(datetime(2024, 1, 3), datetime(2024, 1, 3), datetime(2024, 4, 3))
+            ],
+        )
+        assert all(
+            row["run_id"] != "00000000-0000-0000-0000-000000000099"
+            for row in (report.pairs[0]["control"], report.pairs[0]["challenger"])
+        )
+    finally:
+        conn.close()
+
+
+def test_logical_storage_materializes_exact_finite_canonical_export_bytes(tmp_path):
+    import duckdb
+
+    from scrobble_recs.models.rolling_compare import logical_storage
+
+    conn = duckdb.connect(str(tmp_path / "logical.duckdb"))
+    try:
+        conn.execute(
+            "CREATE TABLE example (id INTEGER, stamp TIMESTAMP, payload BLOB, artist VARCHAR)"
+        )
+        conn.execute(
+            "INSERT INTO example VALUES (2, '2024-01-01', 'abc', 'Björk'), (1, NULL, NULL, 'A')"
+        )
+        output = tmp_path / "logical-export.json"
+        measured = logical_storage(conn, export_path=output)
+        assert measured["durable_bytes"] == len(output.read_bytes())
+        assert json.loads(output.read_bytes())["tables"][0]["rows"] == [
+            [1, None, None, "A"],
+            [2, "2024-01-01T00:00:00Z", {"blob_hex": "616263"}, "Björk"],
+        ]
+        assert logical_storage(conn)["durable_bytes"] == measured["durable_bytes"]
+    finally:
+        conn.close()
+
+
 _CSV = (
     "uts,utc_time,artist,artist_mbid,album,album_mbid,track,track_mbid\n"
     "1704067200,2024-01-01 00:00:00,Seed One,,Al,,T1,\n"

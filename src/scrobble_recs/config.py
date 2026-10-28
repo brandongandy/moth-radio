@@ -325,6 +325,7 @@ class FusionConfig(BaseModel):
             "semantic",
             "listenbrainz",
             "musicbrainz",
+            "local_feedback",
         ]
     ] = Field(default_factory=list)
 
@@ -615,10 +616,23 @@ class ArtistChallengerConfig(BaseModel):
         return self
 
 
+class PromotionConfig(BaseModel):
+    """Conservative promotion-report bounds; never activate a scorer."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+
+    minimum_cutoffs: int = Field(default=3, ge=1)
+    max_runtime_multiplier: float = Field(default=2.0, gt=0)
+    max_storage_growth_mb: float = Field(default=512, ge=0)
+    max_single_provider_share: float = Field(default=0.80, ge=0, le=1)
+    minimum_identity_resolved_rate: float = Field(default=0.90, ge=0, le=1)
+
+
 class RecommendationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     artist_relationship: ArtistRelationshipConfig = Field(default_factory=ArtistRelationshipConfig)
+    promotion: PromotionConfig = Field(default_factory=PromotionConfig)
     artist_challenger: ArtistChallengerConfig = Field(default_factory=ArtistChallengerConfig)
     default_mode: str = "balanced"
     seed_artist_limit: int = 250
@@ -728,6 +742,7 @@ def default_config_document() -> dict[str, Any]:
             "queue_batch_size": 1000,
         },
         "recommendation": {
+            "promotion": PromotionConfig().model_dump(),
             "default_mode": "balanced",
             "seed_artist_limit": 250,
             "similar_artists_per_seed": 100,

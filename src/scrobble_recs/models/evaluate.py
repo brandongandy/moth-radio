@@ -6,14 +6,58 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from time import perf_counter
-from typing import Literal
+from typing import Any, Literal
 
 from duckdb import DuckDBPyConnection
 
 from scrobble_recs.config import ScrobbleRecsConfig
+from scrobble_recs.models.evaluation_metrics import (
+    _first_listened_artist_ids,
+    _identity_coverage,
+    _ndcg_at_k,
+    _novelty_rate,
+    _recall_at_k,
+    _source_memberships,
+    _tag_diversity_at_k,
+    run_guardrails,
+    run_quality_metrics,
+)
+from scrobble_recs.models.experiments import LABELS, JudgmentLabel, _effective, _experiment
 from scrobble_recs.models.profile_window import normalize_timestamp, resolve_listening_window
 from scrobble_recs.models.recommend import generate_recommendations
 from scrobble_recs.models.recommendation_query import RecommendationRequest
+
+
+def graded_artist_relevance(
+    *,
+    future_play_count: int,
+    future_active_days: int,
+    future_active_months: int,
+    explicit_labels: Sequence[JudgmentLabel],
+) -> float:
+    """Bounded discovery relevance v1; explicit negatives override all positives."""
+    for count in (future_play_count, future_active_days, future_active_months):
+        if type(count) is not int or count < 0:
+            raise ValueError("future counts must be nonnegative integers")
+    if (
+        not isinstance(explicit_labels, Sequence)
+        or isinstance(explicit_labels, str | bytes)
+        or any(label not in LABELS for label in explicit_labels)
+    ):
+        raise ValueError("explicit_labels must be a sequence of judgment labels")
+    if {"reject", "wrong_direction"}.intersection(explicit_labels):
+        return 0.0
+    implicit = (
+        3
+        if future_active_days >= 2 or future_active_months >= 2
+        else 2
+        if future_play_count >= 2
+        else 1
+        if any((future_play_count, future_active_days, future_active_months))
+        else 0
+    )
+    grades = {"want_to_try": 1, "strong_fit": 2, "surprising_good": 3}
+    return float(max([implicit, *(grades.get(label, 0) for label in explicit_labels)]))
 
 
 @dataclass(frozen=True)
@@ -65,6 +109,15 @@ class EvaluationResult:
     selected_slate_recall_at_50: float = 0.0
     selected_slate_ndcg_at_50: float = 0.0
     selected_slate_tag_diversity_at_20: float = 0.0
+    graded_ndcg_at_10: float = 0.0
+    graded_ndcg_at_25: float = 0.0
+    graded_ndcg_at_50: float = 0.0
+    repeated_listen_recall_at_50: float = 0.0
+    multi_day_adoption_rate_at_50: float = 0.0
+    one_great_find_rate_at_50: float = 0.0
+    graded_metrics: dict[str, Any] = field(default_factory=dict)
+    guardrails: dict[str, Any] = field(default_factory=dict)
+    run_id: str = ""
 
     @property
     def evaluation_task(self) -> str:
@@ -90,6 +143,18 @@ class RollingEvaluationReport:
     mean_selected_slate_recall_at_50: float = 0.0
     mean_selected_slate_ndcg_at_50: float = 0.0
     mean_selected_slate_tag_diversity_at_20: float = 0.0
+    mean_graded_ndcg_at_10: float = 0.0
+    mean_graded_ndcg_at_25: float = 0.0
+    mean_graded_ndcg_at_50: float = 0.0
+    mean_repeated_listen_recall_at_50: float = 0.0
+    mean_multi_day_adoption_rate_at_50: float = 0.0
+    mean_one_great_find_rate_at_50: float = 0.0
+    promotion: dict[str, Any] = field(
+        default_factory=lambda: {
+            "status": "unevaluated",
+            "reason": "single_config_replay; paired evidence required",
+        }
+    )
 
     @property
     def evaluation_task(self) -> str:
@@ -138,6 +203,7 @@ def evaluate_rolling_recommendations(
         mean_identity_resolved_rate=sum(item.identity_resolved_rate for item in results) / count,
         mean_selected_slate_recall_at_50=sum(item.selected_slate_recall_at_50 for item in results)
         / count,
+        **_graded_means(results),
         mean_selected_slate_ndcg_at_50=sum(item.selected_slate_ndcg_at_50 for item in results)
         / count,
         mean_selected_slate_tag_diversity_at_20=sum(
@@ -157,6 +223,7 @@ def evaluate_recommendations(
     ablate_source: str | None = None,
     evaluation_task: Literal["general", "artist"] = "general",
     target_artist_id: int | None = None,
+    judgment_experiment_ids: Sequence[str] = (),
 ) -> EvaluationResult:
     started = perf_counter()
     if evaluation_task not in ("general", "artist"):
@@ -275,13 +342,24 @@ def evaluate_recommendations(
             | memberships.get("lastfm_walk", set())
         ),
         "semantic": len(memberships.get("lastfm_tag", set()) | memberships.get("semantic", set())),
+        "catalog": len(memberships.get("musicbrainz", set())),
+        "personal": len(memberships.get("local_feedback", set())),
     }
     identity_resolved_rate, identity_ambiguous_rate = _identity_coverage(conn, run_id)
 
-    from scrobble_recs.models.compare import run_quality_metrics
-
     quality = run_quality_metrics(conn, run_id, test_artists, cutoff=train_until)
+    graded = _graded_run_metrics(
+        conn,
+        run_id,
+        train_until=train_until,
+        test_from=test_from,
+        test_until=test_until,
+        evaluation_task=evaluation_task,
+        target_artist_id=target_artist_id,
+        judgment_experiment_ids=judgment_experiment_ids,
+    )
     result = EvaluationResult(
+        run_id=run_id,
         train_until=train_until.isoformat(),
         test_from=test_from.isoformat(),
         test_until=test_until.isoformat(),
@@ -328,6 +406,8 @@ def evaluate_recommendations(
             )
         },
         runtime_seconds=perf_counter() - started,
+        guardrails=run_guardrails(conn, run_id, cutoff=train_until),
+        **graded,
     )
 
     if evaluation_task == "artist":
@@ -339,42 +419,9 @@ def evaluate_recommendations(
         return ArtistEvaluationResult(
             **asdict(result),
             target_artist_id=target_artist_id,
-            run_id=run_id,
             graded_adoption_ndcg_at_50=_adoption_ndcg_at_k(gains, rec_artist_ids, 50),
         )
     return result
-
-
-def _source_memberships(conn: DuckDBPyConnection, run_id: str) -> dict[str, set[int]]:
-    memberships: dict[str, set[int]] = {}
-    rows = conn.execute(
-        "SELECT artist_id, appeared_from_seed_count, appeared_from_tag_count, evidence "
-        "FROM recommendation_candidate WHERE run_id = ?",
-        [run_id],
-    ).fetchall()
-    for artist_id, seed_count, tag_count, payload in rows:
-        evidence = json.loads(payload or "{}")
-        fusion = evidence.get("fusion")
-        if isinstance(fusion, dict):
-            sources = (
-                set(fusion.get("source_ranks", {}))
-                | set(fusion.get("source_contributions", {}))
-                | set(fusion.get("unranked_sources", []))
-            )
-            for source in sources:
-                memberships.setdefault(source, set()).add(int(artist_id))
-            continue
-        for source, count in (("lastfm", seed_count), ("lastfm_tag", tag_count)):
-            if count is not None and count > 0:
-                memberships.setdefault(source, set()).add(int(artist_id))
-        for observation in evidence.get("observations", []):
-            source = observation["source"]
-            if source not in ("lastfm", "local_feedback"):
-                memberships.setdefault(source, set()).add(int(artist_id))
-    if not rows or not any("fusion" in json.loads(row[3] or "{}") for row in rows):
-        memberships.setdefault("lastfm", set())
-        memberships.setdefault("lastfm_tag", set())
-    return memberships
 
 
 def _add_radio_memberships(
@@ -404,77 +451,11 @@ def _add_radio_memberships(
         )
 
 
-def _identity_coverage(conn: DuckDBPyConnection, run_id: str) -> tuple[float, float]:
-    row = conn.execute(
-        """
-        SELECT count(DISTINCT c.artist_id),
-               count(DISTINCT CASE WHEN a.resolution_status = 'resolved_musicbrainz'
-                     THEN c.artist_id END),
-               count(DISTINCT CASE WHEN a.resolution_status IN (
-                     'ambiguous_musicbrainz', 'provisional_mbid_conflict'
-               ) THEN c.artist_id END)
-        FROM recommendation_candidate c
-        LEFT JOIN artist a ON a.artist_id = c.artist_id
-        WHERE c.run_id = ?
-        """,
-        [run_id],
-    ).fetchone()
-    if row is None or row[0] == 0:
-        return 0.0, 0.0
-    return int(row[1]) / int(row[0]), int(row[2]) / int(row[0])
-
-
-def _first_listened_artist_ids(
-    conn: DuckDBPyConnection,
-    *,
-    start: datetime,
-    end: datetime,
-    exclude_before: datetime,
-) -> set[int]:
-    """Return artists first heard in the evaluation horizon after training."""
-    rows = conn.execute(
-        """
-        SELECT a.artist_id
-        FROM scrobble AS s
-        JOIN artist AS a ON a.artist_key = s.artist_key
-        WHERE NOT s.is_duplicate
-        GROUP BY a.artist_id
-        HAVING min(s.played_at) >= ?
-           AND min(s.played_at) < ?
-           AND min(s.played_at) >= ?
-        """,
-        [start, end, exclude_before],
-    ).fetchall()
-    return {int(row[0]) for row in rows}
-
-
 def _precision_at_k(test_artists: set[int], recommendations: list[int], k: int) -> float:
     top_k = recommendations[:k]
     if not top_k:
         return 0.0
     return len(test_artists & set(top_k)) / len(top_k)
-
-
-def _recall_at_k(test_artists: set[int], recommendations: list[int], k: int) -> float:
-    if not test_artists:
-        return 0.0
-    top_k = set(recommendations[:k])
-    hits = len(test_artists & top_k)
-    return hits / len(test_artists)
-
-
-def _ndcg_at_k(test_artists: set[int], recommendations: list[int], k: int) -> float:
-    if not test_artists:
-        return 0.0
-    dcg = 0.0
-    for i, artist_id in enumerate(recommendations[:k]):
-        if artist_id in test_artists:
-            dcg += 1.0 / math.log2(i + 2)
-    ideal_hits = min(len(test_artists), k)
-    idcg = sum(1.0 / math.log2(i + 2) for i in range(ideal_hits))
-    if idcg == 0.0:
-        return 0.0
-    return dcg / idcg
 
 
 def _scalar_or_zero(
@@ -486,42 +467,6 @@ def _scalar_or_zero(
     if row is None or row[0] is None:
         return 0.0
     return float(row[0])
-
-
-def _tag_diversity_at_k(
-    conn: DuckDBPyConnection,
-    run_id: str,
-    k: int,
-    *,
-    selected_only: bool = False,
-) -> float:
-    rows = conn.execute(
-        """
-        SELECT explanation
-        FROM recommendation
-        WHERE run_id = ? AND (NOT ? OR score_band != 'candidate_only')
-        ORDER BY rank
-        LIMIT ?
-        """,
-        [run_id, selected_only, k],
-    ).fetchall()
-    unique_tags: set[str] = set()
-    total_tags = 0
-    for (explanation_json,) in rows:
-        try:
-            explanation = json.loads(explanation_json)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        tags = explanation.get("tags", [])
-        for tag_entry in tags:
-            if isinstance(tag_entry, dict):
-                tag_name = tag_entry.get("tag")
-                if isinstance(tag_name, str) and tag_name:
-                    unique_tags.add(tag_name)
-                    total_tags += 1
-    if total_tags == 0:
-        return 0.0
-    return len(unique_tags) / total_tags
 
 
 def _rediscovery_hit_rate(
@@ -591,28 +536,6 @@ def _eligible_candidate_coverage(
     ).fetchall()
     eligible_artist_ids = {int(row[0]) for row in rows}
     return len(test_artists & eligible_artist_ids) / len(test_artists)
-
-
-def _novelty_rate(
-    conn: DuckDBPyConnection,
-    recommendation_artist_ids: list[int],
-    train_until: datetime,
-) -> float:
-    if not recommendation_artist_ids:
-        return 0.0
-    rows = conn.execute(
-        """
-        SELECT DISTINCT a.artist_id
-        FROM scrobble AS s
-        JOIN artist AS a ON a.artist_key = s.artist_key
-        WHERE NOT s.is_duplicate
-          AND s.played_at < ?
-          AND a.artist_id IN (SELECT unnest(?))
-        """,
-        [train_until, recommendation_artist_ids],
-    ).fetchall()
-    known_artist_ids = {int(row[0]) for row in rows}
-    return (len(recommendation_artist_ids) - len(known_artist_ids)) / len(recommendation_artist_ids)
 
 
 def _cooldown_or_repeat_rate(conn: DuckDBPyConnection, run_id: str) -> float:
@@ -688,6 +611,7 @@ def _evaluate_artist_windows(
         mean_ndcg_at_50=sum(row.ndcg_at_50 for row in results) / denominator,
         mean_identity_resolved_rate=sum(row.identity_resolved_rate for row in results)
         / denominator,
+        **_graded_means(results),
         mean_selected_slate_recall_at_50=sum(row.selected_slate_recall_at_50 for row in results)
         / denominator,
         mean_selected_slate_ndcg_at_50=sum(row.selected_slate_ndcg_at_50 for row in results)
@@ -744,3 +668,164 @@ def _adoption_ndcg_at_k(gains: dict[int, float], recommendations: list[int], k: 
         for i, gain in enumerate(sorted(gains.values(), reverse=True)[:k])
     )
     return dcg / ideal if ideal else 0.0
+
+
+def _graded_means(results: Sequence[EvaluationResult]) -> dict[str, Any]:
+    names = (
+        "graded_ndcg_at_10",
+        "graded_ndcg_at_25",
+        "graded_ndcg_at_50",
+        "repeated_listen_recall_at_50",
+        "multi_day_adoption_rate_at_50",
+        "one_great_find_rate_at_50",
+    )
+    return {
+        f"mean_{name}": sum(getattr(row, name) for row in results) / len(results)
+        if results
+        else 0.0
+        for name in names
+    }
+
+
+def _graded_run_metrics(
+    conn: DuckDBPyConnection,
+    run_id: str,
+    *,
+    train_until: datetime,
+    test_from: datetime,
+    test_until: datetime,
+    evaluation_task: str,
+    target_artist_id: int | None,
+    judgment_experiment_ids: Sequence[str] = (),
+) -> dict[str, Any]:
+    universe = _first_listened_artist_ids(
+        conn, start=test_from, end=test_until, exclude_before=train_until
+    )
+    counts = {
+        int(artist): (int(plays), int(days), int(months))
+        for artist, plays, days, months in conn.execute(
+            "SELECT a.artist_id, count(*), count(DISTINCT cast(s.played_at AS DATE)), "
+            "count(DISTINCT date_trunc('month', s.played_at)) "
+            "FROM scrobble s JOIN artist a USING (artist_key) "
+            "WHERE NOT s.is_duplicate AND s.played_at >= ? AND s.played_at < ? "
+            "GROUP BY a.artist_id ORDER BY a.artist_id",
+            [test_from, test_until],
+        ).fetchall()
+    }
+    labels: dict[int, list[JudgmentLabel]] = {}
+    associations: list[dict[str, Any]] = []
+    for experiment_id in sorted(set(judgment_experiment_ids)):
+        task, definition = _experiment(conn, experiment_id)
+        if task != evaluation_task or definition.get("target_artist_id") != target_artist_id:
+            raise ValueError("judgment experiment task/target is incompatible")
+        for (exposure,) in conn.execute(
+            "SELECT exposure_id FROM recommendation_exposure WHERE experiment_id = ? "
+            "ORDER BY created_at, exposure_id",
+            [experiment_id],
+        ).fetchall():
+            effective = _effective(conn, str(exposure))
+            if effective is None:
+                continue
+            identity = conn.execute(
+                "SELECT judgment_id, created_at FROM recommendation_judgment "
+                "WHERE exposure_id = ? ORDER BY created_at DESC, judgment_id DESC LIMIT 1",
+                [exposure],
+            ).fetchone()
+            assert identity is not None
+            associations.append(
+                {
+                    "experiment_id": experiment_id,
+                    "exposure_id": str(exposure),
+                    "judgment_id": str(identity[0]),
+                    "judged_at": identity[1],
+                }
+            )
+            for artist, values in effective.labels.items():
+                if str(artist) not in definition["artists"]:
+                    raise ValueError("judgment artist missing frozen association")
+                labels.setdefault(artist, []).extend(values)
+    for artist in labels:
+        known = conn.execute(
+            "SELECT count(*) FROM scrobble s JOIN artist a USING (artist_key) "
+            "WHERE a.artist_id = ? AND NOT s.is_duplicate AND s.played_at < ?",
+            [artist, train_until],
+        ).fetchone()
+        if known is not None and known[0] == 0:
+            universe.add(artist)
+    if target_artist_id is not None:
+        universe.discard(target_artist_id)
+    relevance: dict[str, Any] = {}
+    gains: dict[int, float] = {}
+    for artist in sorted(universe):
+        plays, days, months = counts.get(artist, (0, 0, 0))
+        grade = graded_artist_relevance(
+            future_play_count=plays,
+            future_active_days=days,
+            future_active_months=months,
+            explicit_labels=labels.get(artist, []),
+        )
+        gains[artist] = grade
+        relevance[str(artist)] = dict(
+            future_play_count=plays,
+            future_active_days=days,
+            future_active_months=months,
+            explicit_labels=sorted(set(labels.get(artist, []))),
+            grade=grade,
+        )
+    slate = list(
+        dict.fromkeys(
+            int(row[0])
+            for row in conn.execute(
+                "SELECT artist_id FROM recommendation WHERE run_id = ? "
+                "AND coalesce(score_band, '') != 'candidate_only' ORDER BY rank, artist_id",
+                [run_id],
+            ).fetchall()
+        )
+    )
+    top = set(slate[:50])
+    repeated = {artist for artist in universe if counts.get(artist, (0, 0, 0))[0] >= 2}
+    selected_discovery = top & universe
+
+    def rate(numerator: int, denominator: int, population: str) -> dict[str, Any]:
+        return dict(
+            value=numerator / denominator if denominator else 0.0,
+            numerator=numerator,
+            denominator=denominator,
+            k=50,
+            population=population,
+            available=denominator > 0,
+        )
+
+    rates = {
+        "repeated_listen_recall_at_50": rate(
+            len(top & repeated), len(repeated), "horizon-new artists with >=2 future plays"
+        ),
+        "multi_day_adoption_rate_at_50": rate(
+            sum(counts.get(artist, (0, 0, 0))[1] >= 2 for artist in selected_discovery),
+            len(selected_discovery),
+            "selected top-50 new-discovery artists",
+        ),
+        "one_great_find_rate_at_50": rate(
+            int(any(gains[artist] == 3 for artist in selected_discovery)),
+            1,
+            "evaluated query slates",
+        ),
+    }
+    return {
+        **{f"graded_ndcg_at_{k}": _adoption_ndcg_at_k(gains, slate, k) for k in (10, 25, 50)},
+        **{name: metric["value"] for name, metric in rates.items()},
+        "graded_metrics": {
+            **rates,
+            "relevance": relevance,
+            "positive_relevance_count": sum(grade > 0 for grade in gains.values()),
+            "ndcg_available": any(gains.values()),
+            "judgment_basis": "current effective snapshots; outcome horizon bounds listening only"
+            if associations
+            else "implicit-only; no supplied matching judgment evidence",
+            "judgments": associations,
+            "already_known_count": sum("already_known" in values for values in labels.values()),
+            "population": (
+                "horizon-new plus compatible explicitly judged artists without prior listening"
+            ),
+        },
+    }

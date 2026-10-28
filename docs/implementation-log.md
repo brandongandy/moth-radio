@@ -780,3 +780,83 @@ challenger. The fix-round entry records the current behavior.
   absolute interpreter path. Self-review confirmed bounded acquisition outside evidence/result
   transactions, strict dual identity/provenance checks, snapshot-only display, historical NULL
   compatibility, unchanged scoring/admission modules and no Task 11–12 implementation.
+
+### Task 11 — Graded rolling evaluation and promotion reports (2026-10-28)
+
+- Added strict `recommendation.promotion` operational bounds and generated defaults without
+  enabling fusion or changing the default scorer. Added bounded graded artist relevance with
+  negative overrides, neutral already-known labels and validated count/label inputs. Selected
+  NDCG@10/25/50 and repeated/multi-day/great-find rates expose their relevance universe, counts,
+  denominators and availability; legacy all-row metrics and implicit artist adoption stay intact.
+- Added named compatible experiment/exposure judgment associations with effective replacement
+  identity/time. Labels can add unplayed relevance but never enter ranking. Rolling means retain
+  separate general-window and artist-target-run populations. UTC days/months and half-open,
+  duplicate-free listening bounds remain explicit.
+- Removed the evaluator/comparer cycle narrowly through one lower-level metric owner, retaining
+  existing binary formulas and re-exported entry points. Shared tag entropy and provider alias
+  normalization retain frozen experiment evidence separately from present replay measurements.
+- Added a callable rolling comparison that transactionally captures full state once, imports a
+  fresh temporary database for each query/variant, checks state/snapshot identity and leaves the
+  source/config unchanged. Manifests enumerate all required provider/signal ablations and preserve
+  disabled/noncontributing/unsupported states, candidate set differences, future hits, quality,
+  guardrail, feature and cost evidence. Removed signals also clear derived artist target scores;
+  optional positive-feedback removal retains hard negative/hide/cooldown safety. No cached facts
+  are deleted. Active unsupported legacy ablations cannot establish promotion.
+- Added availability/provenance envelopes for candidate and selected identity, novelty, separate
+  1-knownness, interpolated popularity quantiles, source staleness, concentration, family agreement,
+  tag/catalog entropy, fatigue and persisted start-here attachment coverage. Missing bounded
+  acquisition history stays unavailable. Catalog/acquisition exemptions require explicit verified
+  applicability; they never waive other missing facts. Historical experiment definitions stay
+  frozen, without current catalog/identity/queue backfill.
+- New run summaries freeze portable behavior-config/content/artifact/version identity, and new
+  experiments freeze that linkage. Pure promotion decisions check each paired cutoff/target,
+  distinct supported cutoffs, every complete linked list-choice experiment, all guardrails,
+  complete/explanatory ablations, explicit version/schema and verified control restoration, and
+  matched runtime/storage boundaries. Reasons accumulate in fixed order. No averages conceal a
+  regression, no preferred-side/label substitutes for list choice, and no elapsed-time noise
+  explains ablation gain. Decisions never train, install, restore or activate anything.
+- Runtime uses monotonic full isolated import/generation/metrics/export/cleanup measurements with
+  equal shared capture/hash/export/cleanup allocation. Logical storage uses canonical finite UTF-8
+  exports of all persisted tables/columns/sorted rows plus exact identified artifact bytes. The
+  result export is physically materialized before temporary cleanup; manifests identify its exact
+  logical byte count and the shared snapshot component. Signed storage growth is in MiB, with
+  inclusive bounds; missing/invalid evidence stays ineligible and error reports stay finite JSON.
+- Added one stable schema/task-aware serializer and atomic `evaluate-rolling --output-json PATH`.
+  UTF-8, UTC timestamps, semantic window/rank order and final newline are stable for the same report.
+  Encoding/write/replace errors preserve destination bytes, remove temporary files and close the
+  database; completed legacy replay runs remain persisted. README documents formulas, APIs,
+  availability, bounds, reason codes, file behavior and retrospective/noncausal limitations.
+- TDD evidence: initial relevance/config tests failed for absent interfaces, then passed **39**
+  tests; the existing exponential NDCG formula was characterized with hand-derived values (an
+  arithmetic typo in the short-list fixture was corrected). Graded/export integration initially
+  failed **6** tests, then the combined evaluation/export/graded/comparison run passed **80**.
+  Guardrail/quantile and artifact/fingerprint additions each started with **2** missing-interface
+  failures. Feedback ablation, blinded linkage/completion and CLI export each had a missing-behavior
+  RED before GREEN. Initial promotion tests failed **49** times before the pure decision existed.
+  Additional observed RED cases pinned snapshot provenance, artifact sizes, retained artist direct
+  strength, unavailable-vs-not-applicable facts, finite runtime overflow, both-sides wrong task,
+  timing-only ablation explanations, duplicate measurement IDs, future-dated prior-run identity and
+  exact logical export bytes. Their focused GREEN runs passed before final verification.
+- Commands below use the repository-root virtualenv; relative spelling avoids committing a
+  machine-local path. Actual executions used that same interpreter via its absolute local path.
+  Final focused command:
+  `PYTHONPATH=src ../../.venv/bin/python -m pytest tests/test_evaluate.py tests/test_compare.py tests/test_experiments.py tests/test_cli.py tests/test_graded_evaluation.py tests/test_evaluation_export.py tests/test_promotion.py -q`
+  — **361 passed** in **28.44 seconds**. No live API/network dependency was added; deterministic
+  fixtures and temporary on-disk DuckDB files exercise the persistence/isolation boundaries.
+- Initial full verification `PYTHONPATH=src ../../.venv/bin/python -m pytest` passed **1127 tests**
+  in **68.96 seconds**. Final storage review then added actual canonical export materialization
+  and its exact-byte regression. Final full command with the same arguments passed **1128 tests**
+  in **72.71 seconds**. No test failures or warnings occurred in either full run.
+- Final static verification:
+  `PYTHONPATH=src ../../.venv/bin/python -m ruff check .` — **All checks passed**;
+  `PYTHONPATH=src ../../.venv/bin/python -m ruff format --check .` — **109 files already formatted**;
+  `PYTHONPATH=src ../../.venv/bin/python -m mypy src` — **no issues in 59 source files**;
+  `git diff --check` — passed. One final test-local import spacing finding was corrected and Ruff
+  rerun successfully; it did not change test behavior.
+- Self-review confirmed legacy metric populations, separate task scopes, exact generated run
+  identity, same-state failure cleanup, frozen experiment semantics, finite error output, atomic
+  destination preservation, secret/destination exclusion and default-off/nonactivation behavior.
+  Existing histories may intentionally remain ineligible due to incomplete immutable evidence,
+  missing artifact linkage or missing verified rollback. Logical export can add memory/runtime
+  overhead on large local histories; recorded costs are operational observations, not a stability
+  benchmark or a claim about physical disk allocation. No Task 12 training/lifecycle work was added.

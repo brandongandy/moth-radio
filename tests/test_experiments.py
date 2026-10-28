@@ -94,6 +94,220 @@ def test_migration_preserves_experiment_history(experiment_db):
     assert conn.execute("SELECT * FROM recommendation_experiment").fetchall() == before
 
 
+def test_migration_preserves_complete_history_and_enforces_unique_keys(experiment_db):
+    import duckdb
+
+    conn, config = experiment_db
+    seed_runs(conn)
+    experiment = "00000000-0000-0000-0000-000000000901"
+    exposure = "00000000-0000-0000-0000-000000000902"
+    judgment = "00000000-0000-0000-0000-000000000903"
+    historical = "00000000-0000-0000-0000-000000000904"
+    conn.execute(
+        "INSERT INTO recommendation_run (run_id, created_at, mode, query_context, "
+        "evidence_snapshot_id) VALUES (?, '2020-01-01', 'balanced', NULL, NULL)",
+        [historical],
+    )
+    conn.execute(
+        "INSERT INTO recommendation (run_id, rank, artist_id, explanation) "
+        'VALUES (?, 1, 1, \'{"summary":"historical"}\')',
+        [historical],
+    )
+    conn.execute(
+        "INSERT INTO recommendation_experiment VALUES (?, '2025-01-01', 'general', ?, ?, "
+        "'frozen-evidence', 7, '{\"version\":\"blinded-v1\"}', 'completed')",
+        [experiment, CONTROL, CHALLENGER],
+    )
+    conn.execute(
+        "INSERT INTO recommendation_exposure VALUES (?, ?, '2025-01-02', '{}', "
+        '\'[{"artist_id":1,"artist":"One","side":"left","position":1}]\', '
+        '\'{"1":[{"variant":"control","ranks":[1]}]}\', \'2025-01-03\')',
+        [exposure, experiment],
+    )
+    conn.execute(
+        "INSERT INTO recommendation_judgment VALUES (?, ?, '2025-01-03', 'left', 'left', "
+        "1, '{\"1\":[\"strong_fit\"]}', 0.8, 'Recorded judgment')",
+        [judgment, exposure],
+    )
+    conn.execute(
+        "INSERT INTO recommendation_downstream_outcome VALUES (?, 1, '2025-01-04', 2, 1, "
+        "'2025-01-05')",
+        [exposure],
+    )
+    before = state(conn)
+    historical_before = [
+        conn.execute(f"SELECT * FROM {table} ORDER BY ALL").fetchall()
+        for table in ("recommendation_run", "recommendation")
+    ]
+    assert all(len(rows) == 1 for rows in before)
+    for _ in range(2):
+        initialize_database(config).close()
+        assert state(conn) == before
+        assert [
+            conn.execute(f"SELECT * FROM {table} ORDER BY ALL").fetchall()
+            for table in ("recommendation_run", "recommendation")
+        ] == historical_before
+    for table in (
+        "recommendation_experiment",
+        "recommendation_exposure",
+        "recommendation_judgment",
+        "recommendation_downstream_outcome",
+    ):
+        with pytest.raises(duckdb.ConstraintException):
+            conn.execute(f"INSERT INTO {table} SELECT * FROM {table}")
+    assert state(conn) == before
+
+
+def recorded_relationship():
+    return {
+        "state": "sampled",
+        "play_count": 2,
+        "recency_weighted_play_count": 1.5,
+        "unique_tracks": 2,
+        "unique_releases": 1,
+        "active_days": 2,
+        "active_months": 2,
+        "first_listen": "2024-06-01T00:00:00",
+        "last_listen": "2024-07-01T00:00:00",
+        "listening_span_days": 30,
+        "recent_trend": 0.5,
+        "replay_concentration": 0.5,
+        "positive_feedback": 0.0,
+        "negative_feedback": 0.0,
+        "prior_recommendation_exposures": 0,
+        "exposure_source": "run_appearance",
+        "relationship_version": "artist-relationship-v1",
+        "low_depth_sample": True,
+        "thresholds": {
+            "sampled_max_plays": 5,
+            "established_min_plays": 20,
+            "established_min_active_months": 3,
+            "dormant_days": 730,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "path,value",
+    [
+        *(
+            ((field,), value)
+            for field in ("history_cutoff", "feedback_cutoff")
+            for value in ({}, [], True, 0, "invalid")
+        ),
+        *(
+            (("evidence_freshness", "artist_tag", "latest_at"), value)
+            for value in ({}, [], True, 0, "invalid")
+        ),
+        (("evidence_freshness", "artist_tag", "row_count"), True),
+        (("evidence_freshness", "artist_tag", "row_count"), -1),
+        (("evidence_freshness", "artist_tag"), []),
+        (("history_window", "start"), {}),
+        (("history_window", "end"), None),
+        *(
+            (("target_relationship", field), value)
+            for field in (
+                "play_count",
+                "unique_tracks",
+                "unique_releases",
+                "active_days",
+                "active_months",
+                "listening_span_days",
+                "prior_recommendation_exposures",
+            )
+            for value in ("invalid", -1, True)
+        ),
+        *(
+            (("target_relationship", field), value)
+            for field in (
+                "recency_weighted_play_count",
+                "recent_trend",
+                "replay_concentration",
+                "positive_feedback",
+                "negative_feedback",
+            )
+            for value in ("invalid", -0.1, True)
+        ),
+        (("target_relationship", "replay_concentration"), 1.1),
+        (("target_relationship", "first_listen"), "2024-08-01T00:00:00"),
+        *(
+            (("target_relationship", field), value)
+            for field in ("first_listen", "last_listen")
+            for value in ({}, [], True, "invalid")
+        ),
+        (("target_relationship", "low_depth_sample"), "false"),
+        (("target_relationship", "exposure_source"), "invalid"),
+        (("target_relationship", "relationship_version"), {}),
+        (("target_relationship", "relationship_version"), ""),
+        (("target_relationship", "thresholds"), []),
+        (("target_relationship", "thresholds", "dormant_days"), -1),
+        (("target_relationship", "thresholds", "dormant_days"), True),
+        (("target_relationship", "thresholds", "dormant_days"), "invalid"),
+    ],
+)
+def test_matching_malformed_semantics_reject_without_changing_history(experiment_db, path, value):
+    from scrobble_recs.models.experiments import (
+        experiment_report,
+        next_blinded_exposure,
+        record_judgment,
+    )
+
+    conn, _ = experiment_db
+    fixture = seed_runs(conn)
+    experiment = create(conn)
+    exposure = next_blinded_exposure(conn, experiment_id=experiment)
+    record_judgment(conn, exposure_id=exposure.exposure_id, list_choice="left")
+    experiment_report(conn, experiment, outcome_cutoff=datetime(2030, 1, 1))
+    context = deepcopy(fixture["context"])
+    context["evidence_freshness"] = {"artist_tag": {"row_count": 1, "latest_at": None}}
+    if path[0] == "target_relationship":
+        context.update(
+            query_kind="artist", target_artist_id=1, target_relationship=recorded_relationship()
+        )
+    parent = context
+    for field in path[:-1]:
+        parent = parent[field]
+    parent[path[-1]] = value
+    conn.execute(
+        "UPDATE recommendation_run SET query_kind = ?, target_artist_id = ?, query_context = ?",
+        [context["query_kind"], context.get("target_artist_id"), json.dumps(context)],
+    )
+    before = state(conn)
+    with pytest.raises(ValueError):
+        create(conn)
+    assert state(conn) == before
+
+
+@pytest.mark.parametrize("nullable_cutoffs", [False, True])
+def test_valid_semantic_timestamps_preserve_timezone_equivalence_and_nulls(
+    experiment_db, nullable_cutoffs
+):
+    conn, _ = experiment_db
+    fixture = seed_runs(conn)
+    for run, offset in ((CONTROL, False), (CHALLENGER, True)):
+        context = deepcopy(fixture["context"])
+        context.update(
+            query_kind="artist", target_artist_id=1, target_relationship=recorded_relationship()
+        )
+        if nullable_cutoffs:
+            context.update(history_cutoff=None, feedback_cutoff=None)
+        context["evidence_freshness"] = {
+            "artist_tag": {
+                "row_count": 1,
+                "latest_at": "2024-12-31T19:00:00-05:00" if offset else "2025-01-01T00:00:00",
+            }
+        }
+        if offset:
+            context["target_relationship"]["first_listen"] = "2024-05-31T19:00:00-05:00"
+            context["target_relationship"]["last_listen"] = "2024-06-30T19:00:00-05:00"
+        conn.execute(
+            "UPDATE recommendation_run SET query_kind = 'artist', target_artist_id = 1, "
+            "query_context = ? WHERE run_id = ?",
+            [json.dumps(context), run],
+        )
+    assert create(conn)
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

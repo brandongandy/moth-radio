@@ -569,6 +569,9 @@ the rates. Empty support has numeric 0 and unavailable evidence, never a promoti
 challenger_config, windows=[EvaluationWindow(...)], evaluation_task="general")` provides the
 paired local path. Each control, challenger and ablation starts from a fresh import of one complete
 captured state, including feedback and prior runs. The source database and configs stay unchanged.
+Retrospective contexts must record complete valid history/feedback bounds and a history-window end
+equal to their normalized training cutoff. Prospective blinded contexts retain their own valid,
+internally compatible cutoff rather than inheriting a rolling replay window.
 Artist target populations must match at each cutoff. The manifest enumerates whole Last.fm,
 ListenBrainz and MusicBrainz removals plus direct similarity, walk, semantic, ListenBrainz,
 MusicBrainz and local-feedback signals. Fusion removals clear derived inputs and target features;
@@ -644,7 +647,10 @@ record restoring that control. The decision validates these records and never ex
 Promotion runtime uses one monotonic measured boundary: fresh import, generation, metrics,
 logical result export and cleanup. Shared capture/hash/export/cleanup costs are reported separately
 and allocated equally. Each challenger must cost at most the control times its configured multiplier;
-zero/missing control time is unavailable. Storage uses canonical finite UTF-8 JSON for all persisted
+zero/missing control time is unavailable. Measured variant/shared components must be finite and
+nonnegative, and their sum must agree with the declared total within ordinary floating-point
+accounting round-off. Ratios and limits use the validated component sum; accounting tolerance never
+relaxes the cost limit. Storage uses canonical finite UTF-8 JSON for all persisted
 table rows ordered by table name and complete row values, plus exact identified artifact bytes.
 Footprint is durable bytes + peak logical snapshot/result materialization bytes + distinct artifact
 bytes. Growth is `(challenger-control)/1_048_576` **MiB**, despite the historical config suffix

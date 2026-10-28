@@ -154,6 +154,73 @@ def _canonical(value: Any, key: str = "") -> Any:
     return value
 
 
+def validate_source_context(context: dict[str, Any]) -> dict[str, Any]:
+    """Validate recorded query semantics without reading current state or changing frozen facts."""
+    if not isinstance(context, dict):
+        raise ValueError("missing recorded context")
+    RecommendationRequest(context["query_kind"], context.get("target_artist_id"))
+    snapshot = context.get("evidence_snapshot_id")
+    if not isinstance(snapshot, str) or not snapshot.strip():
+        raise ValueError("missing evidence snapshot")
+    required = (
+        "history_window",
+        "history_cutoff",
+        "feedback_cutoff",
+        "mode",
+        "novelty_intent",
+        "taste_region_seeds",
+        "evidence_freshness",
+    )
+    semantic = {key: context[key] for key in required}
+    if context["query_kind"] == "artist":
+        if not isinstance(context.get("target_relationship"), dict):
+            raise ValueError("missing target relationship")
+        _validate_relationship(context["target_relationship"])
+        semantic["target_relationship"] = context["target_relationship"]
+    elif context.get("target_relationship") is not None:
+        raise ValueError("general context cannot carry a target relationship")
+    window = context["history_window"]
+    ListeningWindow(datetime.fromisoformat(window["start"]), datetime.fromisoformat(window["end"]))
+    for name in ("history_cutoff", "feedback_cutoff"):
+        _recorded_timestamp(context[name])
+    if context["novelty_intent"] not in ("discover", "mixed", "rediscover"):
+        raise ValueError("invalid novelty intent")
+    if not isinstance(context["mode"], str) or not context["mode"]:
+        raise ValueError("missing query mode")
+    seeds = context["taste_region_seeds"]
+    if not isinstance(seeds, list):
+        raise ValueError("invalid taste seeds")
+    for seed in seeds:
+        if (
+            type(seed["artist_id"]) is not int
+            or seed["artist_id"] < 1
+            or type(seed["weight"]) not in (int, float)
+            or not isfinite(seed["weight"])
+            or seed["weight"] < 0
+            or not isinstance(seed["regions"], list)
+            or any(not isinstance(region, str) for region in seed["regions"])
+        ):
+            raise ValueError("invalid taste seed")
+    if len({seed["artist_id"] for seed in seeds}) != len(seeds):
+        raise ValueError("duplicate taste seeds")
+    freshness = context["evidence_freshness"]
+    if not isinstance(freshness, dict):
+        raise ValueError("invalid evidence freshness")
+    for value in freshness.values():
+        if (
+            not isinstance(value, dict)
+            or type(value.get("row_count")) is not int
+            or value["row_count"] < 0
+            or "latest_at" not in value
+        ):
+            raise ValueError("invalid evidence freshness")
+        _recorded_timestamp(value["latest_at"])
+    canonical = _canonical(semantic)
+    _json(context)
+    assert isinstance(canonical, dict)
+    return canonical
+
+
 def _run(conn: DuckDBPyConnection, run_id: str) -> dict[str, Any]:
     row = conn.execute(
         "SELECT query_kind, target_artist_id, mode, evidence_snapshot_id, query_context "
@@ -166,71 +233,12 @@ def _run(conn: DuckDBPyConnection, run_id: str) -> dict[str, Any]:
         context = json.loads(row[4])
         if not isinstance(context, dict):
             raise ValueError("missing recorded context")
-        RecommendationRequest(context["query_kind"], context.get("target_artist_id"))
         for key, top in zip(
             ("query_kind", "target_artist_id", "mode", "evidence_snapshot_id"), row[:4], strict=True
         ):
             if context.get(key) != top:
                 raise ValueError("contradictory recorded provenance")
-        if not isinstance(row[3], str) or not row[3].strip():
-            raise ValueError("missing evidence snapshot")
-        required = (
-            "history_window",
-            "history_cutoff",
-            "feedback_cutoff",
-            "mode",
-            "novelty_intent",
-            "taste_region_seeds",
-            "evidence_freshness",
-        )
-        semantic = {key: context[key] for key in required}
-        if context["query_kind"] == "artist":
-            if not isinstance(context.get("target_relationship"), dict):
-                raise ValueError("missing target relationship")
-            _validate_relationship(context["target_relationship"])
-            semantic["target_relationship"] = context["target_relationship"]
-        elif context.get("target_relationship") is not None:
-            raise ValueError("general context cannot carry a target relationship")
-        window = context["history_window"]
-        ListeningWindow(
-            datetime.fromisoformat(window["start"]), datetime.fromisoformat(window["end"])
-        )
-        for name in ("history_cutoff", "feedback_cutoff"):
-            _recorded_timestamp(context[name])
-        if context["novelty_intent"] not in ("discover", "mixed", "rediscover"):
-            raise ValueError("invalid novelty intent")
-        if not isinstance(context["mode"], str) or not context["mode"]:
-            raise ValueError("missing query mode")
-        seeds = context["taste_region_seeds"]
-        if not isinstance(seeds, list):
-            raise ValueError("invalid taste seeds")
-        for seed in seeds:
-            if (
-                type(seed["artist_id"]) is not int
-                or seed["artist_id"] < 1
-                or type(seed["weight"]) not in (int, float)
-                or not isfinite(seed["weight"])
-                or seed["weight"] < 0
-                or not isinstance(seed["regions"], list)
-                or any(not isinstance(region, str) for region in seed["regions"])
-            ):
-                raise ValueError("invalid taste seed")
-        if len({seed["artist_id"] for seed in seeds}) != len(seeds):
-            raise ValueError("duplicate taste seeds")
-        freshness = context["evidence_freshness"]
-        if not isinstance(freshness, dict):
-            raise ValueError("invalid evidence freshness")
-        for value in freshness.values():
-            if (
-                not isinstance(value, dict)
-                or type(value.get("row_count")) is not int
-                or value["row_count"] < 0
-                or "latest_at" not in value
-            ):
-                raise ValueError("invalid evidence freshness")
-            _recorded_timestamp(value["latest_at"])
-        canonical = _canonical(semantic)
-        _json(context)
+        canonical = validate_source_context(context)
     except (KeyError, TypeError, ValueError, AttributeError, OverflowError) as exc:
         raise ValueError("invalid or missing recorded query provenance") from exc
     return {

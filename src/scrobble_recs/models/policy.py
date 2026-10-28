@@ -694,6 +694,22 @@ def apply_slate_policy(
         and item.artist_id not in hidden
     ]
     artist_components = {}
+    if context.query_kind == "general":
+        by_id = {item.artist_id: item for item in ranked}
+        adjusted_general = []
+        for score in scores:
+            item = by_id[score.artist_id]
+            preference = item.explanation.get("preference")
+            if isinstance(preference, dict) and preference.get("used"):
+                penalties = (
+                    score.knownness_penalty + score.obviousness_penalty + score.fatigue.penalty
+                )
+                if mode.name == "balanced":
+                    penalties += score.trial_penalty
+                final = item.relevance_score - penalties * (0.5 + 0.5 * score.identity_confidence)
+                score = replace(score, final_score=max(0.0, final))
+            adjusted_general.append(score)
+        scores = adjusted_general
     if context.query_kind == "artist":
         by_id = {item.artist_id: item for item in ranked}
         adjusted = []

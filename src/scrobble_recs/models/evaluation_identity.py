@@ -29,13 +29,25 @@ def behavior_fingerprint(config: ScrobbleRecsConfig) -> str:
     return sha256(encoded.encode()).hexdigest()
 
 
-def artifact_manifest(config: ScrobbleRecsConfig, versions: dict[str, Any]) -> dict[str, Any]:
+def artifact_manifest(
+    config: ScrobbleRecsConfig,
+    versions: dict[str, Any],
+    *,
+    preference: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    config = config.model_copy(deep=True)
+    config.recommendation.preference.enabled = False
+    config.recommendation.preference.evaluation_artifact_id = (
+        preference["artifact_id"] if preference else None
+    )
     package = Path(__file__).resolve().parents[1]
     digest = sha256()
     files = sorted(package.rglob("*.py"))
     for path in files:
         digest.update(path.relative_to(package).as_posix().encode())
         digest.update(path.read_bytes())
+    if preference:
+        digest.update(json.dumps(preference, sort_keys=True, allow_nan=False).encode())
     content = digest.hexdigest()
     identity = {
         "scorer": config.recommendation.scoring.engine,
@@ -47,6 +59,7 @@ def artifact_manifest(config: ScrobbleRecsConfig, versions: dict[str, Any]) -> d
     }
     return {
         **identity,
+        **({"preference": preference} if preference else {}),
         "artifact_id": sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest(),
         "fingerprint_policy": (
             "behavior-config-v1; excludes app destinations, input CSV path, secrets, "

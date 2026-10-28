@@ -628,11 +628,24 @@ class PromotionConfig(BaseModel):
     minimum_identity_resolved_rate: float = Field(default=0.90, ge=0, le=1)
 
 
+class PreferenceLearningConfig(BaseModel):
+    """Local learning is opt-in; evaluation selection never activates an artifact."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+
+    enabled: bool = False
+    minimum_training_pairs: int = Field(default=50, ge=1)
+    minimum_validation_pairs: int = Field(default=10, ge=1)
+    l2_regularization: float = Field(default=1.0, gt=0)
+    evaluation_artifact_id: str | None = Field(default=None, min_length=1)
+
+
 class RecommendationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     artist_relationship: ArtistRelationshipConfig = Field(default_factory=ArtistRelationshipConfig)
     promotion: PromotionConfig = Field(default_factory=PromotionConfig)
+    preference: PreferenceLearningConfig = Field(default_factory=PreferenceLearningConfig)
     artist_challenger: ArtistChallengerConfig = Field(default_factory=ArtistChallengerConfig)
     default_mode: str = "balanced"
     seed_artist_limit: int = 250
@@ -743,6 +756,7 @@ def default_config_document() -> dict[str, Any]:
         },
         "recommendation": {
             "promotion": PromotionConfig().model_dump(),
+            "preference": PreferenceLearningConfig().model_dump(),
             "default_mode": "balanced",
             "seed_artist_limit": 250,
             "similar_artists_per_seed": 100,

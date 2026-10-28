@@ -1,0 +1,17 @@
+{
+  "source_time": "2025-01-01T00:00:00",
+  "exposure_time": "2025-01-02T00:00:00",
+  "relationship": {
+    "state": "sampled", "play_count": 10, "recent_trend": 0.5,
+    "recency_weighted_play_count": 5, "unique_tracks": 2, "unique_releases": 1,
+    "active_days": 2, "active_months": 1, "first_listen": "2024-12-01T00:00:00",
+    "last_listen": "2024-12-02T00:00:00", "listening_span_days": 1,
+    "replay_concentration": 0.5, "positive_feedback": 0, "negative_feedback": 0,
+    "prior_recommendation_exposures": 0
+  },
+  "judgments": [
+    {"day": 3, "preferred_side": "left", "labels": {"1": ["strong_fit"], "4": ["reject"]}},
+    {"day": 4, "preferred_side": "right", "labels": {}},
+    {"day": 5, "preferred_side": null, "labels": {}}
+  ]
+}

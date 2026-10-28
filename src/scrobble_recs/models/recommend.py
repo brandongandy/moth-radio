@@ -324,6 +324,15 @@ def generate_recommendations(
         config=config,
         progress_callback=progress_callback,
     )
+    from scrobble_recs.models.preference import apply_preference_ranker
+
+    ranked, preference_diagnostics = apply_preference_ranker(
+        conn, context=query_context, ranked=ranked, config=config
+    )
+    if preference_diagnostics.get("used"):
+        query_context = replace(
+            query_context, versions=replace(query_context.versions, ranker="preference-v1")
+        )
     _report_progress(
         progress_callback,
         phase="rerank_diversity",
@@ -358,7 +367,7 @@ def generate_recommendations(
         subject="recommendations",
         status="processing",
     )
-    decisions = build_policy_explanations(decisions, retrieval)
+    decisions = build_policy_explanations(decisions, retrieval, ranked=ranked)
     _report_progress(
         progress_callback,
         phase="build_explanations",
@@ -393,6 +402,7 @@ def generate_recommendations(
                 if item.legacy is not None
             ),
             history_window_source=history_window_source,
+            preference_diagnostics=preference_diagnostics,
         ),
         progress_callback=progress_callback,
     )

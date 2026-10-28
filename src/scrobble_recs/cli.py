@@ -988,6 +988,112 @@ def experiment_create_command(
         conn.close()
 
 
+@app.command("preference-train")
+def preference_train_command(
+    config: Annotated[Path, typer.Option("--config", "-c")],
+    training_cutoff: Annotated[str, typer.Option("--training-cutoff")],
+    scope: Annotated[str, typer.Option("--scope")] = "shared",
+) -> None:
+    """Train a local candidate from explicit judgments; never activate it."""
+    from scrobble_recs.models.preference import Scope, train_preference
+
+    cutoff = _parse_timestamp(training_cutoff)
+    settings = load_config(config)
+    conn = initialize_database(settings)
+    try:
+        artifact = train_preference(
+            conn, config=settings, training_cutoff=cutoff, scope=cast(Scope, scope)
+        )
+        typer.echo(
+            json.dumps(
+                {
+                    "artifact_id": artifact.artifact_id,
+                    "artifact_hash": artifact.artifact_hash,
+                    "status": "candidate",
+                },
+                sort_keys=True,
+                allow_nan=False,
+            )
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@app.command("preference-report")
+def preference_report_command(
+    config: Annotated[Path, typer.Option("--config", "-c")],
+    artifact_id: Annotated[str, typer.Option("--artifact-id")],
+    evidence_json: Annotated[
+        Path | None,
+        typer.Option(
+            "--evidence-json", help="Append local Task 11 evidence keyed by general/artist."
+        ),
+    ] = None,
+) -> None:
+    """Inspect a persisted artifact; optionally attest evidence without activation."""
+    from scrobble_recs.models.preference import attest_preference, preference_report
+
+    settings = load_config(config)
+    conn = initialize_database(settings)
+    try:
+        if evidence_json is not None:
+            evidence = json.loads(evidence_json.read_text(encoding="utf-8"))
+            if not isinstance(evidence, dict):
+                raise ValueError("evidence must be an object keyed by query task")
+            attest_preference(conn, artifact_id=artifact_id, config=settings, evidence=evidence)
+        typer.echo(
+            json.dumps(preference_report(conn, artifact_id), sort_keys=True, allow_nan=False)
+        )
+    except (ValueError, OSError) as exc:
+        raise typer.BadParameter("invalid or unavailable preference artifact/evidence") from exc
+    finally:
+        conn.close()
+
+
+@app.command("preference-activate")
+def preference_activate_command(
+    config: Annotated[Path, typer.Option("--config", "-c")],
+    artifact_id: Annotated[str, typer.Option("--artifact-id")],
+) -> None:
+    """Activate only a validated candidate with complete linked promotion evidence."""
+    from scrobble_recs.models.preference import activate_preference
+
+    settings = load_config(config)
+    conn = initialize_database(settings)
+    try:
+        decision = activate_preference(conn, artifact_id=artifact_id, config=settings)
+        typer.echo(
+            json.dumps(
+                {"artifact_id": artifact_id, "status": "active", "decision": decision},
+                sort_keys=True,
+                allow_nan=False,
+            )
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@app.command("preference-rollback")
+def preference_rollback_command(
+    config: Annotated[Path, typer.Option("--config", "-c")],
+    scope: Annotated[str, typer.Option("--scope")] = "shared",
+) -> None:
+    """Retire the scope and suppress shared fallback until explicit activation."""
+    from scrobble_recs.models.preference import Scope, rollback_preference
+
+    conn = initialize_database(load_config(config))
+    try:
+        typer.echo(json.dumps(rollback_preference(conn, scope=cast(Scope, scope)), sort_keys=True))
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        conn.close()
+
+
 @app.command("experiment-next")
 def experiment_next_command(
     config: Annotated[Path, typer.Option("--config", "-c")],

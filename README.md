@@ -228,7 +228,8 @@ including diversity, clipping and exclusion, so `relevance + sum(policy componen
 Challenger popularity/obviousness effects honor `obviousness.enabled`, and its additional known-neighbor
 reduction honors `knownness.enabled`. Disabling the challenger restores the existing control;
 activation is explicit and no promotion happens automatically. Changing the default requires the
-comparison evidence specified by the design; the Task 8 fusion challenger below is a separate explicit opt-in. Blinded exposure and promotion decision reports are available below; learned ranking and activation remain separate work.
+comparison evidence specified by the design; the fusion challenger below is a separate explicit opt-in.
+Blinded exposure, promotion decisions, and explicitly gated local preference learning are described below.
 
 `recommend` reads the current local evidence snapshot and persists the run, including considered candidates and inspectable evidence/admission/ranking/policy data. It does not call provider APIs.
 
@@ -605,6 +606,136 @@ scorer, and fusion remains default-off. New persisted runs freeze a portable art
 feature-schema, slate-policy and behavior-config identity; machine destinations, secrets and
 evaluation bounds are excluded from the behavior fingerprint, while provider flags and weights
 remain included. Older unattested experiments remain readable and ineligible for this gate.
+
+#### Local preference learning
+
+Preference learning is disabled by default and supports the fusion engine for both general and
+artist queries. Enrich first using the optional local-cache workflows above, generate and persist
+general/artist runs, and use `experiment-create`, `experiment-next`, and `experiment-judge` to collect
+explicit judgments. Start-here recordings remain optional persisted attachments; they are neither
+ranked entities nor implicit training negatives. Export and the TUI continue to read frozen runs.
+
+`recommendation.preference` has strict defaults:
+
+```json
+{
+  "enabled": false,
+  "minimum_training_pairs": 50,
+  "minimum_validation_pairs": 10,
+  "l2_regularization": 1.0,
+  "evaluation_artifact_id": null
+}
+```
+
+These are conservative operational gates, not empirically optimal settings. Training uses the latest
+complete replacement judgment at or before the UTC cutoff. A singleton left/right preference or
+uncontradicted singleton list choice supplies a pair. Multi-artist list wins never expand into artist
+pairs. Explicit `want_to_try`, `strong_fit`, or `surprising_good` labels can beat explicit
+`wrong_direction`/`reject` labels within that same exposure. Conflicts, unshown artists, missing labels,
+ties, `already_known`, best-discovery alone and subsequent listening create no negative. Repeated
+identical judgments do not inflate counts. Features come from the frozen run owning the displayed
+side, including shared artists; current listening or provider facts cannot rewrite training data.
+Historical runs without compatible complete feature records are skipped and diagnosed.
+
+```bash
+scrobble-recs preference-train -c config.json --training-cutoff 2030-01-01T00:00:00Z --scope shared
+scrobble-recs preference-report -c config.json --artifact-id ARTIFACT_HASH
+```
+
+Training creates an immutable candidate, never an active model. Repeating the identical fit reports
+`artifact_already_exists` with its ID; inspect that artifact instead of overwriting it. The newest
+judgments form validation, expanding timestamp ties and entire exposures. Older examples alone fit
+the coefficients; validation is never folded back into training. Both held-out mean pairwise log loss
+and accuracy must strictly beat the frozen control scores; equal accuracy fails. Zero comparison
+logits receive half accuracy credit. `--scope general` or `--scope artist` requires **both** query
+populations independently to meet the configured training and validation counts; otherwise use
+`shared`. Reports include actual split counts, per-kind support, exposure IDs, skipped-data reasons,
+corpus/split hashes, coefficients, validation, promotion decisions and lifecycle events.
+
+The fixed `preference-features-v1` / `fusion-family-cap-context-v1` encoder takes
+`fusion-features-v1` records only. In order, its base values are tag fit, feedback, identity confidence
+and knownness (clipped to `[-1,1]`), then collaborative, semantic, catalog and personal family
+contributions (clipped to `[0,1]`). Missing family membership is structurally zero; missing required
+base values is invalid. Individual provider contributions are excluded to avoid duplicate collaborative
+weight. Eight artist-query interactions multiply those candidate-varying features; the final two
+multiply tag fit by `min(1, log1p(target_play_count)/log1p(1000))` and target recent trend clipped to
+`[-1,1]`. General-query interactions are zero. All context comes from the frozen query.
+
+The deterministic SciPy L-BFGS-B fit starts at zero and minimizes
+`mean(logaddexp(0, -Xw)) + l2_regularization * dot(w,w)/2`. The comparison intercept is fixed to zero,
+so reversing a pair reverses its logit. Coefficients round to 12 decimals and normalize negative zero;
+finite canonical JSON hashes scope/schema/transform, feature order, coefficients, regularization,
+cutoff, corpus/split provenance and validation. Creation time, lifecycle status and later attestations
+are outside that hash. At inference, `sigmoid(w·features)` replaces only personal relevance; retrieval,
+family fusion, admission and slate-policy rules remain intact.
+
+To evaluate a candidate before activation, copy the fusion configuration to `candidate.json` and set
+`recommendation.preference.evaluation_artifact_id` to its hash. Keep the control configuration's
+selector null. This explicit selector works with `recommend`, `evaluate`, and
+`models.rolling_compare.compare_rolling_recommendations`; it never changes active status. Produce
+general and artist source runs with the two configurations and gather blinded judgments on those
+persisted runs. Evaluation ignores production activation state. Every learned run/ablation manifest
+includes the exact coefficient hash, transform, scope and behavior configuration. Control and fallback
+manifests truthfully identify deterministic execution.
+
+Use the rolling replay API above for each task with the control and candidate configurations, three
+or more distinct supported windows, and the complete ablation set. Export the resulting comparison,
+the linked `experiment_report(...)` results and verified restoration evidence together as local JSON:
+
+```python
+from pathlib import Path
+
+from scrobble_recs.models.report_json import export_report
+
+export_report(
+    Path("preference-evidence.json"),
+    {
+        "general": {
+            "comparison": general_comparison,
+            "blinded_experiments": general_experiment_reports,
+            "reversibility": general_verified_restoration,
+        },
+        "artist": {
+            "comparison": artist_comparison,
+            "blinded_experiments": artist_experiment_reports,
+            "reversibility": artist_verified_restoration,
+        },
+    },
+)
+```
+
+Each restoration record uses the Task 11 contract below: exact control/challenger manifests, compatible
+schema, an explicit restore selector, and an identified successful comparison against the preserved
+control output. Switching back to the null selector restores deterministic candidate evaluation.
+No command fabricates missing quality, cost, guardrail, ablation or restoration evidence. Shared
+activation needs eligible **general and artist** decisions, including every claimed artist target;
+scoped activation needs its own task decision. Unmeasured targets use control. Missing evidence is
+reported as ineligible, even when the small held-out comparison improves.
+
+```bash
+scrobble-recs preference-report -c config.json --artifact-id ARTIFACT_HASH --evidence-json preference-evidence.json
+scrobble-recs preference-activate -c config.json --artifact-id ARTIFACT_HASH
+scrobble-recs preference-rollback -c config.json --scope shared
+```
+
+`preference-report` without `--evidence-json` is read-only. Supplying evidence appends an attestation;
+activation rechecks the complete linked evidence and current count gates inside its transaction.
+Activation atomically retires a previous artifact of the same scope and records the transition.
+To use the activated model for new recommendations, set `enabled=true` and clear the evaluation
+selector. Exact query scopes take precedence over shared. `preference-rollback --scope general` or
+`artist` also suppresses shared fallback for that query kind; reenabling that scope requires explicit
+activation of a supported scoped candidate. Shared rollback retires the shared artifact without
+retiring unrelated scoped models. Repeated rollback is a disclosed no-op. Retired artifacts are not
+reactivated; train and evaluate a distinct candidate before activating again. Existing runs, blinded
+experiments, exports and TUI details never change with lifecycle or artifact-storage changes.
+
+Missing, corrupt, conflicting, nonfinite, incompatible or unattested artifacts fall back for the
+entire run, with `ranker_fallback_reason`; a bad candidate feature cannot leave a partially learned
+slate. Legacy/walk engines explicitly fall back because v1 supports fusion only. Run/candidate/result
+diagnostics retain attempted/effective identity, control personal score, learned utility/contribution,
+scope/context and feature versions. Fallback and rollback preserve control numeric scores, selected
+order and policy effects. Training, reporting, evaluation, activation and rollback use local storage
+only; no API, Spotify or remote-model dependency is introduced.
 
 Generated config includes these conservative operational bounds under `recommendation.promotion`:
 

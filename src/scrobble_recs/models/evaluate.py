@@ -226,6 +226,9 @@ def evaluate_recommendations(
     judgment_experiment_ids: Sequence[str] = (),
 ) -> EvaluationResult:
     started = perf_counter()
+    # Replay selects a persisted candidate explicitly; production activation is not input.
+    config = config.model_copy(deep=True)
+    config.recommendation.preference.enabled = False
     if evaluation_task not in ("general", "artist"):
         raise ValueError("evaluation_task must be general or artist")
     request = RecommendationRequest(evaluation_task, target_artist_id)

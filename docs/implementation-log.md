@@ -972,3 +972,59 @@ challenger. The fix-round entry records the current behavior.
   cap, UTC forms normalize, valid prospective contexts remain independent, invalid retrospective
   rows contribute zero cutoff support, and real generated comparisons/old experiment contracts
   remain green. No blocking concern remains from this round.
+
+### Task 12 — Gated local pairwise preference learning
+
+- Added idempotent migration 020 for immutable model content, append-only promotion attestations,
+  transactional lifecycle audit and scope-specific rollback suppression. Training produces a candidate;
+  duplicate fits report the existing identity without overwriting it. Activation rechecks the content
+  hash, current count gates and linked Task 11 evidence inside the status/audit transaction.
+- Explicit pair construction reads cutoff-bounded replacement judgments and the displayed side's
+  attributed persisted feature row. Singleton choices and unambiguous positive-versus-negative labels
+  are deduplicated within each exposure. Multi-item list wins, neutral/unshown/unplayed items,
+  conflicts, malformed historical contexts and missing/incompatible features produce no invented
+  negative. Reports retain skipped-data reasons and reproducible source/judgment/split provenance.
+- Added the versioned fusion-family encoder, candidate-varying query/relationship interactions,
+  deterministic zero-initialized L-BFGS-B fit with zero comparison intercept, positive L2 penalty,
+  12-decimal canonical coefficients, chronological exposure/timestamp-grouped validation, and strict
+  loss-plus-accuracy improvement over frozen control scores. Scoped training requires independent
+  general and artist support; shared promotion requires separate eligible decisions for both tasks.
+- Added local `preference-train`, `preference-report` (optional append-only `--evidence-json`),
+  `preference-activate` and `preference-rollback` commands. The explicit evaluation artifact selector
+  allows candidate recommendations, rolling replay/ablations and blinded source runs before activation.
+  Evaluation ignores production activation. Manifests bind actual model content/configuration; false
+  eligibility flags, unrelated models/configurations and altered frozen manifests cannot activate.
+- Integrated learned scoring only after fusion/admission and before unchanged slate policies. The
+  narrow general-policy boundary now consumes the changed personal score while retaining its existing
+  penalties. Candidate scores/fusion provenance remain intact. Persisted run, candidate and selected
+  explanations distinguish control score, learned utility/contribution, effective identity and scope.
+  Failed attempts fall back for the entire run. Unsupported legacy/walk engines explicitly use control.
+- Tests cover actual general/artist order reversal, successful linked promotion/activation/replacement,
+  audit rollback, shared suppression, corrupt/conflicting artifacts, missing/invalid features,
+  historical cutoff corrections, timestamp ties, no network, real candidate rolling replay, migration
+  replay and persisted-only learned-run TUI/export after artifact deletion. README documents the complete
+  training/evaluation/attestation/activation/rollback workflow and v1 numerical/support conventions.
+- TDD evidence: initial config/encoder/fit/split RED **4 failed**, GREEN **4 passed**; pair/cutoff/
+  migration RED **3 failed, 4 passed**, GREEN **7 passed**; lifecycle/integrity RED **11 failed,
+  7 passed**, GREEN **18 passed**; actual candidate-order RED **2 failed**, integration GREEN
+  **31 passed**; exact config linkage RED **1 failed, 7 passed**, GREEN **39 passed**; evaluation/CLI
+  RED **2 failed, 1 passed**, GREEN **42 passed**; frozen-manifest/tie RED **2 failed, 8 passed**,
+  GREEN **52 passed**. Further focused RED/GREEN checks fixed learned explanation scores, mixed UTC
+  timestamps, frozen source-schema/context validation, current minimum gates, duplicate training,
+  rollback visibility, generated defaults and malformed promotion envelopes. The final preference
+  plus configuration check passed **116 tests in 16.76s**; broader pre-final ranking/recommendation/
+  persistence/CLI/promotion coverage passed **383 tests in 28.58s**.
+- First full suite: **1 failed, 1267 passed in 95.23s**; the existing exact migration inventory
+  omitted the four new tables. Updated that expected inventory without weakening its equality check.
+  Final `PYTHONPATH=src ../../.venv/bin/python -m pytest`: **1271 passed in 95.17s**.
+  `PYTHONPATH=src ../../.venv/bin/python -m ruff check .`: **All checks passed**;
+  `PYTHONPATH=src ../../.venv/bin/python -m ruff format --check .`: **111 files already formatted**;
+  `PYTHONPATH=src ../../.venv/bin/python -m mypy src`: **no issues in 60 source files**;
+  `git diff --check`: passed. Commands used the repository-root virtualenv through its absolute local
+  path; relative spelling here avoids committing a machine-local path. Migration replay twice,
+  existing control fingerprints and persisted-only export/TUI tests are included in the passing suite.
+- Self-review: no retrieval/admission/fusion changes, no weakened Task 11 gates, no production default
+  promotion, no API calls/dependency additions, and no historical run rewriting. V1 deliberately supports
+  fusion feature records only; legacy/walk remain deterministic with an explicit fallback diagnostic.
+  Retirement is terminal; reenabling requires a distinct evaluated candidate. Real quality eligibility
+  remains evidence-dependent; synthetic passing fixtures establish mechanics, not recommendation lift.

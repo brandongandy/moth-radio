@@ -990,7 +990,10 @@ def _missing_signals(artist_id: int, details: LegacyRetrievalDetails) -> tuple[s
 
 
 def build_policy_explanations(
-    decisions: tuple[PolicyDecision, ...], retrieval: RetrievalResult
+    decisions: tuple[PolicyDecision, ...],
+    retrieval: RetrievalResult,
+    *,
+    ranked: tuple[RankedCandidate, ...] = (),
 ) -> tuple[PolicyDecision, ...]:
     assert retrieval.legacy is not None
     details = retrieval.legacy
@@ -1053,6 +1056,41 @@ def build_policy_explanations(
                 ),
             )
             if decision.legacy_score is not None
+            else decision
+            for decision in result
+        )
+    diagnostics = {
+        item.artist_id: item.explanation["preference"]
+        for item in ranked
+        if "preference" in item.explanation
+    }
+    if diagnostics:
+        personal = {
+            item.artist_id: {
+                "score": item.relevance_score,
+                "raw_candidate_score": item.candidate_score,
+                "utility_transform": "sigmoid",
+            }
+            for item in ranked
+            if isinstance(detail := item.explanation.get("preference"), dict) and detail.get("used")
+        }
+        result = tuple(
+            replace(
+                decision,
+                legacy_score=replace(
+                    decision.legacy_score,
+                    explanation={
+                        **decision.legacy_score.explanation,
+                        "preference": diagnostics[decision.artist_id],
+                        **(
+                            {"personal_relevance": personal[decision.artist_id]}
+                            if decision.artist_id in personal
+                            else {}
+                        ),
+                    },
+                ),
+            )
+            if decision.legacy_score is not None and decision.artist_id in diagnostics
             else decision
             for decision in result
         )

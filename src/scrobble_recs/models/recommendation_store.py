@@ -5,9 +5,10 @@ from __future__ import annotations
 import csv
 import json
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import Any
 from urllib.parse import quote
 
 from duckdb import DuckDBPyConnection
@@ -57,6 +58,7 @@ class RecommendationRunPayload:
     decisions: tuple[PolicyDecision, ...]
     scorer_diagnostics: tuple[_CandidateDiagnostic, ...]
     history_window_source: str
+    preference_diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "retrieval", deepcopy(self.retrieval))
@@ -257,6 +259,8 @@ def _candidate_detail_values(
     evidence_payload = candidate_evidence_json(evidence)
     if "retrieval_fusion" in candidate.explanation:
         evidence_payload["fusion"] = candidate.explanation["retrieval_fusion"]
+    if "preference" in candidate.explanation:
+        evidence_payload["preference"] = candidate.explanation["preference"]
     effects: dict[str, object] = {
         "included": decision.included if decision is not None and score is not None else False,
         "final_rank": decision.final_rank if decision is not None and score is not None else None,
@@ -328,7 +332,16 @@ def _insert_run(conn: DuckDBPyConnection, payload: RecommendationRunPayload) -> 
             json.dumps(
                 {
                     "evaluation_artifact": artifact_manifest(
-                        config, asdict(query_context.versions)
+                        config,
+                        asdict(query_context.versions),
+                        preference=payload.preference_diagnostics.get("artifact")
+                        if payload.preference_diagnostics.get("used")
+                        else None,
+                    ),
+                    **(
+                        {"preference": payload.preference_diagnostics}
+                        if payload.preference_diagnostics
+                        else {}
                     ),
                     "seed_count": len(seeds),
                     "history_window": {

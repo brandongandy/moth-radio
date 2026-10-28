@@ -1028,3 +1028,31 @@ challenger. The fix-round entry records the current behavior.
   fusion feature records only; legacy/walk remain deterministic with an explicit fallback diagnostic.
   Retirement is terminal; reenabling requires a distinct evaluated candidate. Real quality eligibility
   remains evidence-dependent; synthetic passing fixtures establish mechanics, not recommendation lift.
+
+#### Task 12 fix round 1 — Acquisition identity and corrupt-data fallback
+
+- Restored `content_fingerprint` to its existing code-only meaning and moved the complete preference
+  identity into the full artifact ID hash. Generated learned/control comparisons now retain verified
+  identical acquisition code/inputs; Task 11's existing provider-failure applicability and validation
+  logic remains unchanged. Actual rolling output supplies naturally absent failure measurements;
+  the regression checks their not-applicable guardrail result and full eligibility with the remaining
+  independent synthetic gate fixture. Changed code/acquisition inputs still fail closed.
+- Added explicit JSON object, object-list and string-list validation at feature/context/exposure/
+  judgment/attribution boundaries, including nested preference evidence and source UUIDs. Invalid
+  containers raise the existing handled validation error; bad historical examples are diagnosed and
+  skipped while valid exposures remain usable. Runtime bad shapes revert the whole run to control.
+  No broad `AttributeError` or database exception handler was added.
+- Included lifecycle audit storage in the complete preference preflight. Missing that known table now
+  yields persisted `missing_preference_storage` diagnostics and byte-identical control fingerprints
+  in both general and artist queries. Split production identity selection from validation so corrupt
+  coefficients, missing promotion evidence and unsupported target coverage preserve the attempted ID
+  while the effective manifest stays deterministic.
+- Focused TDD: generated provider-failure RED **3 failed**, GREEN **4 passed in 5.46s** including
+  identity binding; malformed-container RED **15 failed, 8 passed**, GREEN **23 passed in 2.12s**;
+  missing lifecycle storage RED **2 failed**, GREEN **2 passed in 0.62s**; production attempted identity
+  RED **3 failed**, GREEN **3 passed in 2.63s**. Preference/promotion/graded regression command
+  passed **278 tests in 29.49s**. Final `PYTHONPATH=src ../../.venv/bin/python -m pytest`:
+  **1302 passed in 105.58s**; Ruff lint: **All checks passed**; Ruff format check: **111 files already
+  formatted**; `mypy src`: **no issues in 60 source files**; `git diff --check`: passed. Commands used
+  the repository-root virtualenv through its absolute local path, abbreviated here to avoid committing
+  a machine-local path. Self-review found no remaining reviewed defect or changed policy/gate semantics.

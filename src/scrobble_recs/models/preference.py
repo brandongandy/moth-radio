@@ -17,6 +17,7 @@ from datetime import datetime
 from hashlib import sha256
 from math import isfinite, log1p
 from typing import TYPE_CHECKING, Any, Literal
+from uuid import UUID
 
 import numpy as np
 from duckdb import DuckDBPyConnection
@@ -59,10 +60,31 @@ def _finite(value: Any) -> float:
     return float(value)
 
 
+def _object(value: Any) -> dict[str, Any]:
+    """Classify invalid persisted JSON shapes before accessing their fields."""
+    if not isinstance(value, dict):
+        raise ValueError("invalid_object_shape")
+    return value
+
+
+def _objects(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ValueError("invalid_object_list_shape")
+    return [_object(item) for item in value]
+
+
+def _strings(value: Any) -> Sequence[str]:
+    if not isinstance(value, (list, tuple)) or any(not isinstance(item, str) for item in value):
+        raise ValueError("invalid_string_list_shape")
+    return value
+
+
 def encode_features(record: dict[str, Any], context: dict[str, Any]) -> tuple[float, ...]:
+    record, context = _object(record), _object(context)
     if record.get("schema_version") != "fusion-features-v1":
         raise ValueError("incompatible_source_schema")
-    values = record["values"]
+    values = _object(record["values"])
+    _strings(record.get("missing_signals", ()))
     base = [max(-1.0, min(1.0, _finite(values.get(key)))) for key in BASE_FEATURES]
     base += [max(0.0, min(1.0, _finite(values.get(f"fusion_family_{key}", 0)))) for key in FAMILIES]
     kind = context.get("query_kind")
@@ -70,7 +92,7 @@ def encode_features(record: dict[str, Any], context: dict[str, Any]) -> tuple[fl
         raise ValueError("invalid_query_kind")
     depth = trend = 0.0
     if kind == "artist":
-        relationship = context.get("target_relationship") or {}
+        relationship = _object(context.get("target_relationship"))
         count = _finite(relationship.get("play_count"))
         if count < 0 or type(context.get("target_artist_id")) is not int:
             raise ValueError("invalid_target_context")
@@ -264,6 +286,9 @@ def validation_metrics(
 def _explicit_pairs(
     shown: list[dict[str, Any]], preferred: str | None, choice: str | None, labels: dict[str, Any]
 ) -> set[tuple[int, int]]:
+    labels = _object(labels)
+    for value in labels.values():
+        _strings(value)
     sides = {
         side: [item["artist_id"] for item in shown if item["side"] == side]
         for side in ("left", "right")
@@ -296,12 +321,17 @@ def _source_features(
     exposure_time: datetime,
     task: str,
 ) -> tuple[tuple[float, ...], float, str, dict[str, Any]]:
-    variant = definition["side_variants"][item["side"]]
-    memberships = [m for m in attribution[str(item["artist_id"])] if m["variant"] == variant]
+    variant = _object(definition["side_variants"])[item["side"]]
+    memberships = [
+        m for m in _objects(attribution[str(item["artist_id"])]) if m["variant"] == variant
+    ]
     if len(memberships) != 1:
         raise ValueError("ambiguous_display_source")
     run = memberships[0]["run_id"]
-    if run != definition["source_run_ids"][variant]:
+    if not isinstance(run, str):
+        raise ValueError("invalid_source_run_id")
+    UUID(run)
+    if run != _object(definition["source_run_ids"])[variant]:
         raise ValueError("wrong_source_run")
     row = conn.execute(
         "SELECT r.created_at, r.query_context, c.feature_record, c.relevance_score, c.evidence "
@@ -312,9 +342,9 @@ def _source_features(
     if len(row) != 1:
         raise ValueError("missing_or_ambiguous_source_features")
     created, raw_context, raw_features, control, evidence = row[0]
-    context = json.loads(raw_context)
+    context = _object(json.loads(raw_context))
     validate_source_context(context)
-    frozen = definition["source_contexts"][variant]
+    frozen = _object(_object(definition["source_contexts"])[variant])
     if (
         created is None
         or created > exposure_time
@@ -324,11 +354,13 @@ def _source_features(
     ):
         raise ValueError("invalid_source_context_or_time")
     # Learned source runs retain the exact deterministic comparison utility.
-    diagnostics = json.loads(evidence or "{}").get("preference", {})
+    diagnostics = _object(_object(json.loads(evidence or "{}")).get("preference", {}))
+    if "used" in diagnostics and type(diagnostics["used"]) is not bool:
+        raise ValueError("invalid_preference_use_flag")
     if diagnostics.get("used"):
         control = diagnostics["control_score"]
-    record = json.loads(raw_features)
-    if context.get("versions", {}).get("feature_schema") != record.get("schema_version"):
+    record = _object(json.loads(raw_features))
+    if _object(context.get("versions", {})).get("feature_schema") != record.get("schema_version"):
         raise ValueError("incompatible_source_schema")
     return encode_features(record, context), _finite(control), run, context
 
@@ -369,11 +401,11 @@ def build_pairwise_examples(
     ) in rows:
         try:
             definition, shown, attribution = (
-                json.loads(definition),
-                json.loads(shown),
-                json.loads(attribution),
+                _object(json.loads(definition)),
+                _objects(json.loads(shown)),
+                _object(json.loads(attribution)),
             )
-            context = json.loads(exposure_context)
+            context = _object(json.loads(exposure_context))
             if (
                 created > judged
                 or task not in ("general", "artist")
@@ -885,14 +917,15 @@ def rollback_preference(conn: DuckDBPyConnection, *, scope: Scope) -> dict[str, 
         raise
 
 
-def _select_artifact(
+def _select_artifact_id(
     conn: DuckDBPyConnection, config: ScrobbleRecsConfig, context: QueryContext
-) -> PreferenceModelArtifact:
+) -> str:
     settings = config.recommendation.preference
     required = {
         "preference_model_artifact",
         "preference_scope_selection",
         "preference_promotion_evidence",
+        "preference_lifecycle_event",
     }
     present = {
         row[0]
@@ -916,16 +949,20 @@ def _select_artifact(
             if len(rows) > 1:
                 raise ValueError("conflicting_active_artifacts")
             if rows:
-                if rows[0][1] != "active":
-                    raise ValueError("invalid_artifact_status")
                 identity = rows[0][0]
                 break
         if identity is None:
             raise ValueError("no_active_artifact")
+    return identity
+
+
+def _load_selected_artifact(
+    conn: DuckDBPyConnection, identity: str, config: ScrobbleRecsConfig, context: QueryContext
+) -> PreferenceModelArtifact:
     artifact = load_preference_artifact(conn, identity)
     if artifact.query_scope not in ("shared", context.query_kind):
         raise ValueError("incompatible_query_scope")
-    if settings.evaluation_artifact_id is None:
+    if config.recommendation.preference.evaluation_artifact_id is None:
         evidence = _latest_evidence(conn, identity)
         decision = _promotion_assessment(artifact, config, evidence)
         if not decision["eligible"]:
@@ -958,7 +995,9 @@ def apply_preference_ranker(
     try:
         if config.recommendation.scoring.engine != "fusion":
             raise ValueError("unsupported_engine")
-        artifact = _select_artifact(conn, config, context)
+        identity = _select_artifact_id(conn, config, context)
+        diagnostics["attempted_artifact_id"] = identity
+        artifact = _load_selected_artifact(conn, identity, config, context)
         diagnostics.update(
             attempted_artifact_id=artifact.artifact_id, artifact=preference_identity(artifact)
         )

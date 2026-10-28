@@ -677,6 +677,10 @@ general and artist source runs with the two configurations and gather blinded ju
 persisted runs. Evaluation ignores production activation state. Every learned run/ablation manifest
 includes the exact coefficient hash, transform, scope and behavior configuration. Control and fallback
 manifests truthfully identify deterministic execution.
+The full artifact ID binds the learned model identity separately from the code-only
+`content_fingerprint`. Task 11 can therefore verify unchanged acquisition code and inputs without
+mistaking a coefficient change for new acquisition behavior. Unavailable provider-failure measurements
+remain unavailable unless that existing applicability rule establishes they are not applicable.
 
 Use the rolling replay API above for each task with the control and candidate configurations, three
 or more distinct supported windows, and the complete ablation set. Export the resulting comparison,

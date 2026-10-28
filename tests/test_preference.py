@@ -448,7 +448,7 @@ def live_config(conn, config):
     )
 
 
-def run_local(conn, config, kind="general"):
+def run_local(conn, config, kind="general", *, target_artist_id=5):
     from scrobble_recs.models.profile_window import ListeningWindow
     from scrobble_recs.models.recommend import generate_recommendations
     from scrobble_recs.models.recommendation_query import RecommendationRequest
@@ -460,7 +460,7 @@ def run_local(conn, config, kind="general"):
         as_of=datetime(2025, 2, 1),
         historical_cutoff=datetime(2025, 2, 1),
         history_window=ListeningWindow(datetime(2024, 1, 1), datetime(2025, 2, 1)),
-        request=RecommendationRequest(kind, 5 if kind == "artist" else None),
+        request=RecommendationRequest(kind, target_artist_id if kind == "artist" else None),
     ).run_id
 
 
@@ -549,7 +549,7 @@ def test_manifest_binds_coefficients_and_fallback_effective_identity(corpus_db):
     a = artifact_manifest(config, versions, preference=identity)
     b = artifact_manifest(config, versions, preference={**identity, "artifact_hash": "other"})
     assert a["artifact_id"] != b["artifact_id"]
-    assert a["content_fingerprint"] != b["content_fingerprint"]
+    assert a["content_fingerprint"] == b["content_fingerprint"]
 
 
 def linked_evidence(evidence, config, artifact):
@@ -1151,6 +1151,73 @@ def test_rolling_candidate_replay_preserves_candidate_status_and_binds_every_man
     assert p.preference_report(conn, artifact.artifact_id)["status"] == "candidate"
 
 
+@pytest.mark.parametrize("change", [None, "code", "acquisition_inputs"])
+def test_generated_preference_provider_failure_applicability(corpus_db, evidence, change):
+    from scrobble_recs.models.evaluate import EvaluationWindow
+    from scrobble_recs.models.promotion import _check_guardrails, promotion_decision
+    from scrobble_recs.models.rolling_compare import (
+        compare_rolling_recommendations,
+        guardrail_applicability,
+    )
+
+    conn, config = corpus_db
+    artifact = trained(conn, config)
+    live_config(conn, config)
+    challenger = config.model_copy(deep=True)
+    challenger.recommendation.preference.evaluation_artifact_id = artifact.artifact_id
+    comparison = compare_rolling_recommendations(
+        conn,
+        config,
+        challenger,
+        windows=[
+            EvaluationWindow(datetime(2025, 2, 1), datetime(2025, 2, 1), datetime(2025, 3, 1))
+        ],
+    )
+    generated = comparison.pairs[0]
+    assert (
+        generated["control"]["artifact"]["artifact_id"]
+        != generated["challenger"]["artifact"]["artifact_id"]
+    )
+    for variant in ("control", "challenger"):
+        metric = generated[variant]["result"]["guardrails"]["provider_failure_rate"]
+        assert metric["value"] is None and metric["available"] is False
+        assert metric["availability"] == "not_applicable"
+    reasons = set()
+    checks = _check_guardrails(generated, config.recommendation.promotion, reasons)
+    assert checks["provider_failure_rate"]["availability"] == "not_applicable"
+
+    # Keep all other Task 11 requirements independently satisfied by the existing synthetic
+    # evidence fixture. Transfer only the naturally emitted absent-measurement fields; retain
+    # each fixture observation's cutoff/snapshot. Never invent a provider failure measurement.
+    proof = linked_evidence(evidence, config, artifact)["general"]
+    absent = generated["control"]["result"]["guardrails"]["provider_failure_rate"]
+    for pair in proof["comparison"]["pairs"]:
+        for variant in [
+            pair["control"],
+            pair["challenger"],
+            *[row["metrics"] for row in pair["ablations"]],
+        ]:
+            previous = variant["result"]["guardrails"]["provider_failure_rate"]
+            variant["result"]["guardrails"]["provider_failure_rate"] = {
+                **deepcopy(absent),
+                "cutoff": previous["cutoff"],
+                "snapshot_id": previous["snapshot_id"],
+            }
+        pair["guardrail_applicability"] = guardrail_applicability(
+            pair["control"], pair["challenger"]
+        )
+    assert promotion_decision(config=config.recommendation.promotion, **proof).eligible
+    if change:
+        manifest = proof["comparison"]["pairs"][0]["challenger"]["artifact"]
+        if change == "code":
+            manifest["content_fingerprint"] = "changed-acquisition-code"
+        else:
+            manifest["behavior_config"]["enrichment"]["seed_artist_limit"] += 1
+        decision = promotion_decision(config=config.recommendation.promotion, **proof)
+        assert not decision.eligible
+        assert "incomplete_guardrails" in decision.reasons
+
+
 def test_missing_historical_context_is_skipped_even_when_frozen_copies_match(corpus_db):
     p = preference()
     conn, _ = corpus_db
@@ -1223,6 +1290,215 @@ def test_malformed_promotion_envelopes_are_ineligible_not_runtime_errors(corpus_
     assert "invalid_promotion_evidence" in decision["reasons"]
     with pytest.raises(ValueError, match="promotion_ineligible"):
         p.activate_preference(conn, artifact_id=artifact.artifact_id, config=config)
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "feature_root",
+        "feature_values",
+        "missing_signals",
+        "evidence_root",
+        "preference_null",
+        "preference_list",
+        "labels_root",
+        "labels_value",
+        "context_root",
+        "definition_root",
+        "side_map",
+        "source_map",
+        "source_contexts",
+        "attribution_root",
+        "memberships",
+        "member_item",
+        "invalid_run_id",
+        "shown_root",
+        "shown_item",
+    ],
+)
+def test_malformed_historical_containers_skip_only_affected_examples(corpus_db, corruption):
+    p = preference()
+    conn, _ = corpus_db
+    bad = exposure(conn)
+    good = exposure(conn, identity=2, left=(2,), right=(3,))
+    if corruption in ("feature_root", "feature_values", "missing_signals"):
+        value = [] if corruption == "feature_root" else features()
+        if corruption != "feature_root":
+            value["values" if corruption == "feature_values" else "missing_signals"] = (
+                [] if corruption == "feature_values" else {}
+            )
+        conn.execute(
+            "UPDATE recommendation_candidate SET feature_record=? WHERE run_id=? AND artist_id=1",
+            [json.dumps(value), CONTROL],
+        )
+    elif corruption in ("evidence_root", "preference_null", "preference_list"):
+        value = (
+            []
+            if corruption == "evidence_root"
+            else {"preference": None if corruption == "preference_null" else ["used"]}
+        )
+        conn.execute(
+            "UPDATE recommendation_candidate SET evidence=? WHERE run_id=? AND artist_id=1",
+            [json.dumps(value), CONTROL],
+        )
+    elif corruption in ("labels_root", "labels_value"):
+        value = [] if corruption == "labels_root" else {"1": {"strong_fit": True}}
+        conn.execute(
+            "UPDATE recommendation_judgment SET labels=? WHERE exposure_id=?",
+            [json.dumps(value), bad],
+        )
+    elif corruption in ("definition_root", "side_map", "source_map", "source_contexts"):
+        row = conn.execute(
+            "SELECT x.experiment_id, x.definition FROM recommendation_experiment x "
+            "JOIN recommendation_exposure e USING (experiment_id) WHERE e.exposure_id=?",
+            [bad],
+        ).fetchone()
+        value = [] if corruption == "definition_root" else json.loads(row[1])
+        if corruption != "definition_root":
+            value[
+                {
+                    "side_map": "side_variants",
+                    "source_map": "source_run_ids",
+                    "source_contexts": "source_contexts",
+                }[corruption]
+            ] = []
+        conn.execute(
+            "UPDATE recommendation_experiment SET definition=? WHERE experiment_id=?",
+            [json.dumps(value), row[0]],
+        )
+    else:
+        column = (
+            "context"
+            if corruption == "context_root"
+            else "shown_items"
+            if corruption.startswith("shown_")
+            else "attribution"
+        )
+        value = json.loads(
+            conn.execute(
+                f"SELECT {column} FROM recommendation_exposure WHERE exposure_id=?", [bad]
+            ).fetchone()[0]
+        )
+        if corruption in ("context_root", "attribution_root"):
+            value = []
+        elif corruption == "shown_root":
+            value = {}
+        elif corruption == "shown_item":
+            value[0] = None
+        elif corruption == "memberships":
+            value["1"] = {"variant": "control"}
+        elif corruption == "member_item":
+            value["1"] = [None]
+        else:
+            value["1"][0]["run_id"] = ["invalid"]
+        conn.execute(
+            f"UPDATE recommendation_exposure SET {column}=? WHERE exposure_id=?",
+            [json.dumps(value), bad],
+        )
+    diagnostics = []
+    pairs = p.build_pairwise_examples(
+        conn,
+        training_cutoff=datetime(2026, 1, 1),
+        feature_names=p.FEATURE_NAMES,
+        diagnostics=diagnostics,
+    )
+    assert [(x.exposure_id, x.preferred_artist_id, x.other_artist_id) for x in pairs] == [
+        (good, 2, 3)
+    ]
+    assert any(
+        x["exposure_id"] == bad
+        and x["reason"] in ("invalid_exposure", "invalid_source_features_or_attribution")
+        for x in diagnostics
+    )
+
+
+@pytest.mark.parametrize(
+    "corruption", ["feature_root", "feature_values", "context_root", "relationship"]
+)
+def test_malformed_runtime_containers_fall_back_for_entire_run(corpus_db, monkeypatch, corruption):
+    p = preference()
+    conn, config = corpus_db
+    artifact = trained(conn, config)
+    live_config(conn, config)
+    control = run_local(conn, config, "artist")
+    original = p.encode_features
+
+    def corrupt(record, context):
+        if record["values"]["tag_similarity_score"] == 0:
+            if corruption == "feature_root":
+                record = []
+            elif corruption == "feature_values":
+                record = {**record, "values": []}
+            elif corruption == "context_root":
+                context = []
+            else:
+                context = {**context, "target_relationship": ["invalid"]}
+        return original(record, context)
+
+    monkeypatch.setattr(p, "encode_features", corrupt)
+    config.recommendation.preference.evaluation_artifact_id = artifact.artifact_id
+    fallback = run_local(conn, config, "artist")
+    assert fingerprint(conn, fallback) == fingerprint(conn, control)
+    summary = json.loads(
+        conn.execute(
+            "SELECT seed_summary FROM recommendation_run WHERE run_id=?", [fallback]
+        ).fetchone()[0]
+    )
+    assert summary["preference"]["ranker_fallback_reason"] == "invalid_artifact_or_features"
+    assert not summary["evaluation_artifact"].get("preference")
+
+
+@pytest.mark.parametrize("kind", ["general", "artist"])
+def test_missing_lifecycle_table_preserves_control_and_persists_fallback(corpus_db, kind):
+    conn, config = corpus_db
+    artifact = trained(conn, config)
+    live_config(conn, config)
+    control = run_local(conn, config, kind)
+    config.recommendation.preference.evaluation_artifact_id = artifact.artifact_id
+    conn.execute("DROP TABLE preference_lifecycle_event")
+    fallback = run_local(conn, config, kind)
+    assert fingerprint(conn, fallback) == fingerprint(conn, control)
+    summary = json.loads(
+        conn.execute(
+            "SELECT seed_summary FROM recommendation_run WHERE run_id=?", [fallback]
+        ).fetchone()[0]
+    )
+    assert summary["preference"]["ranker_fallback_reason"] == "missing_preference_storage"
+    assert not summary["evaluation_artifact"].get("preference")
+
+
+@pytest.mark.parametrize("corruption", ["coefficients", "promotion", "target"])
+def test_production_fallback_preserves_selected_artifact_identity(corpus_db, evidence, corruption):
+    p = preference()
+    conn, config = corpus_db
+    artifact = trained(conn, config)
+    live_config(conn, config)
+    proof = linked_evidence(evidence, config, artifact)
+    p.attest_preference(conn, artifact_id=artifact.artifact_id, config=config, evidence=proof)
+    p.activate_preference(conn, artifact_id=artifact.artifact_id, config=config)
+    kind = "artist" if corruption == "target" else "general"
+    target = 1 if corruption == "target" else 5
+    control = run_local(conn, config, kind, target_artist_id=target)
+    if corruption == "coefficients":
+        conn.execute(
+            "UPDATE preference_model_artifact SET coefficients='[0]' WHERE artifact_id=?",
+            [artifact.artifact_id],
+        )
+    elif corruption == "promotion":
+        conn.execute(
+            "DELETE FROM preference_promotion_evidence WHERE artifact_id=?", [artifact.artifact_id]
+        )
+    config.recommendation.preference.enabled = True
+    fallback = run_local(conn, config, kind, target_artist_id=target)
+    assert fingerprint(conn, fallback) == fingerprint(conn, control)
+    summary = json.loads(
+        conn.execute(
+            "SELECT seed_summary FROM recommendation_run WHERE run_id=?", [fallback]
+        ).fetchone()[0]
+    )
+    assert summary["preference"]["attempted_artifact_id"] == artifact.artifact_id
+    assert summary["preference"]["ranker_fallback_reason"]
+    assert not summary["evaluation_artifact"].get("preference")
 
 
 def test_singleton_list_does_not_overrule_an_explicit_artist_tie(corpus_db):

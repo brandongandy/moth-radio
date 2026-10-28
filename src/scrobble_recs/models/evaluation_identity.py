@@ -46,8 +46,8 @@ def artifact_manifest(
     for path in files:
         digest.update(path.relative_to(package).as_posix().encode())
         digest.update(path.read_bytes())
-    if preference:
-        digest.update(json.dumps(preference, sort_keys=True, allow_nan=False).encode())
+    # Task 11 uses this fingerprint as evidence of unchanged acquisition code.
+    # Learned coefficients belong to the full artifact identity, not the code digest.
     content = digest.hexdigest()
     identity = {
         "scorer": config.recommendation.scoring.engine,
@@ -56,10 +56,10 @@ def artifact_manifest(
         "slate_policy_version": versions.get("slate_policy"),
         "content_fingerprint": content,
         "behavior_config_fingerprint": behavior_fingerprint(config),
+        **({"preference": preference} if preference else {}),
     }
     return {
         **identity,
-        **({"preference": preference} if preference else {}),
         "artifact_id": sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest(),
         "fingerprint_policy": (
             "behavior-config-v1; excludes app destinations, input CSV path, secrets, "

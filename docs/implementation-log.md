@@ -668,3 +668,47 @@ challenger. The fix-round entry records the current behavior.
   malformed diagnostics, exact relevance/policy reconciliation, walk/provider attribution with
   old-run fallback, strict nested legacy payload rejection, deterministic pre-profile tag
   quarantine, frozen controls, unchanged default-off/non-promotion state and unchanged cycle debt.
+
+### Task 9 — Blinded local recommendation experiments (2026-10-27)
+
+- Added migration 018 with UUID experiment/exposure/judgment identities and unique exposure/artist
+  outcome materializations. Reinitialization preserves experiment history and historical runs.
+- Added compatible-run validation using recorded query kind, target, semantic history/feedback
+  context and nonempty shared evidence snapshot. Scorer/config/version differences are permitted;
+  absent, malformed and contradictory provenance fails before writes.
+- Freeze selected slates, names, source ranks/memberships, contexts and historical guardrail facts
+  at experiment creation. Versioned seeded side assignment and shared-artist ownership give stable
+  unique pagination. Pending exposures replay stored artifacts; exhausted reads create no rows.
+- Added append-only complete-replacement judgments, six validated labels, independent preferred,
+  list and best-discovery choices, optional confidence/notes, monotonic submission ordering,
+  partial/resume/reopen handling and atomic completion updates. No implicit ordinary feedback.
+- Reports reveal attribution, summarize current effective judgments once, expose denominators,
+  split shared artist credit equally and recompute strict post-exposure/pre-cutoff listening.
+  Earliest exposure owns listening credit per artist/experiment; repeat imports and unexposed
+  artists receive none. Outcomes replace atomically when cutoffs change.
+- Frozen guardrails use selected-run knownness/identity values, persisted primary tags and
+  persisted candidate provider memberships. Missing historical facts stay explicitly unavailable;
+  popularity is unavailable rather than reconstructed from current catalog data. No promotion.
+- New artist relationship snapshots use recorded exposures strictly before the effective cutoff,
+  with the existing explicit run-appearance fallback when no recorded rows precede that cutoff.
+- Added four JSON CLI commands and a minimal persisted-only TUI experiment screen (`x` from runs)
+  with label, independent choice, optional note/confidence, save/advance/resume and return controls.
+  Parent feedback/debug/run actions are disabled while judging. Documented the local workflow and
+  full replacement, cutoff, shared-credit and unavailable-guardrail semantics in README.
+- RED/GREEN: missing migration failed before DDL; missing experiment model failed before model
+  implementation; report/source selection/candidate-only tests failed before their changes;
+  CLI reported missing commands and TUI/facade tests failed before integration. Further RED tests
+  exposed malformed-common-context acceptance, missing duplicate-rank collapse, missing historical
+  guards, initial/resumed metadata, incomplete artist context and oversized confidence handling;
+  focused GREEN runs cover each fix. Transaction failure tests preserve all four tables.
+- Focused experiments/relationship/CLI/TUI suite: **171 passed** (18.47 seconds) before the final
+  additional confidence edge case; its dedicated invalid-judgment run: **15 passed**. Initial full
+  suite: **839 passed, 1 failed** (49.99 seconds); the sole failure was the existing exact schema
+  inventory (`test_initialize_database_applies_initial_migration`), which omitted the four new
+  migration tables. Updated that inventory; its focused check passed.
+- Final verification: full suite **840 passed** (50.34 seconds), no failures or warnings; Ruff lint
+  passed, Ruff format check reported **99 files already formatted**, mypy passed for **53 source
+  files**, and `git diff --check` passed. Used the repository virtualenv with `PYTHONPATH=src`.
+  Self-review confirmed public/private separation, persisted replay and source freezing, strict
+  listening bounds, replacement/partial semantics, transaction rollback and cutoff-relative
+  exposure fallback. Frozen control fixtures and default-off/non-promotion behavior are unchanged.

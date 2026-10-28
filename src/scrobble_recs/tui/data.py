@@ -8,6 +8,14 @@ from typing import Any
 
 from duckdb import DuckDBPyConnection
 
+from scrobble_recs.models.experiments import (
+    BlindedExposure,
+    JudgmentLabel,
+    SideChoice,
+    next_blinded_exposure,
+    record_judgment,
+)
+
 
 @dataclass(frozen=True)
 class RecommendationFilters:
@@ -113,6 +121,42 @@ class CacheSummary:
 class TuiRecommendationStore:
     def __init__(self, conn: DuckDBPyConnection) -> None:
         self._conn = conn
+
+    def list_experiment_ids(self, run_id: str | None = None) -> list[str]:
+        return [
+            str(row[0])
+            for row in self._conn.execute(
+                "SELECT experiment_id FROM recommendation_experiment WHERE "
+                "(? IS NULL OR control_run_id = ? OR challenger_run_id = ?) "
+                "ORDER BY created_at, experiment_id",
+                [run_id, run_id, run_id],
+            ).fetchall()
+        ]
+
+    def next_exposure(self, experiment_id: str) -> BlindedExposure | None:
+        return next_blinded_exposure(self._conn, experiment_id=experiment_id)
+
+    def judge_exposure(
+        self,
+        exposure_id: str,
+        *,
+        preferred_side: SideChoice | None = None,
+        list_choice: SideChoice | None = None,
+        best_discovery_artist_id: int | None = None,
+        labels: dict[int, tuple[JudgmentLabel, ...]] | None = None,
+        confidence: float | None = None,
+        note: str | None = None,
+    ) -> str:
+        return record_judgment(
+            self._conn,
+            exposure_id=exposure_id,
+            preferred_side=preferred_side,
+            list_choice=list_choice,
+            best_discovery_artist_id=best_discovery_artist_id,
+            labels=labels,
+            confidence=confidence,
+            note=note,
+        )
 
     def list_runs(self) -> list[RunSummary]:
         rows = self._conn.execute(

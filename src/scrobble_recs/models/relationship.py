@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from datetime import datetime, timedelta
 
@@ -135,6 +136,20 @@ def build_target_relationship_snapshot(
         [artist_id, cutoff],
     ).fetchone()
     assert exposure is not None
+    exposure_count, exposure_source = int(exposure[0]), "run_appearance"
+    table_exists = conn.execute(
+        "SELECT count(*) FROM information_schema.tables "
+        "WHERE table_name = 'recommendation_exposure' AND table_schema = 'main'"
+    ).fetchone()
+    if table_exists and table_exists[0]:
+        recorded = conn.execute(
+            "SELECT shown_items FROM recommendation_exposure WHERE created_at < ?", [cutoff]
+        ).fetchall()
+        if recorded:
+            exposure_source = "recorded_exposure"
+            exposure_count = sum(
+                artist_id in {item["artist_id"] for item in json.loads(row[0])} for row in recorded
+            )
     return TargetRelationshipSnapshot(
         state=state,
         play_count=count,
@@ -150,7 +165,8 @@ def build_target_relationship_snapshot(
         replay_concentration=largest_group / count if count else 0.0,
         positive_feedback=positive,
         negative_feedback=negative,
-        prior_recommendation_exposures=int(exposure[0]),
+        prior_recommendation_exposures=exposure_count,
+        exposure_source=exposure_source,
         thresholds=thresholds.model_dump(),
         low_depth_sample=0 < count <= thresholds.sampled_max_plays,
     )

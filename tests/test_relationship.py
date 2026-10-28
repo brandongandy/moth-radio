@@ -48,6 +48,32 @@ def snapshot(conn, *, end=datetime(2025, 1, 1), start=datetime(2020, 1, 1), cuto
     )
 
 
+def test_recorded_exposure_source_is_cutoff_relative_not_artist_relative(stage_database):
+    import json
+
+    conn, _, _ = stage_database
+    assert snapshot(conn).exposure_source == "run_appearance"
+    for identity, date, artists in [
+        (1, "2025-01-01", [1]),
+        (2, "2026-01-01", [1]),
+        (3, "2024-02-01", [2]),
+        (4, "2024-03-01", [1, 1]),
+    ]:
+        conn.execute(
+            "INSERT INTO recommendation_exposure (exposure_id, experiment_id, created_at, "
+            "context, shown_items, attribution) VALUES (?, ?, ?, '{}', ?, '{}')",
+            [
+                f"00000000-0000-0000-0000-{identity:012d}",
+                "00000000-0000-0000-0000-000000000009",
+                date,
+                json.dumps([{"artist_id": aid} for aid in artists]),
+            ],
+        )
+        result = snapshot(conn)
+        assert result.exposure_source == ("run_appearance" if identity < 3 else "recorded_exposure")
+        assert result.prior_recommendation_exposures == (1 if identity == 4 else 0)
+
+
 def add_plays(conn, dates, *, tracks=None, albums=None):
     for i, date in enumerate(dates, 1):
         conn.execute(

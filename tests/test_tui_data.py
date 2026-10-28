@@ -5,10 +5,31 @@ import pytest
 
 from scrobble_recs.config import load_config
 from scrobble_recs.db import initialize_database
-from scrobble_recs.tui.data import (
-    RecommendationFilters,
-    TuiRecommendationStore,
-)
+from scrobble_recs.tui.data import RecommendationFilters, TuiRecommendationStore
+
+
+def test_store_resumes_blinded_experiment_without_revealing_runs(tmp_path):
+    from dataclasses import asdict
+
+    from test_experiments import create, seed_runs
+    from test_tui_app import write_config
+
+    from scrobble_recs.config import load_config
+    from scrobble_recs.db import initialize_database
+
+    conn = initialize_database(load_config(write_config(tmp_path)))
+    try:
+        seed_runs(conn)
+        experiment = create(conn)
+        store = TuiRecommendationStore(conn)
+        assert store.list_experiment_ids() == [experiment]
+        exposure = store.next_exposure(experiment)
+        store.judge_exposure(exposure.exposure_id, labels={2: ["want_to_try"]})
+        resumed = TuiRecommendationStore(conn).next_exposure(experiment)
+        assert resumed.judgment.labels == {2: ("want_to_try",)}
+        assert "PRIVATE" not in json.dumps(asdict(resumed))
+    finally:
+        conn.close()
 
 
 def write_config(tmp_path: Path) -> Path:

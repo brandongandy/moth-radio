@@ -10,6 +10,77 @@ from scrobble_recs.cli import app
 from scrobble_recs.importers.lastfm_csv import ImportStats
 
 
+def test_experiment_cli_create_partial_resume_complete_report(tmp_path):
+    from test_experiments import CHALLENGER, CONTROL, seed_runs
+    from test_tui_app import write_config
+
+    from scrobble_recs.config import load_config
+    from scrobble_recs.db import initialize_database
+
+    config = write_config(tmp_path)
+    runner = CliRunner()
+    conn = initialize_database(load_config(config))
+    seed_runs(conn)
+    conn.close()
+
+    def invoke(command, *args):
+        result = runner.invoke(app, [command, "--config", str(config), *args])
+        assert result.exit_code == 0, result.output
+        return json.loads(result.output)
+
+    created = invoke(
+        "experiment-create",
+        "--control-run-id",
+        CONTROL,
+        "--challenger-run-id",
+        CHALLENGER,
+        "--seed",
+        "7",
+    )
+    experiment = created["experiment_id"]
+    shown = invoke("experiment-next", "--experiment-id", experiment)
+    assert "PRIVATE" not in json.dumps(shown)
+    exposure = shown["exposure_id"]
+    invoke(
+        "experiment-judge",
+        "--exposure-id",
+        exposure,
+        "--label",
+        "2:strong_fit",
+        "--confidence",
+        "0.8",
+        "--note",
+        "Later",
+    )
+    resumed = invoke("experiment-next", "--experiment-id", experiment)
+    assert resumed["judgment"]["labels"] == {"2": ["strong_fit"]}
+    assert resumed["left"] == shown["left"]
+    invalid = runner.invoke(
+        app,
+        [
+            "experiment-judge",
+            "--config",
+            str(config),
+            "--exposure-id",
+            exposure,
+            "--label",
+            "2:invented",
+        ],
+    )
+    assert invalid.exit_code != 0
+    assert invoke("experiment-next", "--experiment-id", experiment) == resumed
+    invoke("experiment-judge", "--exposure-id", exposure, "--list-choice", "tie")
+    assert invoke("experiment-next", "--experiment-id", experiment) is None
+    report = invoke(
+        "experiment-report",
+        "--experiment-id",
+        experiment,
+        "--outcome-cutoff",
+        "2030-01-01T00:00:00Z",
+    )
+    assert report["list_choices"]["tie"] == 1
+
+
 def write_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "config.json"
     config_path.write_text(

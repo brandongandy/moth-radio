@@ -932,3 +932,43 @@ challenger. The fix-round entry records the current behavior.
 - Self-review confirmed matching-definition eligibility remains available, every incompatible
   catalog definition fails completeness and explanatory gain, and no policy, defaults, activation
   or Task 12 behavior changed. The deferred Minor about cross-test helpers remains untouched.
+
+#### Task 11 fix round 3 — Runtime accounting and retrospective context bounds
+
+- Added one runtime-manifest validator shared by paired and ablation cost checks. Variant,
+  shared and declared times must be finite/nonnegative; the declared total must equal the component
+  sum within eight machine epsilons of relative accounting round-off. Ratios and strict cost limits
+  use the validated component sum, so that accounting tolerance cannot conceal an over-limit
+  runtime. Missing/negative/nonfinite/contradictory components fail closed with cost-evidence reasons.
+- Extracted the existing experiment source-context validation into one pure shared validator,
+  preserving its recorded/null and artist-relationship semantics. Promotion now requires that
+  complete normalized contract, then binds retrospective history cutoff, feedback cutoff and
+  history-window end to each normalized training cutoff. A valid window start must precede its
+  cutoff-bound end. Two equally missing/future contexts cannot count as compatible support.
+  Ablation contexts use the same validation/binding. Prospective blinded sources retain their own
+  valid internally compatible cutoff; they do not inherit retrospective windows.
+- Corrected positive fixtures to record each replay's actual history-window end, complete artist
+  relationships and consistent runtime components. Added main/ablation invalid-component cases,
+  exact-limit and ordinary-roundoff cases, future/missing/malformed context bounds, explicit bad
+  removal context, UTC-equivalent timestamp spellings and an independent valid prospective cutoff.
+  README describes the accounting and context boundaries. Deferred Minors/economy work and Task 12
+  remain untouched.
+- RED evidence: focused runtime reproduction initially reported **15 failed, 5 passed, 100 deselected**
+  in **0.78s**, including ignored missing/negative/oversized variant times and a one-ULP limit breach.
+  Promotion GREEN after runtime changes: **120 passed in 2.90s**. Context reproductions initially
+  reported **16 failed, 1 passed, 120 deselected in 0.77s**, including matched future cutoffs and
+  stripped bounds. Promotion/experiment GREEN after shared validation: **270 passed in 10.00s**.
+- Final amended command:
+  `PYTHONPATH=src ../../.venv/bin/python -m pytest tests/test_promotion.py tests/test_experiments.py tests/test_compare.py -q`
+  — **283 passed in 21.90 seconds**. Full command
+  `PYTHONPATH=src ../../.venv/bin/python -m pytest` — **1206 passed in 71.06 seconds**;
+  `PYTHONPATH=src ../../.venv/bin/python -m ruff check .` — **All checks passed**;
+  `PYTHONPATH=src ../../.venv/bin/python -m ruff format --check .` — **109 files already formatted**;
+  `PYTHONPATH=src ../../.venv/bin/python -m mypy src` — **no issues in 59 source files**;
+  `git diff --check` — passed. Commands used the same repository-root virtualenv via its absolute
+  local interpreter path; relative spelling here avoids committing a machine-local path.
+- Self-review confirmed the exact runtime and future-context false-eligibility probes fail closed,
+  consistent exact-boundary costs remain eligible, accounting tolerance never weakens the runtime
+  cap, UTC forms normalize, valid prospective contexts remain independent, invalid retrospective
+  rows contribute zero cutoff support, and real generated comparisons/old experiment contracts
+  remain green. No blocking concern remains from this round.

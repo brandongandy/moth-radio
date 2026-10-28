@@ -7,11 +7,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
-from math import isfinite
+from math import isclose, isfinite
+from sys import float_info
 from typing import Any
 
 from scrobble_recs.config import PromotionConfig
-from scrobble_recs.models.experiments import ExperimentReport, _canonical
+from scrobble_recs.models.experiments import ExperimentReport, validate_source_context
 from scrobble_recs.models.profile_window import normalize_timestamp
 from scrobble_recs.models.report_json import report_value
 from scrobble_recs.models.rolling_compare import (
@@ -133,21 +134,27 @@ def _pair_key(value: Mapping[str, Any]) -> tuple[Any, ...]:
     return task, target, *(stamp.isoformat() for stamp in times)
 
 
-def _semantic_context(context: dict[str, Any]) -> Any:
-    keys = (
-        "query_kind",
-        "target_artist_id",
-        "history_window",
-        "history_cutoff",
-        "feedback_cutoff",
-        "mode",
-        "novelty_intent",
-        "taste_region_seeds",
-        "evidence_freshness",
-        "target_relationship",
-        "evidence_snapshot_id",
-    )
-    return _canonical({key: context.get(key) for key in keys})
+def _semantic_context(
+    context: dict[str, Any], *, train_until: str | None = None
+) -> dict[str, Any] | None:
+    try:
+        semantic = validate_source_context(context)
+        if train_until is not None:
+            cutoff = normalize_timestamp(datetime.fromisoformat(train_until)).isoformat()
+            if (
+                semantic["history_cutoff"] != cutoff
+                or semantic["feedback_cutoff"] != cutoff
+                or semantic["history_window"]["end"] != cutoff
+            ):
+                return None
+        return {
+            **semantic,
+            "query_kind": context["query_kind"],
+            "target_artist_id": context.get("target_artist_id"),
+            "evidence_snapshot_id": context["evidence_snapshot_id"],
+        }
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+        return None
 
 
 def _check_blinded(
@@ -224,9 +231,11 @@ def _check_blinded(
         )
         linked &= runs.get("control") != runs.get("challenger")
         if all(isinstance(contexts.get(name), dict) for name in ("control", "challenger")):
-            linked &= _semantic_context(contexts["control"]) == _semantic_context(
-                contexts["challenger"]
+            left, right = (
+                _semantic_context(contexts["control"]),
+                _semantic_context(contexts["challenger"]),
             )
+            linked &= left is not None and left == right
         frozen = definition.get("artists", {})
         for artist in frozen.values():
             memberships = artist.get("memberships", [])
@@ -472,36 +481,55 @@ def _check_guardrails(
     return checks
 
 
+def _runtime_total(manifest: dict[str, Any]) -> float | None:
+    values: list[float] = []
+    for key in ("variant_seconds", "shared_capture_seconds", "total_seconds"):
+        value = manifest.get(key)
+        if not _number(value):
+            return None
+        assert isinstance(value, int | float)
+        if value < 0:
+            return None
+        values.append(float(value))
+    if (
+        manifest.get("boundary") != RUNTIME_BOUNDARY
+        or type(manifest.get("sample_count")) is not int
+        or manifest["sample_count"] < 1
+        or not manifest.get("statistic")
+        or manifest.get("network_calls") != 0
+    ):
+        return None
+    variant, shared, declared = values
+    total = variant + shared
+    # Permit ordinary component-addition roundoff only; cost limits use the derived total.
+    if not _number(total) or not isclose(
+        declared, total, rel_tol=8 * float_info.epsilon, abs_tol=0
+    ):
+        return None
+    return float(total)
+
+
 def _check_costs(
     pair: dict[str, Any], config: PromotionConfig, reasons: set[str]
 ) -> dict[str, Any]:
     control, challenger = pair["control"], pair["challenger"]
     runtimes = [row.get("runtime", {}) for row in (control, challenger)]
-    a, b = [row.get("total_seconds") for row in runtimes]
+    a, b = [_runtime_total(row) for row in runtimes]
     runtime_ok = (
-        _number(a)
+        a is not None
         and a > 0
-        and _number(b)
+        and b is not None
         and b >= 0
-        and all(
-            row.get("boundary") == RUNTIME_BOUNDARY
-            and row.get("sample_count", 0) >= 1
-            and row.get("statistic")
-            and row.get("network_calls") == 0
-            and _number(row.get("shared_capture_seconds"))
-            and row["shared_capture_seconds"] >= 0
-            for row in runtimes
-        )
         and runtimes[0].get("shared_capture_seconds") == runtimes[1].get("shared_capture_seconds")
     )
-    ratio = b / a if runtime_ok else None
+    ratio = b / a if runtime_ok and a is not None and b is not None else None
     if ratio is not None and not isfinite(ratio):
         ratio = None
         runtime_ok = False
         reasons.add("invalid_evidence")
     if not runtime_ok:
         reasons.add("missing_runtime_evidence")
-    elif b > a * config.max_runtime_multiplier:
+    elif a is not None and b is not None and b > a * config.max_runtime_multiplier:
         reasons.add("runtime_limit_exceeded")
     storages = [row.get("storage", {}) for row in (control, challenger)]
     storage_ok = all(
@@ -653,7 +681,10 @@ def _complete_ablation_variant(
         or context.get("evidence_snapshot_id") != result["evidence_snapshot_id"]
     ):
         return False
-    left, right = _semantic_context(baseline.get("source_context", {})), _semantic_context(context)
+    left = _semantic_context(baseline.get("source_context", {}), train_until=expected_key[2])
+    right = _semantic_context(context, train_until=expected_key[2])
+    if left is None or right is None:
+        return False
     if "local_feedback" in ABLATIONS[identity]:
         left.pop("taste_region_seeds", None)
         right.pop("taste_region_seeds", None)
@@ -913,9 +944,11 @@ def promotion_decision(
             compatible &= bool(a.get("evidence_snapshot_id")) and a.get(
                 "evidence_snapshot_id"
             ) == b.get("evidence_snapshot_id")
-            compatible &= _semantic_context(
-                pair["control"].get("source_context", {})
-            ) == _semantic_context(pair["challenger"].get("source_context", {}))
+            left = _semantic_context(pair["control"].get("source_context", {}), train_until=key[2])
+            right = _semantic_context(
+                pair["challenger"].get("source_context", {}), train_until=key[2]
+            )
+            compatible &= left is not None and left == right
             if not compatible:
                 reasons.add("incompatible_comparison")
             supported = all(

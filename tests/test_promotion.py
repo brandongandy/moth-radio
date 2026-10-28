@@ -40,6 +40,7 @@ def evidence():
                     "evidence_snapshot_id": "fixture-snapshot",
                     "history_cutoff": cutoff,
                     "feedback_cutoff": cutoff,
+                    "history_window": {**fixture["context"]["history_window"], "end": cutoff},
                 },
                 stable_state_id="fixture-state",
                 artifact=fixture["artifacts"][name],
@@ -376,6 +377,7 @@ def test_runtime_missing_invalid_and_zero_control_never_pass(evidence, bad):
 def test_cost_exact_limits_and_signed_storage_savings(evidence):
     pair = evidence["comparison"]["pairs"][0]
     pair["challenger"]["runtime"]["total_seconds"] = 2
+    pair["challenger"]["runtime"]["variant_seconds"] = 1.9
     pair["challenger"]["storage"]["durable_bytes"] += 512 * 1048576
     assert decide(evidence).eligible
     pair["challenger"]["storage"]["durable_bytes"] += 1
@@ -383,6 +385,7 @@ def test_cost_exact_limits_and_signed_storage_savings(evidence):
     pair["challenger"]["storage"]["durable_bytes"] = 0
     assert decide(evidence).eligible
     pair["challenger"]["runtime"]["total_seconds"] = 2.0000001
+    pair["challenger"]["runtime"]["variant_seconds"] = 1.9000001
     assert "runtime_limit_exceeded" in decide(evidence).reasons
 
 
@@ -485,6 +488,23 @@ def test_disabled_catalog_and_unchanged_acquisition_need_explicit_applicability(
 
 
 def test_each_artist_target_requires_matching_blinded_evidence_and_no_row_regression(evidence):
+    relationship = dict(
+        state="unheard",
+        play_count=0,
+        recency_weighted_play_count=0,
+        unique_tracks=0,
+        unique_releases=0,
+        active_days=0,
+        active_months=0,
+        first_listen=None,
+        last_listen=None,
+        listening_span_days=0,
+        recent_trend=0,
+        replay_concentration=0,
+        positive_feedback=0,
+        negative_feedback=0,
+        prior_recommendation_exposures=0,
+    )
     comparison = evidence["comparison"]
     comparison["evaluation_task"] = "artist"
     comparison["target_artist_ids"] = [7, 8]
@@ -496,15 +516,18 @@ def test_each_artist_target_requires_matching_blinded_evidence_and_no_row_regres
             pair[name]["result"].update(evaluation_task="artist", target_artist_id=target)
             pair[name]["source_context"] = deepcopy(pair[name]["source_context"])
             pair[name]["source_context"].update(query_kind="artist", target_artist_id=target)
+            pair[name]["source_context"]["target_relationship"] = deepcopy(relationship)
         for row in pair["ablations"]:
             row.update(evaluation_task="artist", target_artist_id=target)
             row["metrics"]["result"].update(evaluation_task="artist", target_artist_id=target)
             row["metrics"]["source_context"].update(query_kind="artist", target_artist_id=target)
+            row["metrics"]["source_context"]["target_relationship"] = deepcopy(relationship)
     experiment = evidence["blinded_experiments"][0]
     experiment["task"] = "artist"
     experiment["definition"]["target_artist_id"] = 7
     for context in experiment["definition"]["source_contexts"].values():
         context.update(query_kind="artist", target_artist_id=7)
+        context["target_relationship"] = deepcopy(relationship)
     assert "missing_blinded_evidence" in decide(evidence).reasons
     second = deepcopy(experiment)
     second["experiment_id"] = "second-target"
@@ -526,6 +549,8 @@ def test_nonfinite_runtime_ratio_remains_finite_error_report(evidence):
     row = evidence["comparison"]["pairs"][0]
     row["control"]["runtime"]["total_seconds"] = 5e-324
     row["challenger"]["runtime"]["total_seconds"] = 1e308
+    row["control"]["runtime"].update(variant_seconds=5e-324, shared_capture_seconds=0)
+    row["challenger"]["runtime"].update(variant_seconds=1e308, shared_capture_seconds=0)
     decision = decide(evidence)
     assert "invalid_evidence" in decision.reasons
     assert decision.metrics["pairs"][0]["runtime_ratio"] is None
@@ -556,6 +581,7 @@ def test_duplicate_measured_replays_do_not_conflict_only_because_of_run_ids_or_t
     for name in ("control", "challenger"):
         pair[name]["run_id"] += "-second-measurement"
         pair[name]["runtime"]["total_seconds"] += 0.01
+        pair[name]["runtime"]["variant_seconds"] += 0.01
     evidence["comparison"]["pairs"].append(pair)
     decision = decide(evidence)
     assert decision.eligible
@@ -750,3 +776,170 @@ def test_only_comparable_ablation_guards_can_explain_a_catalog_diversity_gain(
         assert not decision.eligible
         assert "incomplete_ablations" in decision.reasons
         assert "unexplained_ablation_gain" in decision.reasons
+
+
+@pytest.mark.parametrize("scope", ["pair", "ablation"])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("variant_seconds", None),
+        ("variant_seconds", -1),
+        ("variant_seconds", 1000),
+        ("variant_seconds", float("nan")),
+        ("variant_seconds", float("inf")),
+        ("shared_capture_seconds", None),
+        ("shared_capture_seconds", -1),
+        ("total_seconds", 100),
+        ("total_seconds", 0.1),
+    ],
+)
+def test_runtime_components_must_be_complete_finite_and_consistent(evidence, scope, field, value):
+    pair = evidence["comparison"]["pairs"][0]
+    variant = pair["challenger"] if scope == "pair" else pair["ablations"][0]["metrics"]
+    if value is None:
+        variant["runtime"].pop(field)
+    else:
+        variant["runtime"][field] = value
+    decision = decide(evidence)
+    assert not decision.eligible
+    assert (
+        "missing_runtime_evidence" if scope == "pair" else "incomplete_ablations"
+    ) in decision.reasons
+    if scope == "pair":
+        assert decision.metrics["pairs"][0]["runtime_ratio"] is None
+
+
+def test_runtime_accounting_roundoff_never_relaxes_the_actual_cost_limit(evidence):
+    pair = evidence["comparison"]["pairs"][0]
+    pair["challenger"]["runtime"].update(total_seconds=2, variant_seconds=1.9)
+    assert decide(evidence).eligible
+    # The declared total differs by one ordinary ULP; components exceed the strict 2x limit.
+    pair["challenger"]["runtime"]["variant_seconds"] = 2.0000000000000004 - 0.1
+    decision = decide(evidence)
+    assert "runtime_limit_exceeded" in decision.reasons
+    assert "missing_runtime_evidence" not in decision.reasons
+
+
+def test_runtime_accepts_ordinary_component_sum_roundoff(evidence):
+    pair = evidence["comparison"]["pairs"][0]
+    pair["control"]["runtime"].update(total_seconds=0.3, variant_seconds=0.2)
+    pair["challenger"]["runtime"].update(total_seconds=0.6, variant_seconds=0.5)
+    assert decide(evidence).eligible
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "future_cutoffs",
+        "missing_history_cutoff",
+        "missing_feedback_cutoff",
+        "missing_history_window",
+        "missing_evidence_freshness",
+        "missing_taste_region_seeds",
+        "null_history_cutoff",
+        "malformed_cutoff",
+        "numeric_cutoff",
+        "future_window_end",
+        "old_window_end",
+        "missing_window_start",
+        "malformed_window_start",
+        "reversed_window",
+        "stripped_context",
+    ],
+)
+def test_retrospective_contexts_must_be_complete_and_bound_to_the_training_cutoff(
+    evidence, mutation
+):
+    for pair in evidence["comparison"]["pairs"]:
+        variants = [
+            pair["control"],
+            pair["challenger"],
+            *(row["metrics"] for row in pair["ablations"]),
+        ]
+        for variant in variants:
+            context = variant["source_context"]
+            if mutation == "future_cutoffs":
+                context.update(
+                    history_cutoff="2099-01-01T00:00:00Z", feedback_cutoff="2099-01-01T00:00:00Z"
+                )
+            elif mutation.startswith("missing_window"):
+                context["history_window"].pop("start")
+            elif mutation.startswith("missing_"):
+                context.pop(mutation.removeprefix("missing_"))
+            elif mutation == "null_history_cutoff":
+                context["history_cutoff"] = None
+            elif mutation == "malformed_cutoff":
+                context["feedback_cutoff"] = "tomorrow"
+            elif mutation == "numeric_cutoff":
+                context["feedback_cutoff"] = 0
+            elif mutation == "future_window_end":
+                context["history_window"]["end"] = "2099-01-01"
+            elif mutation == "old_window_end":
+                context["history_window"]["end"] = "2023-12-01"
+            elif mutation == "malformed_window_start":
+                context["history_window"]["start"] = "not-a-date"
+            elif mutation == "reversed_window":
+                context["history_window"]["start"] = "2099-01-01"
+            else:
+                for key in (
+                    "history_cutoff",
+                    "feedback_cutoff",
+                    "history_window",
+                    "evidence_freshness",
+                    "taste_region_seeds",
+                ):
+                    context.pop(key)
+    decision = decide(evidence)
+    assert not decision.eligible
+    assert "incompatible_comparison" in decision.reasons
+    assert "incomplete_ablations" in decision.reasons
+    assert decision.metrics["distinct_supported_cutoffs"] == 0
+
+
+def test_context_timestamp_spelling_normalizes_and_prospective_cutoffs_stay_independent(evidence):
+    from datetime import UTC, timezone
+
+    for pair in evidence["comparison"]["pairs"]:
+        contexts = [
+            pair["control"]["source_context"],
+            *(row["metrics"]["source_context"] for row in pair["ablations"]),
+        ]
+        for context in contexts:
+            for key in ("history_cutoff", "feedback_cutoff"):
+                context[key] = (
+                    datetime.fromisoformat(context[key])
+                    .replace(tzinfo=UTC)
+                    .astimezone(timezone(timedelta(hours=5)))
+                    .isoformat()
+                )
+            for key in ("start", "end"):
+                context["history_window"][key] = (
+                    datetime.fromisoformat(context["history_window"][key])
+                    .replace(tzinfo=UTC)
+                    .astimezone(timezone(timedelta(hours=-7)))
+                    .isoformat()
+                )
+    for context in evidence["blinded_experiments"][0]["definition"]["source_contexts"].values():
+        context.update(
+            history_cutoff="2026-01-01",
+            feedback_cutoff="2026-01-01",
+            history_window={"start": "2025-01-01", "end": "2026-01-01"},
+        )
+    assert decide(evidence).eligible
+
+
+def test_prospective_blinded_contexts_need_complete_bounds_without_a_retrospective_binding(
+    evidence,
+):
+    for context in evidence["blinded_experiments"][0]["definition"]["source_contexts"].values():
+        context.pop("history_cutoff", None)
+    assert "incompatible_blinded_evidence" in decide(evidence).reasons
+
+
+def test_ablation_context_cannot_move_beyond_an_otherwise_valid_replay_cutoff(evidence):
+    context = evidence["comparison"]["pairs"][0]["ablations"][0]["metrics"]["source_context"]
+    context.update(history_cutoff="2099-01-01", feedback_cutoff="2099-01-01")
+    decision = decide(evidence)
+    assert "incomplete_ablations" in decision.reasons
+    assert "incompatible_comparison" not in decision.reasons
+    assert decision.metrics["distinct_supported_cutoffs"] == 3

@@ -712,3 +712,11 @@ challenger. The fix-round entry records the current behavior.
   Self-review confirmed public/private separation, persisted replay and source freezing, strict
   listening bounds, replacement/partial semantics, transaction rollback and cutoff-relative
   exposure fallback. Frozen control fixtures and default-off/non-promotion behavior are unchanged.
+
+- Task 9 fix round 1: validate nullable recorded timestamp shapes before canonicalization and reject
+  populated relationship fields with invalid types, nonfinite/negative measurements, invalid counts,
+  replay concentration, chronology, source/version, flags or threshold shapes. Added matching-invalid
+  provenance cases that preserve existing history in all four tables, plus one complete migration
+  preservation/unique-key test covering historical runs and slates. Focused experiment verification:
+  **131 passed**; lint, formatting and source type checks passed. The earlier verification-command
+  documentation finding remains deferred to final review as instructed.

@@ -79,13 +79,63 @@ def _id(value: str) -> str:
         raise ValueError("invalid local identifier") from exc
 
 
+def _recorded_timestamp(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("recorded timestamps must be ISO strings or null")
+    return normalize_timestamp(datetime.fromisoformat(value))
+
+
+def _validate_relationship(value: dict[str, Any]) -> None:
+    snapshot = TargetRelationshipSnapshot(**value)
+    if snapshot.state not in ("unheard", "sampled", "established_favorite", "dormant_favorite"):
+        raise ValueError("invalid target relationship state")
+    for name in (
+        "play_count",
+        "unique_tracks",
+        "unique_releases",
+        "active_days",
+        "active_months",
+        "listening_span_days",
+        "prior_recommendation_exposures",
+    ):
+        count = getattr(snapshot, name)
+        if type(count) is not int or count < 0:
+            raise ValueError("relationship counts must be nonnegative integers")
+    for name in (
+        "recency_weighted_play_count",
+        "recent_trend",
+        "replay_concentration",
+        "positive_feedback",
+        "negative_feedback",
+    ):
+        number = getattr(snapshot, name)
+        if type(number) not in (int, float) or number < 0 or not isfinite(number):
+            raise ValueError("relationship measurements must be finite and nonnegative")
+    if snapshot.replay_concentration > 1:
+        raise ValueError("replay concentration must not exceed one")
+    first, last = (_recorded_timestamp(value.get(name)) for name in ("first_listen", "last_listen"))
+    if first is not None and last is not None and first > last:
+        raise ValueError("first listen must not follow last listen")
+    if type(snapshot.low_depth_sample) is not bool:
+        raise ValueError("low_depth_sample must be boolean")
+    if snapshot.exposure_source not in ("run_appearance", "recorded_exposure"):
+        raise ValueError("invalid relationship exposure source")
+    if (
+        not isinstance(snapshot.relationship_version, str)
+        or not snapshot.relationship_version.strip()
+    ):
+        raise ValueError("relationship version must be a nonempty string")
+    if not isinstance(snapshot.thresholds, dict) or any(
+        not isinstance(key, str) or not key or type(threshold) is not int or threshold < 0
+        for key, threshold in snapshot.thresholds.items()
+    ):
+        raise ValueError("relationship thresholds must map names to nonnegative integers")
+
+
 def _canonical(value: Any, key: str = "") -> Any:
-    if isinstance(value, dict):
-        return {k: _canonical(v, k) for k, v in sorted(value.items())}
-    if isinstance(value, list):
-        values = [_canonical(v) for v in value]
-        return sorted(values, key=_json) if key in ("taste_region_seeds", "regions") else values
-    if value is not None and key in (
+    if key in (
         "start",
         "end",
         "history_cutoff",
@@ -94,7 +144,13 @@ def _canonical(value: Any, key: str = "") -> Any:
         "first_listen",
         "last_listen",
     ):
-        return normalize_timestamp(datetime.fromisoformat(value)).isoformat()
+        timestamp = _recorded_timestamp(value)
+        return timestamp.isoformat() if timestamp is not None else None
+    if isinstance(value, dict):
+        return {k: _canonical(v, k) for k, v in sorted(value.items())}
+    if isinstance(value, list):
+        values = [_canonical(v) for v in value]
+        return sorted(values, key=_json) if key in ("taste_region_seeds", "regions") else values
     return value
 
 
@@ -131,14 +187,7 @@ def _run(conn: DuckDBPyConnection, run_id: str) -> dict[str, Any]:
         if context["query_kind"] == "artist":
             if not isinstance(context.get("target_relationship"), dict):
                 raise ValueError("missing target relationship")
-            relationship = TargetRelationshipSnapshot(**context["target_relationship"])
-            if relationship.state not in (
-                "unheard",
-                "sampled",
-                "established_favorite",
-                "dormant_favorite",
-            ):
-                raise ValueError("invalid target relationship state")
+            _validate_relationship(context["target_relationship"])
             semantic["target_relationship"] = context["target_relationship"]
         elif context.get("target_relationship") is not None:
             raise ValueError("general context cannot carry a target relationship")
@@ -146,6 +195,8 @@ def _run(conn: DuckDBPyConnection, run_id: str) -> dict[str, Any]:
         ListeningWindow(
             datetime.fromisoformat(window["start"]), datetime.fromisoformat(window["end"])
         )
+        for name in ("history_cutoff", "feedback_cutoff"):
+            _recorded_timestamp(context[name])
         if context["novelty_intent"] not in ("discover", "mixed", "rediscover"):
             raise ValueError("invalid novelty intent")
         if not isinstance(context["mode"], str) or not context["mode"]:
@@ -177,9 +228,10 @@ def _run(conn: DuckDBPyConnection, run_id: str) -> dict[str, Any]:
                 or "latest_at" not in value
             ):
                 raise ValueError("invalid evidence freshness")
+            _recorded_timestamp(value["latest_at"])
         canonical = _canonical(semantic)
         _json(context)
-    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError) as exc:
         raise ValueError("invalid or missing recorded query provenance") from exc
     return {
         "context": context,

@@ -96,6 +96,52 @@ def test_promotion_report_freezes_source_artifacts_and_effective_completion(expe
     assert incomplete.list_choices["denominator"] == 0
 
 
+def test_historical_experiment_guards_do_not_backfill_current_catalog_identity_or_queue(
+    experiment_db,
+):
+    from scrobble_recs.models.experiments import experiment_report
+
+    conn, _ = experiment_db
+    seed_runs(conn)
+    experiment = create(conn)
+    original = experiment_report(conn, experiment, outcome_cutoff=datetime(2025, 1, 1))
+    definition_bytes = conn.execute(
+        "SELECT definition::VARCHAR FROM recommendation_experiment WHERE experiment_id = ?",
+        [experiment],
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE artist SET resolution_status = 'resolved_musicbrainz', identity_confidence = 1"
+    )
+    conn.execute(
+        "INSERT INTO artist_tag (artist_id, tag, source, normalized_weight, fetched_at) "
+        "SELECT artist_id, 'current-catalog', 'lastfm', 1, '2026-01-01' FROM artist"
+    )
+    conn.execute(
+        "INSERT INTO tag_top_artist (artist_id, tag, source, tag_rank, fetched_at) "
+        "SELECT artist_id, 'current-catalog', 'lastfm', 1, '2026-01-01' FROM artist"
+    )
+    conn.execute(
+        "INSERT INTO enrichment_queue (queue_id, source, endpoint, entity_type, entity_id, "
+        "status, attempts, last_attempt_at) "
+        "VALUES (uuid(), 'musicbrainz', 'artist', 'artist', 1, 'failed', 3, '2026-01-01')"
+    )
+    updated = experiment_report(conn, experiment, outcome_cutoff=datetime(2025, 1, 1))
+    assert updated.guardrail_deltas == original.guardrail_deltas
+    assert updated.definition == original.definition
+    assert (
+        conn.execute(
+            "SELECT definition::VARCHAR FROM recommendation_experiment WHERE experiment_id = ?",
+            [experiment],
+        ).fetchone()[0]
+        == definition_bytes
+    )
+    assert updated.guardrail_deltas["popularity"]["value"] is None
+    assert (
+        conn.execute("SELECT count(*) FROM enrichment_queue WHERE status = 'failed'").fetchone()[0]
+        == 1
+    )
+
+
 def state(conn):
     return [
         conn.execute(f"SELECT * FROM {table} ORDER BY ALL").fetchall()

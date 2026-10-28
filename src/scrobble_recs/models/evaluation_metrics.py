@@ -85,6 +85,7 @@ def metric_envelope(
         total_eligible_population=total,
         coverage=min(1.0, denominator / total) if total else 0.0,
         source=source,
+        population=source,
         basis="captured present local state; retrospective screening, noncausal",
         version="promotion-guardrails-v1",
         snapshot_id=snapshot,
@@ -152,11 +153,13 @@ def run_guardrails(
                 "captured replay identity-map resolution_status",
                 numerator=hits,
             )
+    novelty = _novelty_rate(conn, sorted(ids), cutoff) if ids else None
     result["novelty"] = metric(
-        _novelty_rate(conn, sorted(ids), cutoff) if ids else None,
+        novelty,
         len(ids),
         len(ids),
         "selected unique artists without pre-cutoff nonduplicate listening",
+        numerator=round(novelty * len(ids)) if novelty is not None else 0,
     )
     knownness = [float(row[2]) for row in selected if row[2] is not None]
     result["mean_one_minus_knownness"] = metric(

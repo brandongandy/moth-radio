@@ -860,3 +860,52 @@ challenger. The fix-round entry records the current behavior.
   missing artifact linkage or missing verified rollback. Logical export can add memory/runtime
   overhead on large local histories; recorded costs are operational observations, not a stability
   benchmark or a claim about physical disk allocation. No Task 12 training/lifecycle work was added.
+
+#### Task 11 fix round 1 — Adoption and promotion evidence validation
+
+- Corrected multi-day adoption's denominator to all distinct top-50 selected artists without
+  pre-cutoff listening, excluding the artist-query target. NDCG keeps its independent relevance
+  universe. The direct regression observed `(1, 1, 1.0)` before the fix and now reports
+  `(1, 2, 0.5)` with an unplayed discovery and an excluded known rediscovery. Two collected cases
+  exercise UTC December/January rollover and the same month in different years; both report two
+  active days and two distinct `(year, month)` pairs without inventing unplayed relevance.
+- Strengthened ablation validation against the complete measured variant: all required numeric,
+  source/family, graded, guardrail and cost sections; exact normalized removal/config, artifact,
+  generated-run ID, state, snapshot, task/target/window and semantic query linkage; truthful status;
+  exact set differences, rank/guardrail effects and deltas. Only a fully validated active removal
+  can explain gain. Shared removal normalization and status rules keep production reports and the
+  validator aligned. Scoped config copying preserves unrelated default order/values.
+- Deduplicate identical experiment identities before counting votes. Preflight experiment,
+  exposure and judgment ownership globally; conflicting records receive no aggregate credit and
+  invalidate evidence. The reproduced two-control/one-challenger loss remains a loss after an
+  identical winning report is repeated. Target vote groups remain independent.
+- Guardrail support validation now checks nonnegative integral supported/eligible counts,
+  coverage arithmetic, required ratio numerators/value, provider membership arithmetic and
+  population/namespace compatibility. Available partial evidence cannot claim full coverage.
+  Generated novelty includes its numerator; positive fixtures carry consistent support metadata.
+- Legacy/walk ListenBrainz provider/signal removals now execute fresh isolated variants through
+  the supported disable seam, including measured active/disabled/noncontributing cases. Unsupported
+  is reserved for genuinely unsupported combinations; the original database/config remains intact.
+  Added an explicit historical experiment regression that mutates current catalog charts/tags,
+  artist resolution and acquisition queue failures while frozen guards and definition bytes remain
+  unchanged. README documents the corrected evidence boundaries. No Task 12 work was added.
+- RED evidence: adoption reproduction **1 failed**; duplicate-winning/global-ownership regressions
+  **4 failed** (follow-up pre-aggregation credit assertions **3 failed**); contradictory support and
+  definition tests **6 failed**; legacy radio isolated-run assertion **1 failed**; stripped/mismatched
+  ablation regressions **18 failed, 1 passed** (unsupported was already rejected). The corresponding
+  GREEN runs passed before final verification. Real generated fusion manifests also pass the new
+  validator; that integration check caught and corrected unrelated default revalidation ordering.
+- Final focused command:
+  `PYTHONPATH=src ../../.venv/bin/python -m pytest tests/test_evaluate.py tests/test_compare.py tests/test_experiments.py tests/test_cli.py tests/test_graded_evaluation.py tests/test_evaluation_export.py tests/test_promotion.py -q`
+  — **394 passed in 32.54 seconds**. Final full command
+  `PYTHONPATH=src ../../.venv/bin/python -m pytest` — **1161 passed in 75.31 seconds**;
+  `PYTHONPATH=src ../../.venv/bin/python -m ruff check .` — **All checks passed**;
+  `PYTHONPATH=src ../../.venv/bin/python -m ruff format --check .` — **109 files already formatted**;
+  `PYTHONPATH=src ../../.venv/bin/python -m mypy src` — **no issues in 59 source files**;
+  `git diff --check` — passed. Commands used the repository-root virtualenv via its absolute local
+  interpreter path; relative spelling here avoids a committed machine-local path.
+- Self-review checked the five reviewer reproductions, all new rejection branches against a
+  consistent positive fixture, real generated manifest acceptance, inactive zero effects,
+  ownership preflight before vote aggregation, historical freeze behavior and unchanged scorer
+  defaults. No blocking concern remains from this review round; logical-export memory/runtime
+  limitations documented above remain unchanged.

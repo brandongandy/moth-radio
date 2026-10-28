@@ -784,7 +784,17 @@ def _graded_run_metrics(
     )
     top = set(slate[:50])
     repeated = {artist for artist in universe if counts.get(artist, (0, 0, 0))[0] >= 2}
-    selected_discovery = top & universe
+    previously_heard = {
+        int(row[0])
+        for row in conn.execute(
+            "SELECT DISTINCT a.artist_id FROM scrobble s JOIN artist a USING (artist_key) "
+            "WHERE NOT s.is_duplicate AND s.played_at < ?",
+            [train_until],
+        ).fetchall()
+    }
+    selected_discovery = top - previously_heard
+    if target_artist_id is not None:
+        selected_discovery.discard(target_artist_id)
 
     def rate(numerator: int, denominator: int, population: str) -> dict[str, Any]:
         return dict(
@@ -806,7 +816,7 @@ def _graded_run_metrics(
             "selected top-50 new-discovery artists",
         ),
         "one_great_find_rate_at_50": rate(
-            int(any(gains[artist] == 3 for artist in selected_discovery)),
+            int(any(gains.get(artist, 0) == 3 for artist in selected_discovery)),
             1,
             "evaluated query slates",
         ),

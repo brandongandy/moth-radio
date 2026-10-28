@@ -574,12 +574,15 @@ ListenBrainz and MusicBrainz removals plus direct similarity, walk, semantic, Li
 MusicBrainz and local-feedback signals. Fusion removals clear derived inputs and target features;
 local feedback removes optional positive preferences while retaining reject/hide/cooldown safety.
 Disabled/noncontributing sources disclose zero quality effect; unsupported active legacy ablations
-remain explicit and block eligibility. Set-difference candidate/future-hit counts are distinct from
+remain explicit and block eligibility. Legacy/walk ListenBrainz provider and signal removals use
+their supported isolated disable path and retain distinct measured runs. Set-difference
+candidate/future-hit counts are distinct from
 descriptive exclusive source membership. All-zero ablations cannot explain gain, and elapsed-time
 noise cannot supply that explanation.
 
 Guardrail envelopes include value/null, availability, support/coverage, definition/version, cutoff
-and snapshot. Missing is not zero. They cover candidate/selected identity, selected novelty and
+and snapshot. Support counts must agree with coverage and ratio arithmetic; compared population
+definitions and catalog namespaces must match. Missing is not zero. They cover candidate/selected identity, selected novelty and
 separate mean `1-knownness`, source-status staleness, external provider concentration (Last.fm
 aliases deduplicated; local feedback excluded), all four evidence families, top-20 persisted primary
 tag entropy and catalog relationship-type entropy. Catalog artists split weight across canonical
@@ -622,6 +625,10 @@ evidence. All frozen artists must be exposed and every exposure must have an eff
 list choice. Only list choice votes count: challenger choices must be at least control choices;
 an explicit tie counts, `none` abstains, null is unanswered. Preferred side, labels and best
 discovery never replace list choice. Reversed, unrelated or incompatible source artifacts fail.
+Identical repeated experiment reports contribute votes once; conflicting experiment, exposure or
+judgment ownership fails closed before aggregation. Ablation eligibility also requires complete
+underlying measured metrics/costs and the exact expected config removal, artifact, state, snapshot
+and query linkage; wrapper metadata or a single scalar cannot establish explanatory gain.
 
 `promotion-guardrails-v1` requires complete comparable evidence: novelty, diversity, family
 agreement and resolved identity cannot decrease; fatigue, ambiguity, staleness, failure rates,

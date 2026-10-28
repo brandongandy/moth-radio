@@ -217,8 +217,10 @@ class ScrobbleRecsTui(App[None]):
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         # Application actions include feedback/reranking and score detail. A judging
-        # screen owns its bindings; no parent action may mutate or reveal its source.
-        return False if isinstance(self.screen, ExperimentScreen) else True
+        # screen owns its bindings; retain framework focus traversal for its inputs.
+        return action in ("focus_next", "focus_previous") or not isinstance(
+            self.screen, ExperimentScreen
+        )
 
     def action_experiments(self) -> None:
         experiments = self.store.list_experiment_ids(self.run_id)

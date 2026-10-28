@@ -720,3 +720,9 @@ challenger. The fix-round entry records the current behavior.
   preservation/unique-key test covering historical runs and slates. Focused experiment verification:
   **131 passed**; lint, formatting and source type checks passed. The earlier verification-command
   documentation finding remains deferred to final review as instructed.
+
+- Task 9 fix round 2: allow Textual's next/previous focus actions in the blinded screen while
+  preserving the existing block on other application actions. A real keyboard regression test
+  traverses confidence/note inputs with Tab and Shift+Tab, saves from the table, reopens the recorded
+  fields and advances; forbidden feedback/debug/run keys stay isolated. Focused TUI verification:
+  **25 passed**; changed-file lint/format and source type checks passed. Deferred Minors remain.

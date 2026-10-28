@@ -17,6 +17,39 @@ from scrobble_recs.models.recommend import generate_recommendations
 _FIXTURE_HISTORY_WINDOW = ListeningWindow(datetime(2023, 1, 1), datetime(2025, 1, 1))
 
 
+@pytest.mark.parametrize("present", [False, True])
+def test_export_start_here_snapshot_optional_jsonl_and_literal_csv(tmp_path, present):
+    conn, run_id = _prepared_run(tmp_path)
+    item = {
+        "kind": "recording",
+        "title": 'A, "literal" [bold]\r\n雪',
+        "musicbrainz_id": "10000000-0000-4000-8000-000000000001",
+        "source": "listenbrainz",
+        "reason": "Radio, with confirmed credit",
+        "evidence": {"policy_version": "start-here-v1", "retained": [1, 2]},
+    }
+    if present:
+        conn.execute("UPDATE recommendation SET start_here = ?::JSON", [json.dumps(item)])
+    output = tmp_path / "recording.jsonl"
+    export_recommendations(conn, output, format_name="jsonl", run_id=run_id)
+    assert len(output.read_text().splitlines()) == 1
+    row = json.loads(output.read_text())
+    assert row["artist"] == "Bauhaus"
+    if present:
+        assert row["start_here"] == item
+        for key in ("kind", "title", "musicbrainz_id", "source", "reason"):
+            assert row["start_here_" + key] == item[key]
+    else:
+        assert not any(key.startswith("start_here") for key in row)
+    output = tmp_path / "recording.csv"
+    export_recommendations(conn, output, format_name="csv", run_id=run_id)
+    with output.open(newline="") as stream:
+        row = next(csv.DictReader(stream))
+    for key in ("kind", "title", "musicbrainz_id", "source", "reason"):
+        assert row["start_here_" + key] == (item[key] if present else "")
+    conn.close()
+
+
 class ExportFakeLastFmClient:
     def get_similar_artists(self, artist: str, *, limit: int) -> list[LastFmSimilarArtist]:
         return [LastFmSimilarArtist("Bauhaus", None, 0.72)]

@@ -10,12 +10,14 @@ from datetime import UTC, datetime
 from typing import Protocol
 from uuid import uuid4
 
+import httpx
 from duckdb import DuckDBPyConnection
 
 from scrobble_recs.apis.cache import ApiCache, build_cache_key
 from scrobble_recs.apis.musicbrainz import (
     MusicBrainzArtistCatalog,
     MusicBrainzClient,
+    MusicBrainzRecording,
     catalog_params,
     valid_mbid,
 )
@@ -26,6 +28,7 @@ from scrobble_recs.models.evidence import (
     persist_evidence_observation,
 )
 from scrobble_recs.models.profile import select_seed_artists
+from scrobble_recs.models.representative import load_safe_artist_mbids, radio_recording_evidence
 from scrobble_recs.normalize.strings import normalize_key
 
 SOURCE = "musicbrainz"
@@ -34,6 +37,132 @@ ENDPOINT = "artist-catalog"
 
 class MusicBrainzCatalogClientProtocol(Protocol):
     def lookup_artist_catalog(self, mbid: str) -> MusicBrainzArtistCatalog | None: ...
+
+
+class MusicBrainzRecordingClientProtocol(Protocol):
+    def lookup_recording(self, mbid: str) -> MusicBrainzRecording | None: ...
+
+
+@dataclass(frozen=True)
+class MusicBrainzRecordingEnrichmentStats:
+    recordings_requested: int
+    recordings_successful: int
+    recordings_missing_or_failed: int
+
+
+def _recording_candidates(
+    conn: DuckDBPyConnection,
+    config: ScrobbleRecsConfig,
+) -> list[tuple[str, tuple[str, ...]]]:
+    seeds, _ = _seeds(conn, config)
+    identities = load_safe_artist_mbids(conn)
+    observations: dict[int, list[EvidenceObservation]] = {}
+    for stored in conn.execute(
+        "SELECT source_artist_id, target_artist_id, provider_mode, fetched_at, "
+        "identity_confidence, evidence FROM artist_evidence_observation "
+        "WHERE source = 'listenbrainz' AND family = 'collaborative' "
+        "AND relationship_kind = 'artist_radio_membership'"
+    ).fetchall():
+        source, target, mode, fetched, confidence, payload = stored
+        if source not in seeds or target not in identities:
+            continue
+        try:
+            data = json.loads(payload)
+            if (
+                not isinstance(data, dict)
+                or valid_mbid(data.get("seed_artist_mbid")) != seeds[source]
+            ):
+                continue
+            observation = EvidenceObservation(
+                "listenbrainz",
+                "collaborative",
+                "artist_radio_membership",
+                source,
+                target,
+                None,
+                None,
+                mode,
+                fetched,
+                confidence,
+                data,
+            )
+        except (ValueError, TypeError):
+            continue
+        observations.setdefault(target, []).append(observation)
+    # Collapse historical observations before applying per-seed and global artist caps.
+    choices = {}
+    for target, rows in observations.items():
+        recordings = radio_recording_evidence(identities[target], rows)
+        if recordings:
+            choices[target] = recordings
+    support: dict[int, dict[int, datetime]] = {}
+    for target in choices:
+        for row in observations[target]:
+            if not radio_recording_evidence(identities[target], [row]):
+                continue
+            assert row.source_artist_id is not None and row.fetched_at is not None
+            by_seed = support.setdefault(target, {})
+            previous = by_seed.get(row.source_artist_id, row.fetched_at)
+            by_seed[row.source_artist_id] = max(previous, row.fetched_at)
+    order = sorted(choices, key=lambda target: identities[target])
+    order.sort(key=lambda target: max(support[target].values()), reverse=True)
+    per_seed_limit = min(
+        config.apis.listenbrainz.max_similar_artists, config.enrichment.candidate_artist_limit
+    )
+    retained: set[int] = set()
+    for seed in seeds:
+        supporting = [target for target in order if seed in support[target]]
+        supporting.sort(key=lambda target: identities[target])
+        supporting.sort(key=lambda target: support[target][seed], reverse=True)
+        retained.update(supporting[:per_seed_limit])
+    global_limit = min(config.enrichment.candidate_artist_limit, config.enrichment.queue_batch_size)
+    return [
+        (
+            identities[target],
+            tuple(
+                row.recording_mbid
+                for row in choices[target][: config.apis.listenbrainz.max_recordings_per_artist]
+            ),
+        )
+        for target in order
+        if target in retained
+    ][:global_limit]
+
+
+def run_musicbrainz_recording_enrichment(
+    conn: DuckDBPyConnection,
+    config: ScrobbleRecsConfig,
+    *,
+    client: MusicBrainzRecordingClientProtocol | None = None,
+) -> MusicBrainzRecordingEnrichmentStats:
+    """Explicit, bounded pass; committed recording cache rows make retries resumable."""
+    if not config.apis.musicbrainz.enabled:
+        return MusicBrainzRecordingEnrichmentStats(0, 0, 0)
+    identifiers = list(
+        dict.fromkeys(
+            mbid for _, recordings in _recording_candidates(conn, config) for mbid in recordings
+        )
+    )
+    if not identifiers:
+        return MusicBrainzRecordingEnrichmentStats(0, 0, 0)
+    resolved = client or MusicBrainzClient(config=config.apis.musicbrainz, cache=ApiCache(conn))
+    successful = 0
+    try:
+        for mbid in identifiers:
+            try:
+                recording = resolved.lookup_recording(mbid)
+                successful += int(recording is not None and valid_mbid(recording.mbid) == mbid)
+            except (RuntimeError, ValueError, httpx.HTTPError):
+                continue
+    finally:
+        if client is None:
+            assert isinstance(resolved, MusicBrainzClient)
+            resolved.close()
+    return MusicBrainzRecordingEnrichmentStats(
+        len(identifiers),
+        successful,
+        len(identifiers) - successful,
+    )
 
 
 @dataclass(frozen=True)

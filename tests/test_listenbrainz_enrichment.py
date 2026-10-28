@@ -78,6 +78,25 @@ class FakeClient:
         return self.groups
 
 
+def test_listenbrainz_does_not_implicitly_acquire_musicbrainz_recordings(staged, monkeypatch):
+    from scrobble_recs.apis.musicbrainz import MusicBrainzClient
+
+    conn, config = staged
+    config.apis.musicbrainz.enabled = True
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("implicit MusicBrainz lookup during ListenBrainz enrichment")
+
+    monkeypatch.setattr(MusicBrainzClient, "__init__", forbidden)
+    monkeypatch.setattr(MusicBrainzClient, "lookup_recording", forbidden)
+    stats = run_listenbrainz_enrichment(conn, config, client=FakeClient())
+    assert stats.observations_written == 1
+    assert (
+        conn.execute("SELECT count(*) FROM api_cache WHERE source = 'musicbrainz'").fetchone()[0]
+        == 0
+    )
+
+
 def test_only_resolved_high_confidence_seeds_and_unranked_provenance(staged):
     conn, config = staged
     client = FakeClient()

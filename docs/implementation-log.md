@@ -726,3 +726,57 @@ challenger. The fix-round entry records the current behavior.
   traverses confidence/note inputs with Tab and Shift+Tab, saves from the table, reopens the recorded
   fields and advances; forbidden feedback/debug/run keys stay isolated. Focused TUI verification:
   **25 passed**; changed-file lint/format and source type checks passed. Deferred Minors remain.
+
+### Task 10 — Optional provenance-backed start-here recordings (2026-10-28)
+
+- Added strict cache-first MusicBrainz recording lookup and a shared pure parser. Validate
+  requested/returned UUIDs, literal nonblank titles, every artist credit, canonical deduplicated
+  credits and deterministic optional releases. Failed refreshes preserve validated stale successes.
+  An additive `ApiCache.get_success_entry` reuses the existing entry model to distinguish a cached
+  JSON-null payload from an absent row; existing legacy cache request paths are unchanged.
+- Added an explicit MusicBrainz recording pass after independent catalog acquisition. It consumes
+  persisted ListenBrainz memberships, uses existing seed/per-seed/global candidate/recording limits,
+  deduplicates shared recording IDs, isolates per-recording provider failures and reports coverage.
+  Cache commits survive interruption and fresh successes avoid HTTP on resume. MusicBrainz remains
+  disabled by default; ListenBrainz enrichment does not construct a MusicBrainz client.
+- Added deterministic pure selection using newest eligible radio evidence, strict recorded request
+  popularity provenance, nonnegative integer count preference and canonical recording-ID ties.
+  Conflicting newest counts or contradictory metadata discard the affected recording. Conflicting
+  artist identity makes the whole attachment unsafe. Multiple valid artist credits are supported.
+  There is no MusicBrainz-only fallback or CSV-title inference.
+- Added replay-safe migration 019 with nullable `recommendation.start_here` JSON. Attachment occurs
+  after artist selection in the existing atomic run transaction, with scoped candidate observations,
+  cutoff-aware local cache reads, current provider identity/confidence/warning checks and canonical
+  local MBID uniqueness. Full dual provenance includes original radio facts, normalized recording
+  metadata, exact cache keys/parameters, sorted-JSON SHA-256 hashes and fetch/expiry timestamps.
+- JSONL exports structured and five flattened optional fields; CSV always includes the five columns.
+  TUI details display only persisted present items using literal Rich Text. Historical SQL NULL rows
+  stay absent, and cache refresh/deletion, identity changes and ordinary feedback reranking preserve
+  existing snapshots. Artist admission, score, rank and feedback identity are unchanged.
+- RED/GREEN evidence: the adapter tests initially failed 16 times for missing recording interfaces,
+  then passed with 29 tests; selector tests initially failed 32 times for the missing selector, then
+  adapter/selector passed 61 tests; acquisition tests failed for the absent pass/CLI routing, then
+  passed 51 acquisition/selector tests; persistence tests failed 13 times for the missing result
+  field, then passed 23 tests; export/TUI tests failed four times for missing presentation, then
+  passed after integration. Additional RED cases exposed lost second-seed support after provenance
+  deduplication and HTTP on malformed fresh JSON-null cache; both have focused GREEN regressions.
+- Final focused command (interpreter is the repository root virtualenv; relative spelling avoids
+  committing user-specific filesystem paths):
+  `PYTHONPATH=src ../../.venv/bin/python -m pytest tests/test_musicbrainz.py tests/test_representative.py tests/test_musicbrainz_enrichment.py tests/test_listenbrainz_enrichment.py tests/test_recommendation_store.py tests/test_export.py tests/test_tui_data.py tests/test_tui_app.py -q`
+  — **184 passed** in **19.62 seconds**. Tests include real offline generation with a present item
+  and all HTTP/provider constructors/lookups forbidden, literal export round trips and headless TUI
+  browsing, snapshot/rerank preservation, caps/dedup/resume and transaction rollback coverage.
+- Initial full command `PYTHONPATH=src ../../.venv/bin/python -m pytest` reported **998 passed,
+  1 failed** in **55.02 seconds**. The sole failure was
+  `test_recommendation_migration_creates_run_and_result_tables`, whose exact schema inventory omitted
+  the new nullable JSON column. Updated that expectation; its focused command together with the
+  present-item headless TUI regression passed **2 tests** in **0.68 seconds**.
+- Final verification: `PYTHONPATH=src ../../.venv/bin/python -m pytest` — **999 passed** in
+  **55.20 seconds**, with no failures or warnings;
+  `PYTHONPATH=src ../../.venv/bin/python -m ruff check .` — **All checks passed**;
+  `PYTHONPATH=src ../../.venv/bin/python -m ruff format --check .` — **101 files already formatted**;
+  `PYTHONPATH=src ../../.venv/bin/python -m mypy src` — **no issues in 54 source files**;
+  `git diff --check` — passed. Actual executions used the same repository-root virtualenv via its
+  absolute interpreter path. Self-review confirmed bounded acquisition outside evidence/result
+  transactions, strict dual identity/provenance checks, snapshot-only display, historical NULL
+  compatibility, unchanged scoring/admission modules and no Task 11–12 implementation.

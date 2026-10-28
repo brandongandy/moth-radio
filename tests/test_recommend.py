@@ -180,6 +180,7 @@ def test_recommendation_migration_creates_run_and_result_tables(tmp_path: Path) 
             "identity_confidence": "DOUBLE",
             "identity_warnings": "VARCHAR",
             "hop_distance": "INTEGER",
+            "start_here": "JSON",
         }
 
         conn.execute(

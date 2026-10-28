@@ -13,6 +13,275 @@ TARGET = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 OTHER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 
+def _recording_membership(
+    conn, target=6, mbid=TARGET, *, source=1, records=None, day=1, key="radio"
+):
+    from dataclasses import replace
+    from datetime import datetime
+
+    from test_representative import radio
+
+    from scrobble_recs.models.evidence import persist_evidence_observation
+
+    conn.execute(
+        "INSERT INTO artist (artist_id, canonical_name, artist_key, musicbrainz_artist_mbid, "
+        "resolution_status, identity_confidence, identity_warnings) SELECT ?, ?, ?, ?, "
+        "'external_listenbrainz', .9, '[]' WHERE NOT EXISTS "
+        "(SELECT 1 FROM artist WHERE artist_id = ?)",
+        [target, f"Candidate {target}", f"candidate{target}", mbid, target],
+    )
+    source_mbid = conn.execute(
+        "SELECT musicbrainz_artist_mbid FROM artist WHERE artist_id = ?", [source]
+    ).fetchone()[0]
+    row = replace(
+        radio(
+            artist_mbid=mbid,
+            seed_artist_mbid=source_mbid,
+            recordings=records,
+            fetched=datetime(2026, 1, day),
+        ),
+        source_artist_id=source,
+        target_artist_id=target,
+    )
+    persist_evidence_observation(conn, row, observation_key=key)
+
+
+def test_recording_acquisition_uses_persisted_candidates_global_caps_and_dedup(staged):
+    from test_representative import REC, REC2, metadata
+
+    conn, config = staged
+    config.enrichment.candidate_artist_limit = config.enrichment.queue_batch_size = 2
+    config.apis.listenbrainz.max_recordings_per_artist = 2
+    records = [
+        {"recording_mbid": REC, "total_listen_count": 100},
+        {"recording_mbid": REC2, "total_listen_count": 50},
+        {"recording_mbid": "10000000-0000-4000-8000-000000000003", "total_listen_count": 1},
+    ]
+    _recording_membership(conn, records=records)
+    _recording_membership(conn, target=7, mbid=OTHER, records=records, key="other")
+    _recording_membership(conn, key="old", records=records)
+    _recording_membership(
+        conn, target=8, mbid="88888888-8888-4888-8888-888888888888", key="excluded"
+    )
+
+    class RecordingClient:
+        def lookup_recording(self, mbid):
+            assert mbid in (REC, REC2), "lookup escaped selected candidate/recording limits"
+            return metadata(mbid)
+
+    before = conn.execute("SELECT * FROM artist_evidence_observation").fetchall()
+    stats = module().run_musicbrainz_recording_enrichment(conn, config, client=RecordingClient())
+    assert (
+        stats.recordings_requested,
+        stats.recordings_successful,
+        stats.recordings_missing_or_failed,
+    ) == (2, 2, 0)
+    assert conn.execute("SELECT * FROM artist_evidence_observation").fetchall() == before
+    assert conn.execute("SELECT count(*) FROM enrichment_queue").fetchone()[0] == 0
+
+
+def test_recording_acquisition_newest_candidate_and_individual_failure(staged):
+    from test_representative import REC, REC2, metadata
+
+    conn, config = staged
+    config.enrichment.queue_batch_size = 1
+    _recording_membership(conn)
+    _recording_membership(
+        conn,
+        target=7,
+        mbid=OTHER,
+        day=2,
+        key="newest",
+        records=[
+            {"recording_mbid": REC2, "total_listen_count": 10},
+            {"recording_mbid": REC, "total_listen_count": 1},
+        ],
+    )
+
+    class Partial:
+        def lookup_recording(self, mbid):
+            if mbid == REC2:
+                raise RuntimeError("provider unavailable")
+            return metadata(mbid)
+
+    stats = module().run_musicbrainz_recording_enrichment(conn, config, client=Partial())
+    assert (
+        stats.recordings_requested,
+        stats.recordings_successful,
+        stats.recordings_missing_or_failed,
+    ) == (2, 1, 1)
+    config.apis.musicbrainz.enabled = False
+    assert module().run_musicbrainz_recording_enrichment(conn, config).recordings_requested == 0
+
+
+def test_cli_musicbrainz_acquires_recordings_after_handled_catalog_failure(staged, monkeypatch):
+    from test_representative import REC, metadata
+
+    from scrobble_recs import cli
+
+    conn, config = staged
+    _recording_membership(conn)
+    acquired = []
+
+    class SharedClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def lookup_artist_catalog(self, mbid):
+            return None
+
+        def lookup_recording(self, mbid):
+            acquired.append(mbid)
+            return metadata(mbid)
+
+        def close(self):
+            pass
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("MusicBrainz enrichment requested ListenBrainz")
+
+    monkeypatch.setattr(cli, "MusicBrainzClient", SharedClient)
+    monkeypatch.setattr("scrobble_recs.apis.listenbrainz.ListenBrainzClient", forbidden)
+    cli._run_musicbrainz_enrichment(conn, config)
+    assert acquired == [REC]
+    assert (
+        conn.execute("SELECT status FROM enrichment_queue WHERE source = 'musicbrainz'").fetchone()[
+            0
+        ]
+        == "failed"
+    )
+    assert conn.execute("SELECT count(*) FROM artist_evidence_observation").fetchone()[0] == 1
+
+
+def test_recording_acquisition_interruption_resumes_from_committed_fresh_cache(staged):
+    from datetime import datetime
+    from pathlib import Path
+
+    import httpx
+    from test_representative import REC, REC2
+
+    from scrobble_recs.apis.cache import ApiCache
+    from scrobble_recs.apis.musicbrainz import MusicBrainzClient
+    from scrobble_recs.apis.rate_limit import RateLimiter
+
+    conn, config = staged
+    _recording_membership(
+        conn,
+        records=[
+            {"recording_mbid": REC, "total_listen_count": 100},
+            {"recording_mbid": REC2, "total_listen_count": 50},
+        ],
+    )
+    calls = []
+    interrupted = False
+    raw = json.loads(Path("tests/fixtures/musicbrainz_recording.json").read_text())
+
+    def handler(request):
+        nonlocal interrupted
+        mbid = request.url.path.rsplit("/", 1)[1]
+        calls.append(mbid)
+        if mbid == REC2 and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+        return httpx.Response(200, json=dict(raw, id=mbid))
+
+    before = conn.execute("SELECT * FROM artist_evidence_observation").fetchall()
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        client = MusicBrainzClient(
+            config=config.apis.musicbrainz,
+            cache=ApiCache(conn),
+            http_client=http,
+            rate_limiter=RateLimiter(999, sleep=lambda _: None),
+            now=lambda: datetime(2026, 1, 2),
+        )
+        with pytest.raises(KeyboardInterrupt):
+            module().run_musicbrainz_recording_enrichment(conn, config, client=client)
+        assert conn.execute("SELECT count(*) FROM api_cache").fetchone()[0] == 1
+        stats = module().run_musicbrainz_recording_enrichment(conn, config, client=client)
+        assert stats.recordings_successful == 2
+        module().run_musicbrainz_recording_enrichment(conn, config, client=client)
+    assert calls == [REC, REC2, REC2]
+    assert conn.execute("SELECT * FROM artist_evidence_observation").fetchall() == before
+
+
+def test_recording_acquisition_caps_candidates_globally_across_seeds(staged):
+    from test_representative import REC, REC2, metadata
+
+    conn, config = staged
+    conn.execute("DELETE FROM artist_listening_fact WHERE artist_id != 1")
+    conn.execute(
+        "INSERT INTO artist (artist_id, canonical_name, artist_key, musicbrainz_artist_mbid, "
+        "resolution_status, identity_confidence, identity_warnings) VALUES "
+        "(10, 'Seed Ten', 'seed ten', '99999999-9999-4999-8999-999999999999', "
+        "'resolved_musicbrainz', .95, '[]')"
+    )
+    conn.execute(
+        "INSERT INTO artist_listening_fact (artist_id, play_count, recent_weight, lifetime_weight) "
+        "VALUES (10, 10, 1, 1)"
+    )
+    config.enrichment.seed_artist_limit = 2
+    config.enrichment.candidate_artist_limit = 1
+    _recording_membership(conn, records=[{"recording_mbid": REC, "total_listen_count": 100}])
+    _recording_membership(
+        conn,
+        source=10,
+        target=7,
+        mbid=OTHER,
+        key="new",
+        day=2,
+        records=[{"recording_mbid": REC2, "total_listen_count": 1}],
+    )
+
+    class OnlyNewest:
+        def lookup_recording(self, mbid):
+            assert mbid == REC2
+            return metadata(mbid)
+
+    stats = module().run_musicbrainz_recording_enrichment(conn, config, client=OnlyNewest())
+    assert stats.recordings_requested == 1
+
+
+def test_recording_acquisition_preserves_seed_support_before_provenance_dedup(staged):
+    from test_representative import REC, REC2, metadata
+
+    conn, config = staged
+    conn.execute("DELETE FROM artist_listening_fact WHERE artist_id != 1")
+    conn.execute(
+        "INSERT INTO artist (artist_id, canonical_name, artist_key, musicbrainz_artist_mbid, "
+        "resolution_status, identity_confidence, identity_warnings) VALUES "
+        "(10, 'Seed Ten', 'seed ten', 'ffffffff-ffff-4fff-8fff-ffffffffffff', "
+        "'resolved_musicbrainz', .95, '[]')"
+    )
+    conn.execute(
+        "INSERT INTO artist_listening_fact (artist_id, play_count, recent_weight, lifetime_weight) "
+        "VALUES (10, 10, 1, 1)"
+    )
+    config.enrichment.seed_artist_limit = 2
+    config.enrichment.candidate_artist_limit = config.enrichment.queue_batch_size = 2
+    config.apis.listenbrainz.max_similar_artists = 1
+    _recording_membership(conn, source=1, key="first-support")
+    _recording_membership(conn, source=10, key="second-support")
+    _recording_membership(
+        conn,
+        source=1,
+        target=7,
+        mbid=OTHER,
+        key="new",
+        day=2,
+        records=[{"recording_mbid": REC2, "total_listen_count": 1}],
+    )
+    acquired = []
+
+    class RecordingClient:
+        def lookup_recording(self, mbid):
+            acquired.append(mbid)
+            return metadata(mbid)
+
+    stats = module().run_musicbrainz_recording_enrichment(conn, config, client=RecordingClient())
+    assert stats.recordings_requested == 2
+    assert acquired == [REC2, REC]
+
+
 @pytest.fixture
 def staged(tmp_path):
     path = tmp_path / "config.json"

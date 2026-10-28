@@ -1125,12 +1125,30 @@ def test_tui_browses_persisted_catalog_run_with_raising_http_clients(tmp_path, m
             final_score=0.8,
             explanation={"summary": "Catalog: member of band.", "catalog": evidence},
         )
+        item = {
+            "kind": "recording",
+            "title": "Literal [bold] 雪",
+            "musicbrainz_id": "recording-id",
+            "source": "listenbrainz",
+            "reason": "Confirmed artist credit",
+            "evidence": {},
+        }
+        conn.execute("UPDATE recommendation SET start_here = ?::JSON", [json.dumps(item)])
 
         def raising(*args, **kwargs):
             raise AssertionError("TUI constructed HTTP client")
 
         monkeypatch.setattr(httpx, "Client", raising)
         monkeypatch.setattr(httpx, "AsyncClient", raising)
+        from scrobble_recs.apis.lastfm import LastFmClient
+        from scrobble_recs.apis.listenbrainz import ListenBrainzClient
+        from scrobble_recs.apis.musicbrainz import MusicBrainzClient
+
+        for client in (LastFmClient, ListenBrainzClient, MusicBrainzClient):
+            monkeypatch.setattr(client, "__init__", raising)
+            for name in vars(client):
+                if name.startswith(("lookup_", "get_", "search_")):
+                    monkeypatch.setattr(client, name, raising)
 
         async def browse():
             app = ScrobbleRecsTui(conn)
@@ -1139,6 +1157,8 @@ def test_tui_browses_persisted_catalog_run_with_raising_http_clients(tmp_path, m
                 assert app.query_one("#recommendations", DataTable).row_count == 1
                 assert "Catalog Artist" in _rendered_plain(app, "#recommendations")
                 assert "member of band" in _rendered_plain(app, "#detail")
+                assert "Literal [bold] 雪" in _rendered_plain(app, "#detail")
+                assert "Confirmed artist credit" in _rendered_plain(app, "#detail")
                 await pilot.press("down", "up")
                 await pilot.pause()
                 assert "Catalog Artist" in _rendered_plain(app, "#recommendations")
@@ -1146,3 +1166,32 @@ def test_tui_browses_persisted_catalog_run_with_raising_http_clients(tmp_path, m
         asyncio.run(browse())
     finally:
         conn.close()
+
+
+def test_start_here_detail_preserves_literal_titles_and_historical_absence(tmp_path):
+    from test_export import _prepared_run
+
+    from scrobble_recs.tui.app import _detail_text
+    from scrobble_recs.tui.data import TuiRecommendationStore
+
+    conn, run_id = _prepared_run(tmp_path)
+    artist_id = conn.execute("SELECT artist_id FROM recommendation").fetchone()[0]
+    store = TuiRecommendationStore(conn)
+    assert "Start here" not in _detail_text(store.get_detail(run_id, artist_id=artist_id)).plain
+    item = {
+        "kind": "recording",
+        "title": 'A, "literal" [bold]\r\n雪',
+        "musicbrainz_id": "recording-id",
+        "source": "listenbrainz",
+        "reason": "Confirmed credit",
+        "evidence": {},
+    }
+    conn.execute("UPDATE recommendation SET start_here = ?::JSON", [json.dumps(item)])
+    text = _detail_text(store.get_detail(run_id, artist_id=artist_id))
+    # Rich Text removes carriage returns while preserving literal brackets and newlines.
+    assert item["title"].replace("\r", "") in text.plain
+    assert "listenbrainz" in text.plain
+    assert "Confirmed credit" in text.plain
+    assert text.plain.startswith("Bauhaus\nrank 1")
+    assert not text.spans
+    conn.close()

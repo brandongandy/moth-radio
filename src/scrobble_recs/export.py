@@ -19,6 +19,7 @@ _QUERY_PROVENANCE_FIELDS = (
 )
 
 ExportFormat = Literal["csv", "jsonl"]
+_START_HERE_FIELDS = ("kind", "title", "musicbrainz_id", "source", "reason")
 
 
 def export_recommendations(
@@ -110,7 +111,7 @@ def _load_rows(
             r.musicbrainz_url, r.identity_confidence,
             r.identity_warnings, r.lastfm_similarity_score,
             r.tag_similarity_score, r.feedback_score,
-            r.canonical_artist_name, r.explanation
+            r.canonical_artist_name, r.explanation, r.start_here
         FROM recommendation r
         JOIN artist a ON a.artist_id = r.artist_id
         WHERE r.run_id = ? {filter_clause}
@@ -149,6 +150,7 @@ def _load_rows(
             feedback_sc,
             canonical_name,
             explanation_json,
+            start_here_json,
         ) = row
         explanation = _as_mapping(explanation_json)
         quality = _as_mapping(explanation.get("quality_gate"))
@@ -219,6 +221,12 @@ def _load_rows(
                 "explanation": explanation,
             }
         )
+        if start_here_json is not None:
+            item = _as_mapping(start_here_json)
+            result[-1]["start_here"] = item
+            result[-1].update(
+                {f"start_here_{key}": item.get(key, "") for key in _START_HERE_FIELDS}
+            )
     return result
 
 
@@ -267,12 +275,13 @@ def _write_csv(output_path: Path, rows: list[dict[str, object]]) -> None:
         "serendipity_cohesion",
         "serendipity_bridge",
         *_QUERY_PROVENANCE_FIELDS,
+        *(f"start_here_{key}" for key in _START_HERE_FIELDS),
     ]
     with output_path.open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
-            writer.writerow({field: row[field] for field in fieldnames})
+            writer.writerow({field: row.get(field, "") for field in fieldnames})
 
 
 def _write_jsonl(output_path: Path, rows: list[dict[str, object]]) -> None:

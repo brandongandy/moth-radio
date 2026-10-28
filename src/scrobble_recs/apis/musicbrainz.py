@@ -16,6 +16,56 @@ _SOURCE = "musicbrainz"
 
 
 @dataclass(frozen=True)
+class MusicBrainzRecording:
+    mbid: str
+    title: str
+    artist_mbids: tuple[str, ...]
+    release_mbid: str | None
+    release_title: str | None
+
+
+def recording_params() -> JsonObject:
+    return {"inc": "artist-credits+releases", "fmt": "json"}
+
+
+def parse_recording(data: object, mbid: str) -> MusicBrainzRecording | None:
+    """Validate identity and every credit; preserve literal provider titles."""
+    identifier = valid_mbid(mbid)
+    if not identifier or not isinstance(data, dict) or valid_mbid(data.get("id")) != identifier:
+        return None
+    title, credits = data.get("title"), data.get("artist-credit")
+    if not isinstance(title, str) or not title.strip() or not isinstance(credits, list):
+        return None
+    artists = set()
+    for credit in credits:
+        if isinstance(credit, str):
+            continue
+        if not isinstance(credit, dict) or not isinstance(credit.get("artist"), dict):
+            return None
+        artist = valid_mbid(credit["artist"].get("id"))
+        if not artist:
+            return None
+        artists.add(artist)
+    if not artists:
+        return None
+    releases = data.get("releases", [])
+    if not isinstance(releases, list):
+        return None
+    titles: dict[str, set[str]] = {}
+    for release in releases:
+        if not isinstance(release, dict):
+            continue
+        release_id, release_title = valid_mbid(release.get("id")), release.get("title")
+        if release_id and isinstance(release_title, str) and release_title.strip():
+            titles.setdefault(release_id, set()).add(release_title)
+    pairs = sorted((key, next(iter(values))) for key, values in titles.items() if len(values) == 1)
+    release_id, release_title = pairs[0] if pairs else (None, None)
+    return MusicBrainzRecording(
+        identifier, title, tuple(sorted(artists)), release_id, release_title
+    )
+
+
+@dataclass(frozen=True)
 class MusicBrainzArtistMatch:
     mbid: str
     name: str
@@ -237,6 +287,41 @@ class MusicBrainzClient:
         except (httpx.HTTPError, ValueError):
             return fallback
         # Failed refreshes never replace the usable successful cache row.
+        self._cache.write_response(
+            source=_SOURCE,
+            endpoint=endpoint,
+            request_url=str(response.url),
+            request_params=params,
+            response_status=response.status_code,
+            response_json=data,
+            fetched_at=now,
+            expires_at=now + timedelta(days=self._config.cache_ttl_days),
+            error_message=None,
+        )
+        return parsed
+
+    def lookup_recording(self, mbid: str) -> MusicBrainzRecording | None:
+        identifier = valid_mbid(mbid)
+        if identifier is None:
+            return None
+        endpoint, params, now = f"recording/{identifier}", recording_params(), self._now()
+        cached = self._cache.get_success_entry(_SOURCE, endpoint, params)
+        fallback = parse_recording(cached.response_json, identifier) if cached else None
+        if cached is not None and cached.expires_at > now:
+            return fallback
+        self._rate_limiter.wait()
+        try:
+            response = self._http_client.get(
+                f"{self._config.base_url.rstrip('/')}/{endpoint}", params=params
+            )
+            if not response.is_success:
+                return fallback
+            data = response.json()
+            parsed = parse_recording(data, identifier)
+            if parsed is None:
+                return fallback
+        except (httpx.HTTPError, ValueError):
+            return fallback
         self._cache.write_response(
             source=_SOURCE,
             endpoint=endpoint,

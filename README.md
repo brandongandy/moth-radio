@@ -378,6 +378,55 @@ does not supply a positive default relevance score.
 Catalog facts and aliases are supplied by [MusicBrainz](https://musicbrainz.org/).
 Recommendation generation and TUI browsing consume persisted local data with no HTTP calls.
 
+### Attach an optional start-here recording
+
+An artist recommendation can include one ListenBrainz radio recording whose artist credit is
+independently confirmed by MusicBrainz. Enable MusicBrainz and ListenBrainz enrichment, and enable
+`apis.listenbrainz.candidate_generation_enabled` to use the persisted radio observations in runs.
+Run the explicit commands in this order after resolving seed identities:
+
+```bash
+scrobble-recs enrich --config ./config.json --source listenbrainz
+scrobble-recs enrich --config ./config.json --source musicbrainz
+scrobble-recs recommend --config ./config.json --limit 20
+```
+
+The MusicBrainz command acquires recording metadata after its independent catalog pass. It reads
+already persisted radio memberships and makes no ListenBrainz requests. The ListenBrainz command
+does not implicitly acquire MusicBrainz metadata. Recording requests use
+`recording/{mbid}?inc=artist-credits+releases&fmt=json`; no account, token or listening-history
+submission is needed. The recording summary reports requested, successful and missing/failed counts.
+
+Existing seed limits apply. Each seed contributes at most
+`min(listenbrainz.max_similar_artists, enrichment.candidate_artist_limit)` candidate artists; the
+whole pass retains at most `min(enrichment.candidate_artist_limit, enrichment.queue_batch_size)`.
+Each candidate contributes at most `listenbrainz.max_recordings_per_artist` recording IDs, and
+shared recording IDs are requested once. Fresh successful cache entries avoid HTTP. Interruptions
+retain committed entries for the next pass. Failed refreshes preserve validated stale successes
+without changing their fetch time or payload hash; expiration alone does not disqualify them.
+
+Selection prefers the largest nonnegative listen count within the recorded popularity request,
+with canonical recording MBID breaking ties. Popularity bounds are request percentiles, not listen
+count thresholds. The newest eligible observation supplies each recording's count; contradictory
+counts at the same newest time discard that recording. Conflicting artist identities or warnings,
+ambiguous current identity, duplicate local MBID claims, malformed metadata, or unconfirmed artist
+credits leave the optional item absent. Multiple valid MusicBrainz credits can include the artist.
+There is no CSV-title inference or MusicBrainz-only fallback, and attachment never changes artist
+admission, rank, score or feedback target.
+
+The run stores a nullable `start_here` JSON snapshot containing the literal title, reason and both
+providers' provenance. Payload hashes use SHA-256 over `json.dumps(raw_payload, sort_keys=True)`;
+recording cache provenance also includes its exact key, request parameters and fetch/expiry times.
+A run's evidence cutoff also applies to recording metadata. Generation, export and TUI display
+read local persisted data without constructing API clients. Later enrichment, cache deletion,
+identity changes and feedback reranking preserve an existing snapshot. Generate a new run to use
+new metadata; historical runs keep SQL NULL and are never backfilled.
+
+JSONL includes the structured item and matching `start_here_kind`, `start_here_title`,
+`start_here_musicbrainz_id`, `start_here_source` and `start_here_reason` fields only when present.
+CSV always includes those five columns, with empty cells for missing items. TUI detail shows the
+recording, source and reason only when a persisted item is present; artists remain the ranked rows.
+
 ### Export a persisted run
 
 ```bash

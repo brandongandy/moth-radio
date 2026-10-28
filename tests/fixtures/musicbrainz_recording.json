@@ -1,0 +1,14 @@
+{
+  "id": "10000000-0000-4000-8000-000000000001",
+  "title": "A, \"literal\" [recording]\r\n雪",
+  "artist-credit": [
+    {"artist": {"id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}, "joinphrase": " & "},
+    "with",
+    {"artist": {"id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"}},
+    {"artist": {"id": "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"}}
+  ],
+  "releases": [
+    {"id": "30000000-0000-4000-8000-000000000003", "title": "Later"},
+    {"id": "20000000-0000-4000-8000-000000000002", "title": "First"}
+  ]
+}

@@ -8,6 +8,30 @@ from scrobble_recs.db import initialize_database
 from scrobble_recs.tui.data import RecommendationFilters, TuiRecommendationStore
 
 
+def test_detail_reads_only_persisted_start_here_snapshot(tmp_path):
+    from test_export import _prepared_run
+
+    conn, run_id = _prepared_run(tmp_path)
+    store = TuiRecommendationStore(conn)
+    artist_id = conn.execute("SELECT artist_id FROM recommendation").fetchone()[0]
+    assert store.get_detail(run_id, artist_id=artist_id).start_here is None
+    item = {
+        "kind": "recording",
+        "title": "Literal [bold] 雪",
+        "musicbrainz_id": "recording-id",
+        "source": "listenbrainz",
+        "reason": "Confirmed artist credit",
+        "evidence": {},
+    }
+    conn.execute("UPDATE recommendation SET start_here = ?::JSON", [json.dumps(item)])
+    conn.execute("DELETE FROM api_cache")
+    detail = store.get_detail(run_id, artist_id=artist_id)
+    assert detail.start_here == item
+    assert detail.artist == "Bauhaus"
+    assert store.list_recommendations(run_id=run_id)[0].artist_id == artist_id
+    conn.close()
+
+
 def test_store_resumes_blinded_experiment_without_revealing_runs(tmp_path):
     from dataclasses import asdict
 

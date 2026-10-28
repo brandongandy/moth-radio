@@ -3,12 +3,245 @@ from datetime import datetime
 from pathlib import Path
 
 import httpx
+import pytest
 
 from scrobble_recs.apis.cache import ApiCache
 from scrobble_recs.apis.musicbrainz import MusicBrainzClient
 from scrobble_recs.apis.rate_limit import RateLimiter
 from scrobble_recs.config import MusicBrainzApiConfig, load_config
 from scrobble_recs.db import initialize_database
+
+
+def _recording_payload():
+    return json.loads(Path("tests/fixtures/musicbrainz_recording.json").read_text())
+
+
+def test_recording_lookup_caches_canonical_identity_and_exact_request(tmp_path):
+    payload = _recording_payload()
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json=payload)
+
+    conn = initialize_database(load_config(_config_path(tmp_path)))
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        client = MusicBrainzClient(
+            config=MusicBrainzApiConfig(enabled=True),
+            cache=ApiCache(conn),
+            http_client=http,
+            rate_limiter=RateLimiter(999, sleep=lambda _: None),
+            now=lambda: datetime(2026, 1, 1),
+        )
+        assert client.lookup_recording("invalid") is None
+        result = client.lookup_recording(payload["id"].upper())
+        assert result.title == 'A, "literal" [recording]\r\n雪'
+        assert result.artist_mbids == (
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        )
+        assert result.release_title == "First"
+        assert client.lookup_recording(payload["id"]) == result
+        assert len(calls) == 1
+        assert calls[0].url.path.endswith("/recording/" + payload["id"])
+        assert dict(calls[0].url.params) == {"inc": "artist-credits+releases", "fmt": "json"}
+        assert conn.execute("SELECT fetched_at FROM api_cache").fetchone()[0] == datetime(
+            2026, 1, 1
+        )
+        client.close()
+        assert not http.is_closed
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        [],
+        {},
+        {"id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"},
+        {"title": " "},
+        {"artist-credit": []},
+        {"artist-credit": [" & "]},
+        {"artist-credit": [{"artist": {"id": "bad"}}]},
+        {"artist-credit": [{"artist": {"id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}}, {}]},
+        {"releases": {}},
+    ],
+)
+def test_recording_rejects_malformed_contract(tmp_path, bad):
+    conn = initialize_database(load_config(_config_path(tmp_path)))
+    payload = _recording_payload()
+    data = dict(payload, **bad) if isinstance(bad, dict) and bad else bad
+    with httpx.Client(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=data))
+    ) as http:
+        client = MusicBrainzClient(
+            config=MusicBrainzApiConfig(enabled=True),
+            cache=ApiCache(conn),
+            http_client=http,
+            rate_limiter=RateLimiter(999, sleep=lambda _: None),
+        )
+        assert client.lookup_recording(payload["id"]) is None
+        assert conn.execute("SELECT count(*) FROM api_cache").fetchone()[0] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(404),
+        httpx.Response(429),
+        httpx.Response(503),
+        httpx.Response(200, content=b"not json"),
+        httpx.Response(200, json={}),
+    ],
+)
+def test_recording_failed_refresh_preserves_stale_success(tmp_path, response):
+    from scrobble_recs.apis.musicbrainz import recording_params
+
+    conn = initialize_database(load_config(_config_path(tmp_path)))
+    payload, cache = _recording_payload(), ApiCache(conn)
+    cache.write_response(
+        source="musicbrainz",
+        endpoint=f"recording/{payload['id']}",
+        request_url="https://example.test",
+        request_params=recording_params(),
+        response_status=200,
+        response_json=payload,
+        fetched_at=datetime(2020, 1, 1),
+        expires_at=datetime(2020, 2, 1),
+        error_message=None,
+    )
+    before = conn.execute("SELECT * FROM api_cache").fetchall()
+    with httpx.Client(transport=httpx.MockTransport(lambda _: response)) as http:
+        client = MusicBrainzClient(
+            config=MusicBrainzApiConfig(enabled=True),
+            cache=cache,
+            http_client=http,
+            rate_limiter=RateLimiter(999, sleep=lambda _: None),
+            now=lambda: datetime(2026, 1, 1),
+        )
+        assert client.lookup_recording(payload["id"]).title == payload["title"]
+    assert conn.execute("SELECT * FROM api_cache").fetchall() == before
+    conn.close()
+
+
+def test_recording_parser_deterministic_releases_and_missing_release():
+    from scrobble_recs.apis.musicbrainz import parse_recording
+
+    payload = _recording_payload()
+    releases = payload["releases"]
+    payload["releases"] = releases + [dict(releases[1], title="Contradiction"), {}, releases[0]]
+    result = parse_recording(payload, payload["id"])
+    assert result.release_title == "Later"
+    payload["releases"].reverse()
+    assert parse_recording(payload, payload["id"]) == result
+    del payload["releases"]
+    assert parse_recording(payload, payload["id"]).release_mbid is None
+
+
+@pytest.mark.parametrize("payload", [None, [], {}, {"title": "Malformed"}])
+def test_recording_malformed_fresh_success_never_requests_http(tmp_path, payload):
+    from scrobble_recs.apis.musicbrainz import recording_params
+
+    conn = initialize_database(load_config(_config_path(tmp_path)))
+    identifier = _recording_payload()["id"]
+    cache = ApiCache(conn)
+    cache.write_response(
+        source="musicbrainz",
+        endpoint=f"recording/{identifier}",
+        request_url="https://example.test",
+        request_params=recording_params(),
+        response_status=200,
+        response_json=payload,
+        fetched_at=datetime(2026, 1, 1),
+        expires_at=datetime(2026, 2, 1),
+        error_message=None,
+    )
+
+    def forbidden(request):
+        raise AssertionError("malformed fresh success triggered HTTP")
+
+    with httpx.Client(transport=httpx.MockTransport(forbidden)) as http:
+        client = MusicBrainzClient(
+            config=MusicBrainzApiConfig(enabled=True),
+            cache=cache,
+            http_client=http,
+            rate_limiter=RateLimiter(999, sleep=lambda _: None),
+            now=lambda: datetime(2026, 1, 2),
+        )
+        assert client.lookup_recording(identifier) is None
+    conn.close()
+
+
+def test_recording_valid_refresh_replaces_stale_but_wrong_stale_identity_is_not_fallback(tmp_path):
+    from scrobble_recs.apis.musicbrainz import recording_params
+
+    conn = initialize_database(load_config(_config_path(tmp_path)))
+    payload, cache = _recording_payload(), ApiCache(conn)
+    cache.write_response(
+        source="musicbrainz",
+        endpoint=f"recording/{payload['id']}",
+        request_url="https://example.test",
+        request_params=recording_params(),
+        response_status=200,
+        response_json=dict(payload, id="20000000-0000-4000-8000-000000000002"),
+        fetched_at=datetime(2020, 1, 1),
+        expires_at=datetime(2020, 2, 1),
+        error_message=None,
+    )
+    responses = [httpx.Response(404), httpx.Response(200, json=dict(payload, title="Refreshed"))]
+    with httpx.Client(transport=httpx.MockTransport(lambda _: responses.pop(0))) as http:
+        client = MusicBrainzClient(
+            config=MusicBrainzApiConfig(enabled=True),
+            cache=cache,
+            http_client=http,
+            rate_limiter=RateLimiter(999, sleep=lambda _: None),
+            now=lambda: datetime(2026, 1, 1),
+        )
+        assert client.lookup_recording(payload["id"]) is None
+        assert client.lookup_recording(payload["id"]).title == "Refreshed"
+    assert conn.execute("SELECT fetched_at FROM api_cache").fetchone()[0] == datetime(2026, 1, 1)
+    conn.close()
+
+
+def test_recording_cache_write_failure_propagates_and_keyboard_interrupt_is_not_swallowed(
+    tmp_path, monkeypatch
+):
+    import duckdb
+
+    conn = initialize_database(load_config(_config_path(tmp_path)))
+    cache, payload = ApiCache(conn), _recording_payload()
+
+    def fail_write(**kwargs):
+        raise duckdb.IOException("cache unavailable")
+
+    monkeypatch.setattr(cache, "write_response", fail_write)
+    with httpx.Client(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
+    ) as http:
+        client = MusicBrainzClient(
+            config=MusicBrainzApiConfig(enabled=True),
+            cache=cache,
+            http_client=http,
+            rate_limiter=RateLimiter(999, sleep=lambda _: None),
+        )
+        with pytest.raises(duckdb.IOException, match="cache unavailable"):
+            client.lookup_recording(payload["id"])
+    assert conn.execute("SELECT count(*) FROM api_cache").fetchone()[0] == 0
+
+    def interrupted(request):
+        raise KeyboardInterrupt
+
+    with httpx.Client(transport=httpx.MockTransport(interrupted)) as http:
+        client = MusicBrainzClient(
+            config=MusicBrainzApiConfig(enabled=True),
+            cache=cache,
+            http_client=http,
+            rate_limiter=RateLimiter(999, sleep=lambda _: None),
+        )
+        with pytest.raises(KeyboardInterrupt):
+            client.lookup_recording(payload["id"])
+    conn.close()
 
 
 def _config_path(tmp_path: Path) -> Path:

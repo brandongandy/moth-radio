@@ -190,6 +190,7 @@ def load_feedback_profile(
     conn: DuckDBPyConnection,
     *,
     as_of: datetime | None = None,
+    include_positive_preferences: bool = True,
 ) -> FeedbackProfile:
     """Load only feedback available at an optional historical cutoff."""
     profile = FeedbackProfile()
@@ -207,6 +208,13 @@ def load_feedback_profile(
     for artist_id_raw, action_raw, value_raw, context_raw in rows:
         artist_id = int(artist_id_raw)
         action = str(action_raw)
+        if not include_positive_preferences and action in {
+            "save",
+            "more_like_this",
+            "rediscovery_good",
+            "boost_tag",
+        }:
+            continue
         value = 1.0 if value_raw is None else float(value_raw)
         context = _parse_context(context_raw)
         for resolved_artist_id in _feedback_artist_ids(conn, artist_id, context):

@@ -54,6 +54,48 @@ def create(conn, seed=7):
     )
 
 
+def test_promotion_report_freezes_source_artifacts_and_effective_completion(experiment_db):
+    from scrobble_recs.models.experiments import (
+        experiment_report,
+        next_blinded_exposure,
+        record_judgment,
+    )
+
+    conn, config = experiment_db
+    seed_runs(conn)
+    for variant, run in (("control", CONTROL), ("challenger", CHALLENGER)):
+        conn.execute(
+            "UPDATE recommendation_run SET seed_summary = ? WHERE run_id = ?",
+            [
+                json.dumps(
+                    {
+                        "evaluation_artifact": {
+                            "artifact_id": variant,
+                            "behavior_config_fingerprint": variant,
+                        }
+                    }
+                ),
+                run,
+            ],
+        )
+    experiment = create(conn)
+    exposure = next_blinded_exposure(conn, experiment_id=experiment)
+    record_judgment(conn, exposure_id=exposure.exposure_id, list_choice="tie")
+    report = experiment_report(conn, experiment, outcome_cutoff=datetime(2030, 1, 1))
+    assert report.definition["source_artifacts"]["control"]["artifact_id"] == "control"
+    evidence = report.promotion_evidence
+    assert evidence["exposures"][0]["effective_list_choice"] == "tie"
+    assert evidence["exposures"][0]["judgment_id"]
+    assert set(evidence["exposed_artist_ids"]) == set(map(int, report.definition["artists"]))
+    # A stale stored completion timestamp cannot resurrect a replaced null list answer.
+    record_judgment(conn, exposure_id=exposure.exposure_id, labels={2: ["strong_fit"]})
+    conn.execute("UPDATE recommendation_exposure SET completed_at = current_timestamp")
+    incomplete = experiment_report(conn, experiment, outcome_cutoff=datetime(2030, 1, 1))
+    assert incomplete.exposure_counts["completed"] == 0
+    assert incomplete.promotion_evidence["exposures"][0]["effective_list_choice"] is None
+    assert incomplete.list_choices["denominator"] == 0
+
+
 def state(conn):
     return [
         conn.execute(f"SELECT * FROM {table} ORDER BY ALL").fetchall()

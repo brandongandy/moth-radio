@@ -322,6 +322,10 @@ def create_blinded_experiment(
         "attribution_policy": "first-exposure; shared-equal-fraction",
         "source_contexts": {"control": control["context"], "challenger": challenger["context"]},
         "source_run_ids": {"control": control_run_id, "challenger": challenger_run_id},
+        "source_artifacts": {
+            variant: _run_artifact(conn, run)
+            for variant, run in (("control", control_run_id), ("challenger", challenger_run_id))
+        },
         "target_artist_id": control["target_artist_id"],
     }
     experiment_id = str(uuid4())
@@ -356,12 +360,24 @@ def _metric(values: list[float], total: int, source: str) -> dict[str, Any]:
     }
 
 
+def _run_artifact(conn: DuckDBPyConnection, run_id: str) -> Any:
+    row = conn.execute(
+        "SELECT seed_summary FROM recommendation_run WHERE run_id = ?", [run_id]
+    ).fetchone()
+    assert row is not None
+    return json.loads(row[0] or "{}").get("evaluation_artifact")
+
+
 def _guardrails(
     conn: DuckDBPyConnection, run_id: str, rows: list[tuple[Any, ...]]
 ) -> dict[str, Any]:
     # Only facts persisted with selected recommendations; never mutable catalog estimates.
-    from scrobble_recs.models.compare import _primary_tag, _tag_entropy
-    from scrobble_recs.models.evaluate import _source_memberships
+    from scrobble_recs.models.evaluation_metrics import (
+        _primary_tag,
+        _source_memberships,
+        _tag_entropy,
+        provider_name,
+    )
 
     def values(index: int) -> list[float]:
         return [
@@ -383,14 +399,8 @@ def _guardrails(
     selected = {int(row[0]) for row in rows}
     providers: dict[str, set[int]] = {}
     for source, artists in _source_memberships(conn, run_id).items():
-        if source == "local_feedback":
-            continue
-        provider = (
-            "lastfm"
-            if source in ("lastfm", "lastfm_tag", "lastfm_similarity", "lastfm_walk", "semantic")
-            else source
-        )
-        providers.setdefault(provider, set()).update(artists & selected)
+        if provider := provider_name(source):
+            providers.setdefault(provider, set()).update(artists & selected)
     denominator = sum(len(artists) for artists in providers.values())
     concentration = _metric([], len(rows), "persisted candidate provider memberships, max share")
     if denominator:
@@ -642,6 +652,7 @@ class ExperimentReport:
     guardrail_deltas: dict[str, Any]
     assessment: str = "incomplete_guardrails; not_promoted"
     judgment_basis: str = "current effective snapshots; outcome_cutoff bounds listening only"
+    promotion_evidence: dict[str, Any] = field(default_factory=dict)
 
 
 def _shares(memberships: list[dict[str, Any]]) -> dict[str, float]:
@@ -715,6 +726,7 @@ def experiment_report(
     owners: set[int] = set()
     unique_shared = 0
     outcomes: list[list[Any]] = []
+    promotion_exposures = []
     for exposure_id, timestamp, shown_json, attribution_json, completed_at in rows:
         identity = str(exposure_id)
         attribution = json.loads(attribution_json)
@@ -722,6 +734,8 @@ def experiment_report(
         counts[
             "completed"
             if completed_at is not None
+            and judgment is not None
+            and judgment.list_choice is not None
             else "partial"
             if judgment is not None
             else "unjudged"
@@ -748,6 +762,22 @@ def experiment_report(
                         labels[label][variant] += share
         # Shown rows are counted once, even if imported/corrupted artifacts repeat positions.
         shown = {int(item["artist_id"]) for item in json.loads(shown_json)}
+        effective_record = conn.execute(
+            "SELECT judgment_id, created_at FROM recommendation_judgment WHERE exposure_id = ? "
+            "ORDER BY created_at DESC, judgment_id DESC LIMIT 1",
+            [exposure_id],
+        ).fetchone()
+        promotion_exposures.append(
+            {
+                "exposure_id": identity,
+                "shown_artist_ids": sorted(shown),
+                "effective_list_choice": judgment.list_choice if judgment else None,
+                "preferred_side": judgment.preferred_side if judgment else None,
+                "judgment_id": str(effective_record[0]) if effective_record else None,
+                "judged_at": effective_record[1].isoformat() if effective_record else None,
+                "completed_at": completed_at.isoformat() if completed_at is not None else None,
+            }
+        )
         for aid in sorted(shown):
             first, plays, days = None, 0, 0
             shares = _shares(attribution[str(aid)])
@@ -810,6 +840,7 @@ def experiment_report(
         raw_shared,
         downstream,
         deltas,
+        promotion_evidence={"exposures": promotion_exposures, "exposed_artist_ids": sorted(owners)},
     )
     conn.execute("BEGIN TRANSACTION")
     try:

@@ -6,8 +6,6 @@ knob (the scoring engine) changed, so the metrics are directly comparable.
 
 from __future__ import annotations
 
-import json
-import math
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from hashlib import sha256
@@ -15,19 +13,20 @@ from pathlib import Path
 from statistics import median
 from tempfile import TemporaryDirectory
 from time import perf_counter
-from typing import Any
 
 from duckdb import DuckDBPyConnection, connect
 
 from scrobble_recs.config import ScrobbleRecsConfig
-from scrobble_recs.models.evaluate import (
+from scrobble_recs.models.evaluation_metrics import (
     _first_listened_artist_ids,
-    _identity_coverage,
-    _ndcg_at_k,
-    _novelty_rate,
     _recall_at_k,
-    _source_memberships,
-    _tag_diversity_at_k,
+    run_quality_metrics,
+)
+from scrobble_recs.models.evaluation_metrics import (
+    _primary_tag as _primary_tag,
+)
+from scrobble_recs.models.evaluation_metrics import (
+    _tag_entropy as _tag_entropy,
 )
 from scrobble_recs.models.profile_window import normalize_timestamp, resolve_listening_window
 from scrobble_recs.models.recommend import generate_recommendations
@@ -35,7 +34,6 @@ from scrobble_recs.models.recommendation_query import (
     RecommendationRequest,
     capture_evidence_snapshot,
 )
-from scrobble_recs.models.retrieval import _load_seed_popularity
 
 
 @dataclass(frozen=True)
@@ -225,98 +223,6 @@ def _comparison_state_id(conn: DuckDBPyConnection) -> str:
     return digest.hexdigest()
 
 
-def run_quality_metrics(
-    conn: DuckDBPyConnection,
-    run_id: str,
-    test_artists: set[int],
-    *,
-    cutoff: datetime,
-) -> dict[str, Any]:
-    """Additional pool/eligible/slate metrics; older metric definitions stay intact."""
-    # These new coverage fields include tag/catalog/radio identities beyond the
-    # legacy graph denominator retained by catalog_coverage.
-    universe_row = conn.execute("SELECT count(*) FROM artist").fetchone()
-    assert universe_row is not None
-    universe_size = int(universe_row[0])
-    candidates = conn.execute(
-        "SELECT artist_id, eligibility_state, feature_record, evidence "
-        "FROM recommendation_candidate WHERE run_id = ?",
-        [run_id],
-    ).fetchall()
-    pool = {int(row[0]) for row in candidates}
-    eligible = {int(row[0]) for row in candidates if row[1] == "eligible"}
-    slate = [
-        int(row[0])
-        for row in conn.execute(
-            "SELECT artist_id FROM recommendation WHERE run_id = ? "
-            "AND score_band != 'candidate_only' ORDER BY rank",
-            [run_id],
-        ).fetchall()
-    ]
-    selected = set(slate)
-    memberships = _source_memberships(conn, run_id)
-    providers: dict[str, set[int]] = {}
-    for source, ids in memberships.items():
-        if source == "local_feedback":
-            continue
-        provider = (
-            "lastfm"
-            if source in ("lastfm", "lastfm_tag", "lastfm_similarity", "lastfm_walk", "semantic")
-            else source
-        )
-        providers.setdefault(provider, set()).update(ids)
-    provider_counts = [len(ids & selected) for ids in providers.values()]
-    denominator = sum(provider_counts)
-    families = []
-    for artist, _, features, evidence in candidates:
-        if artist in selected:
-            values = json.loads(features or "{}").get("values", {})
-            families.append(
-                values.get(
-                    "fusion_independent_family_count",
-                    len(
-                        {
-                            row["family"]
-                            for row in json.loads(evidence or "{}").get("observations", [])
-                        }
-                    ),
-                )
-            )
-    # Reuse the tag-chart rank-affinity popularity proxy at the same cutoff.
-    popularity = list(_load_seed_popularity(conn, selected, evidence_cutoff=cutoff).values())
-    resolved, ambiguous = _identity_coverage(conn, run_id)
-    slate_diversity = _tag_diversity_at_k(conn, run_id, 20, selected_only=True)
-    return dict(
-        pool_candidate_count=len(pool),
-        eligible_candidate_count=len(eligible),
-        pool_recall=len(pool & test_artists) / len(test_artists) if test_artists else 0.0,
-        eligible_recall=len(eligible & test_artists) / len(test_artists) if test_artists else 0.0,
-        pool_coverage=len(pool) / universe_size if universe_size else 0.0,
-        eligible_coverage=len(eligible) / universe_size if universe_size else 0.0,
-        slate_recall_at_50=_recall_at_k(test_artists, slate, 50),
-        ndcg_at_50=_ndcg_at_k(test_artists, slate, 50),
-        identity_resolved_rate=resolved,
-        identity_ambiguous_rate=ambiguous,
-        novelty_rate=_novelty_rate(conn, slate, cutoff),
-        tag_diversity_at_20=slate_diversity,
-        selected_slate_recall_at_50=_recall_at_k(test_artists, slate, 50),
-        selected_slate_ndcg_at_50=_ndcg_at_k(test_artists, slate, 50),
-        selected_slate_tag_diversity_at_20=_tag_diversity_at_k(
-            conn, run_id, 20, selected_only=True
-        ),
-        popularity_distribution={
-            "mean": sum(popularity) / len(popularity) if popularity else 0.0,
-            "median": float(median(popularity)) if popularity else 0.0,
-            "missing_share": 1 - len(popularity) / len(slate) if slate else 0.0,
-        },
-        provider_concentration=max(provider_counts, default=0) / denominator
-        if denominator
-        else 0.0,
-        multi_family_share=sum(n >= 2 for n in families) / len(families) if families else 0.0,
-        candidate_count_by_source={source: len(ids) for source, ids in memberships.items()},
-    )
-
-
 def _with_engine(config: ScrobbleRecsConfig, scorer: str) -> ScrobbleRecsConfig:
     if scorer not in ("legacy", "walk", "fusion"):
         raise ValueError(f"unknown scorer: {scorer}")
@@ -373,28 +279,3 @@ def _metrics_for_run(
         tag_entropy=_tag_entropy([tag for tag in primary_tags if tag is not None]),
         mean_hop_distance=(sum(hop_values) / len(hop_values)) if hop_values else None,
     )
-
-
-def _primary_tag(explanation_json: object) -> str | None:
-    if not isinstance(explanation_json, str | bytes | bytearray):
-        return None
-    try:
-        explanation = json.loads(explanation_json)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    tags = explanation.get("tags", []) if isinstance(explanation, dict) else []
-    if tags and isinstance(tags[0], dict):
-        tag = tags[0].get("tag")
-        if isinstance(tag, str) and tag:
-            return tag
-    return None
-
-
-def _tag_entropy(tags: list[str]) -> float:
-    if not tags:
-        return 0.0
-    counts: dict[str, int] = {}
-    for tag in tags:
-        counts[tag] = counts.get(tag, 0) + 1
-    total = len(tags)
-    return -sum((count / total) * math.log2(count / total) for count in counts.values())

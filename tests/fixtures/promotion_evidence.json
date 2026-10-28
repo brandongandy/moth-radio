@@ -1,0 +1,350 @@
+{
+  "artifacts": {
+    "control": {
+      "artifact_id": "fixture-control",
+      "scorer": "legacy",
+      "version": "legacy-v1",
+      "feature_schema_version": "fixture-features-v1",
+      "slate_policy_version": "fixture-slate-v1",
+      "content_fingerprint": "fixture-content-v1",
+      "behavior_config_fingerprint": "6e119b7f9f83e317e07a68ba91e1e34a2b38bf093450212a3a11d736f9e39549",
+      "behavior_config": {
+        "recommendation": {
+          "scoring": {
+            "engine": "legacy"
+          },
+          "catalog_evidence": {
+            "enabled": false
+          },
+          "fusion": {
+            "enabled": false,
+            "excluded_sources": []
+          }
+        },
+        "apis": {
+          "lastfm": {
+            "enabled": true
+          },
+          "listenbrainz": {
+            "enabled": false,
+            "candidate_generation_enabled": false
+          },
+          "musicbrainz": {
+            "enabled": false
+          }
+        },
+        "input": {
+          "timezone": "UTC"
+        }
+      },
+      "artifact_files": [
+        "fixture-ranker.py"
+      ],
+      "artifact_bytes": 100
+    },
+    "challenger": {
+      "artifact_id": "fixture-challenger",
+      "scorer": "fusion",
+      "version": "fusion-v1",
+      "feature_schema_version": "fixture-features-v1",
+      "slate_policy_version": "fixture-slate-v1",
+      "content_fingerprint": "fixture-content-v1",
+      "behavior_config_fingerprint": "801e6534ed12c7d428c5f1dcfca5bcaaebefacf04c86723641151888963d3f62",
+      "behavior_config": {
+        "recommendation": {
+          "scoring": {
+            "engine": "fusion"
+          },
+          "catalog_evidence": {
+            "enabled": false
+          },
+          "fusion": {
+            "enabled": true,
+            "excluded_sources": []
+          }
+        },
+        "apis": {
+          "lastfm": {
+            "enabled": true
+          },
+          "listenbrainz": {
+            "enabled": false,
+            "candidate_generation_enabled": false
+          },
+          "musicbrainz": {
+            "enabled": false
+          }
+        },
+        "input": {
+          "timezone": "UTC"
+        }
+      },
+      "artifact_files": [
+        "fixture-ranker.py"
+      ],
+      "artifact_bytes": 100
+    }
+  },
+  "metrics": {
+    "recall_at_50": 0.5,
+    "recall_at_100": 0.5,
+    "ndcg_at_50": 0.5,
+    "pool_recall": 0.5,
+    "eligible_recall": 0.5,
+    "pool_coverage": 0.5,
+    "eligible_coverage": 0.5,
+    "selected_slate_recall_at_50": 0.5,
+    "graded_ndcg_at_10": 0.5,
+    "graded_ndcg_at_25": 0.5,
+    "graded_ndcg_at_50": 0.5,
+    "graded_metrics": {
+      "ndcg_available": true,
+      "positive_relevance_count": 2
+    },
+    "guardrails": {
+      "novelty": {
+        "value": 0.5,
+        "available": true,
+        "availability": "available",
+        "numerator": 1,
+        "denominator": 2,
+        "total_eligible_population": 2,
+        "coverage": 1,
+        "source": "fixture immutable novelty",
+        "basis": "fixture bounded population",
+        "version": "promotion-guardrails-v1",
+        "snapshot_id": "fixture-snapshot",
+        "cutoff": "2024-01-01T00:00:00",
+        "reason": null
+      },
+      "tag_diversity": {
+        "value": 0.5,
+        "available": true,
+        "availability": "available",
+        "numerator": 1,
+        "denominator": 2,
+        "total_eligible_population": 2,
+        "coverage": 1,
+        "source": "fixture immutable tag_diversity",
+        "basis": "fixture bounded population",
+        "version": "promotion-guardrails-v1",
+        "snapshot_id": "fixture-snapshot",
+        "cutoff": "2024-01-01T00:00:00",
+        "reason": null
+      },
+      "catalog_diversity": {
+        "value": 0.5,
+        "available": true,
+        "availability": "available",
+        "numerator": 1,
+        "denominator": 2,
+        "total_eligible_population": 2,
+        "coverage": 1,
+        "source": "fixture immutable catalog_diversity",
+        "basis": "fixture bounded population",
+        "version": "promotion-guardrails-v1",
+        "snapshot_id": "fixture-snapshot",
+        "cutoff": "2024-01-01T00:00:00",
+        "reason": null
+      },
+      "family_agreement": {
+        "value": 0.5,
+        "available": true,
+        "availability": "available",
+        "numerator": 1,
+        "denominator": 2,
+        "total_eligible_population": 2,
+        "coverage": 1,
+        "source": "fixture immutable family_agreement",
+        "basis": "fixture bounded population",
+        "version": "promotion-guardrails-v1",
+        "snapshot_id": "fixture-snapshot",
+        "cutoff": "2024-01-01T00:00:00",
+        "reason": null
+      },
+      "fatigue": {
+        "value": 0.5,
+        "available": true,
+        "availability": "available",
+        "numerator": 1,
+        "denominator": 2,
+        "total_eligible_population": 2,
+        "coverage": 1,
+        "source": "fixture immutable fatigue",
+        "basis": "fixture bounded population",
+        "version": "promotion-guardrails-v1",
+        "snapshot_id": "fixture-snapshot",
+        "cutoff": "2024-01-01T00:00:00",
+        "reason": null
+      },
+      "stale_source_rate": {
+        "value": 0.5,
+        "available": true,
+        "availability": "available",
+        "numerator": 1,
+        "denominator": 2,
+        "total_eligible_population": 2,
+        "coverage": 1,
+        "source": "fixture immutable stale_source_rate",
+        "basis": "fixture bounded population",
+        "version": "promotion-guardrails-v1",
+        "snapshot_id": "fixture-snapshot",
+        "cutoff": "2024-01-01T00:00:00",
+        "reason": null
+      },
+      "provider_failure_rate": {
+        "value": 0.5,
+        "available": true,
+        "availability": "available",
+        "numerator": 1,
+        "denominator": 2,
+        "total_eligible_population": 2,
+        "coverage": 1,
+        "source": "fixture immutable provider_failure_rate",
+        "basis": "fixture bounded population",
+        "version": "promotion-guardrails-v1",
+        "snapshot_id": "fixture-snapshot",
+        "cutoff": "2024-01-01T00:00:00",
+        "reason": null
+      },
+      "identity_ambiguous_rate": {
+        "value": 0,
+        "available": true,
+        "availability": "available",
+        "numerator": 1,
+        "denominator": 2,
+        "total_eligible_population": 2,
+        "coverage": 1,
+        "source": "fixture immutable identity_ambiguous_rate",
+        "basis": "fixture bounded population",
+        "version": "promotion-guardrails-v1",
+        "snapshot_id": "fixture-snapshot",
+        "cutoff": "2024-01-01T00:00:00",
+        "reason": null
+      },
+      "identity_resolved_rate": {
+        "value": 1,
+        "available": true,
+        "availability": "available",
+        "numerator": 1,
+        "denominator": 2,
+        "total_eligible_population": 2,
+        "coverage": 1,
+        "source": "fixture immutable identity_resolved_rate",
+        "basis": "fixture bounded population",
+        "version": "promotion-guardrails-v1",
+        "snapshot_id": "fixture-snapshot",
+        "cutoff": "2024-01-01T00:00:00",
+        "reason": null
+      },
+      "provider_concentration": {
+        "value": 0.5,
+        "available": true,
+        "availability": "available",
+        "numerator": 1,
+        "denominator": 2,
+        "total_eligible_population": 2,
+        "coverage": 1,
+        "source": "fixture immutable provider_concentration",
+        "basis": "fixture bounded population",
+        "version": "promotion-guardrails-v1",
+        "snapshot_id": "fixture-snapshot",
+        "cutoff": "2024-01-01T00:00:00",
+        "reason": null
+      },
+      "popularity_q50": {
+        "value": 0.5,
+        "available": true,
+        "availability": "available",
+        "numerator": 1,
+        "denominator": 2,
+        "total_eligible_population": 2,
+        "coverage": 1,
+        "source": "fixture immutable popularity_q50",
+        "basis": "fixture bounded population",
+        "version": "promotion-guardrails-v1",
+        "snapshot_id": "fixture-snapshot",
+        "cutoff": "2024-01-01T00:00:00",
+        "reason": null
+      },
+      "popularity_q75": {
+        "value": 0.5,
+        "available": true,
+        "availability": "available",
+        "numerator": 1,
+        "denominator": 2,
+        "total_eligible_population": 2,
+        "coverage": 1,
+        "source": "fixture immutable popularity_q75",
+        "basis": "fixture bounded population",
+        "version": "promotion-guardrails-v1",
+        "snapshot_id": "fixture-snapshot",
+        "cutoff": "2024-01-01T00:00:00",
+        "reason": null
+      },
+      "popularity_q90": {
+        "value": 0.5,
+        "available": true,
+        "availability": "available",
+        "numerator": 1,
+        "denominator": 2,
+        "total_eligible_population": 2,
+        "coverage": 1,
+        "source": "fixture immutable popularity_q90",
+        "basis": "fixture bounded population",
+        "version": "promotion-guardrails-v1",
+        "snapshot_id": "fixture-snapshot",
+        "cutoff": "2024-01-01T00:00:00",
+        "reason": null
+      }
+    },
+    "evaluation_task": "general",
+    "evidence_snapshot_id": "fixture-snapshot"
+  },
+  "context": {
+    "query_kind": "general",
+    "target_artist_id": null,
+    "evidence_snapshot_id": "prospective-snapshot",
+    "history_window": {
+      "start": "2023-01-01",
+      "end": "2024-01-01"
+    },
+    "history_cutoff": "2024-01-01",
+    "feedback_cutoff": "2024-01-01",
+    "mode": "balanced",
+    "novelty_intent": "mixed",
+    "taste_region_seeds": [],
+    "evidence_freshness": {}
+  },
+  "guardrail_names": [
+    "novelty",
+    "tag_diversity",
+    "catalog_diversity",
+    "family_agreement",
+    "fatigue",
+    "stale_source_rate",
+    "provider_failure_rate",
+    "identity_ambiguous_rate",
+    "identity_resolved_rate",
+    "provider_concentration",
+    "popularity_q50",
+    "popularity_q75",
+    "popularity_q90"
+  ],
+  "ablations": [
+    "provider:lastfm",
+    "provider:listenbrainz",
+    "provider:musicbrainz",
+    "signal:lastfm_similarity",
+    "signal:lastfm_walk",
+    "signal:semantic",
+    "signal:listenbrainz",
+    "signal:musicbrainz",
+    "signal:local_feedback"
+  ],
+  "cutoffs": [
+    "2024-01-01T00:00:00",
+    "2024-02-01T00:00:00",
+    "2024-03-01T00:00:00"
+  ]
+}

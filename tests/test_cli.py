@@ -114,6 +114,39 @@ def write_config(tmp_path: Path) -> Path:
     return config_path
 
 
+def test_rolling_cli_exports_full_report_and_closes_database_on_export_error(tmp_path):
+    path = write_config(tmp_path)
+    output = tmp_path / "evaluation.json"
+    args = [
+        "evaluate-rolling",
+        "--config",
+        str(path),
+        "--cutoff",
+        "2024-01-01",
+        "--output-json",
+        str(output),
+    ]
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == 0, result.output
+    payload = json.loads(output.read_text())
+    assert payload["evaluation_task"] == "general"
+    assert payload["windows"][0]["evaluation_task"] == "general"
+    assert payload["windows"][0]["graded_ndcg_at_10"] == 0
+    assert payload["promotion"]["status"] == "unevaluated"
+    assert "Rolling evaluation" in result.output
+    config_before = path.read_bytes()
+    output.unlink()
+    output.mkdir()
+    failed = CliRunner().invoke(app, args)
+    assert failed.exit_code != 0
+    assert "export" in failed.output.lower()
+    assert path.read_bytes() == config_before
+    # A fresh connection after failure exercises the resource owner, not a mock close call.
+    conn = duckdb.connect(str(tmp_path / "scrobbles.duckdb"))
+    assert conn.execute("SELECT count(*) FROM recommendation_run").fetchone()[0] == 2
+    conn.close()
+
+
 def write_config_with_disabled_lastfm(tmp_path: Path) -> Path:
     config_path = tmp_path / "config.json"
     config_path.write_text(

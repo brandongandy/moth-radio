@@ -167,7 +167,14 @@ def generate_recommendations(
         subject=resolved_mode,
         status="processing",
     )
-    feedback_profile = load_feedback_profile(conn, as_of=historical_cutoff)
+    feedback_profile = load_feedback_profile(
+        conn,
+        as_of=historical_cutoff,
+        include_positive_preferences=not (
+            config.recommendation.scoring.engine == "fusion"
+            and "local_feedback" in config.recommendation.fusion.excluded_sources
+        ),
+    )
     seeds = select_seed_artists(
         conn,
         limit=config.recommendation.seed_artist_limit,

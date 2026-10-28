@@ -77,6 +77,7 @@ from scrobble_recs.models.recommend import (
 )
 from scrobble_recs.models.recommendation_query import RecommendationRequest
 from scrobble_recs.models.relationship import resolve_target_artist
+from scrobble_recs.models.report_json import export_report
 from scrobble_recs.tui.app import ScrobbleRecsTui
 
 app = typer.Typer(help="Local-first Last.fm recommendation tooling.")
@@ -1200,6 +1201,10 @@ def evaluate_rolling_command(
         int,
         typer.Option("--horizon-days", min=1, help="Outcome horizon in days after each cutoff."),
     ] = 90,
+    output_json: Annotated[
+        Path | None,
+        typer.Option("--output-json", help="Atomically export the full local evaluation report."),
+    ] = None,
 ) -> None:
     """Replay historical recommendation windows and report their mean quality."""
     if task not in ("general", "artist"):
@@ -1214,6 +1219,12 @@ def evaluate_rolling_command(
         report = evaluate_rolling_recommendations(
             conn, resolved_config, windows=windows, evaluation_task=cast(Any, task)
         )
+        if output_json is not None:
+            try:
+                export_report(output_json, report)
+            except (OSError, ValueError, TypeError) as exc:
+                console.print(f"[red]Evaluation JSON export failed: {escape(str(exc))}[/red]")
+                raise typer.Exit(code=1) from exc
     finally:
         conn.close()
 

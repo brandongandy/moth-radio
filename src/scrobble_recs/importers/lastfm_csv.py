@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -85,8 +86,9 @@ def import_lastfm_csv(
         try:
             _create_import_stage(conn, staging_csv)
             _create_warning_stage(conn, warning_csv)
-            next_artist_id = _next_id(conn, "artist", "artist_id")
             next_warning_id = _next_id(conn, "import_warning", "warning_id")
+            _bind_import_artist_keys(conn)
+            next_artist_id = _next_id(conn, "artist", "artist_id")
             _replace_import_tables(conn)
             _insert_raw_scrobbles(conn)
             _insert_scrobbles(conn)
@@ -94,7 +96,7 @@ def import_lastfm_csv(
             _insert_track_mbid_conflict_warnings(conn, next_warning_id)
             _insert_import_warnings(conn, next_warning_id)
             _insert_provisional_artists(conn, next_artist_id)
-            _update_identity_confidence(conn)
+            _update_identity_confidence(conn, first_artist_id=next_artist_id)
             _insert_provisional_tracks(conn)
             _rebuild_artist_listening_facts(conn)
         except Exception:
@@ -460,13 +462,97 @@ def _replace_import_tables(conn: DuckDBPyConnection) -> None:
         DELETE FROM artist_tag;
         DELETE FROM tag_top_artist;
         DELETE FROM artist_listening_fact;
-        DELETE FROM track;
-        DELETE FROM artist;
         DELETE FROM scrobble;
         DELETE FROM raw_scrobble;
         DELETE FROM import_warning;
         """
     )
+
+
+def _bind_import_artist_keys(conn: DuckDBPyConnection) -> None:
+    """Keep canonical IDs durable while replacing listening, never merging MBID hints.
+
+    A unique normalized name plus compatible hints can reuse a catalog key (including
+    provider-created keys). Conflicting imports get a stable quarantined key instead.
+    No historical artist, exposure, feedback or evidence row is rewritten.
+    """
+    artists = conn.execute(
+        "SELECT artist_id, canonical_name, artist_key, musicbrainz_artist_mbid, "
+        "resolution_status, identity_warnings FROM artist ORDER BY artist_id"
+    ).fetchall()
+    by_name: dict[str, list[tuple[Any, ...]]] = {}
+    by_mbid: dict[str, set[int]] = {}
+    for row in artists:
+        if row[4] == "provisional_import_conflict":
+            continue
+        by_name.setdefault(normalize_key(row[1]), []).append(row)
+        if row[3]:
+            by_mbid.setdefault(str(row[3]).lower(), set()).add(int(row[0]))
+    incoming = conn.execute(
+        f"SELECT artist_key, min(artist), "
+        "list_sort(list_distinct(list(NULLIF(lower(trim(artist_mbid)), '')))), "
+        f"min(import_row_number) FROM {_STAGING_TABLE} "
+        "WHERE artist_key <> '' AND NOT is_duplicate GROUP BY artist_key ORDER BY artist_key"
+    ).fetchall()
+    for key, name, hints, first_row in incoming:
+        matches = by_name.get(key, [])
+        claims = set().union(*(by_mbid.get(hint, set()) for hint in hints))
+        if not matches and not claims:
+            continue
+        compatible = False
+        if len(matches) == 1:
+            artist_id, _, local_key, mbid, status, warnings = matches[0]
+            ambiguous = any(
+                word in f"{status} {warnings}".lower()
+                for word in ("conflict", "ambiguous", "multiple")
+            )
+            compatible = (
+                len(hints) <= 1
+                and (not hints or not mbid or str(mbid).lower() == hints[0])
+                and claims <= {artist_id}
+                and (not mbid or by_mbid.get(str(mbid).lower(), set()) <= {artist_id})
+                and not ambiguous
+            ) or (status == "provisional_mbid_conflict" and len(hints) > 1 and not claims)
+        if compatible:
+            bound_key = local_key
+        else:
+            signature = json.dumps([key, hints], ensure_ascii=False, separators=(",", ":"))
+            bound_key = f"{key}::import-conflict:{hashlib.sha256(signature.encode()).hexdigest()}"
+            if not conn.execute(
+                "SELECT 1 FROM artist WHERE artist_key = ?", [bound_key]
+            ).fetchone():
+                conn.execute(
+                    "INSERT INTO artist (artist_id, canonical_name, artist_key, lastfm_name, "
+                    "resolution_status, resolution_confidence, "
+                    "identity_confidence, identity_warnings) "
+                    "VALUES (?, ?, ?, ?, 'provisional_import_conflict', 0, .4, ?)",
+                    [
+                        _next_id(conn, "artist", "artist_id"),
+                        name,
+                        bound_key,
+                        name,
+                        json.dumps(["import_identity_conflict"]),
+                    ],
+                )
+            conn.execute(
+                f"INSERT INTO {_WARNING_STAGE_TABLE} VALUES (?, 'import_identity_conflict', "
+                "'warning', 'CSV identity conflicts with the retained catalog; "
+                "listening quarantined', ?)",
+                [
+                    first_row,
+                    json.dumps(
+                        {
+                            "artist_key": key,
+                            "artist_mbids": hints,
+                            "local_artist_ids": sorted(claims | {r[0] for r in matches}),
+                            "bound_artist_key": bound_key,
+                        }
+                    ),
+                ],
+            )
+        conn.execute(
+            f"UPDATE {_STAGING_TABLE} SET artist_key = ? WHERE artist_key = ?", [bound_key, key]
+        )
 
 
 def _insert_import_warnings(conn: DuckDBPyConnection, first_warning_id: int) -> None:
@@ -737,13 +823,19 @@ def _insert_provisional_tracks(conn: DuckDBPyConnection) -> None:
           ON mbids.artist_key = titles.artist_key
          AND mbids.track_key = titles.track_key
         CROSS JOIN next_id
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM track existing
-            WHERE existing.artist_id = a.artist_id
-              AND existing.track_key = titles.track_key
-        )
+        ON CONFLICT (artist_id, track_key) DO UPDATE SET
+            canonical_title = excluded.canonical_title,
+            musicbrainz_recording_mbid = excluded.musicbrainz_recording_mbid,
+            lastfm_track_name = excluded.lastfm_track_name,
+            resolution_status = excluded.resolution_status,
+            resolution_confidence = excluded.resolution_confidence
         """
+    )
+    conn.execute(
+        "DELETE FROM track WHERE NOT EXISTS ("
+        "SELECT 1 FROM scrobble s JOIN artist a ON a.artist_key = s.artist_key "
+        "WHERE a.artist_id = track.artist_id AND s.track_key = track.track_key "
+        "AND NOT s.is_duplicate)"
     )
 
 
@@ -806,12 +898,13 @@ def _query_int(conn: DuckDBPyConnection, sql: str) -> int:
     return int(value or 0)
 
 
-def _update_identity_confidence(conn: DuckDBPyConnection) -> None:
+def _update_identity_confidence(conn: DuckDBPyConnection, *, first_artist_id: int) -> None:
     rows = conn.execute(
         """
         SELECT artist_id, canonical_name, musicbrainz_artist_mbid, resolution_status
-        FROM artist
-        """
+        FROM artist WHERE artist_id >= ?
+        """,
+        [first_artist_id],
     ).fetchall()
     for artist_id, canonical_name, mbid, resolution_status in rows:
         conf, warnings = compute_identity_confidence(

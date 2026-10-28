@@ -9,6 +9,33 @@ from scrobble_recs.db import initialize_database
 from scrobble_recs.tui.app import ScrobbleRecsTui
 
 
+def test_blinded_tui_preserves_literal_bracketed_artist_names(tmp_path):
+    from rich.text import Text
+    from test_experiments import create, seed_runs
+
+    conn = initialize_database(load_config(write_config(tmp_path)))
+    seed_runs(conn)
+    names = ["[bold]Literal Band[/bold]", "Literal [/band]"]
+    for artist_id, name in enumerate(names, 1):
+        conn.execute("UPDATE artist SET canonical_name = ? WHERE artist_id = ?", [name, artist_id])
+    create(conn)
+
+    async def exercise():
+        app = ScrobbleRecsTui(conn)
+        async with app.run_test(size=(110, 42)) as pilot:
+            await pilot.press("x")
+            await pilot.pause()
+            table = app.screen.query_one("#experiment-items", DataTable)
+            cells = [table.get_row_at(i)[2] for i in range(table.row_count)]
+            assert all(isinstance(cell, Text) for cell in cells)
+            assert set(names) <= {cell.plain for cell in cells}
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        conn.close()
+
+
 def test_blinded_tui_saves_resumes_and_never_calls_network_or_ranking(tmp_path, monkeypatch):
     import httpx
     from test_experiments import create, seed_runs

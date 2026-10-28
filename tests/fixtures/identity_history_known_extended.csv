@@ -1,0 +1,5 @@
+uts,utc_time,artist,artist_mbid,album,album_mbid,track,track_mbid
+1704067200,2024-01-01 00:00:00,Seed 1,cccccccc-cccc-4ccc-8ccc-cccccccccccc,Seed Album,,First,
+1733011200,2024-12-01 00:00:00,Candidate,bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb,Old Album,,Sample,
+1735776000,2025-01-02 00:00:00,Candidate,bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb,New Album,,Discovery,
+1735862400,2025-01-03 00:00:00,Candidate,bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb,New Album,,Again,

@@ -23,6 +23,7 @@ from scrobble_recs.apis.listenbrainz import (
 from scrobble_recs.config import ScrobbleRecsConfig
 from scrobble_recs.models.evidence import (
     EvidenceObservation,
+    listenbrainz_identity_warnings,
     observation_key,
     persist_evidence_observation,
 )
@@ -305,13 +306,21 @@ def _replace_memberships(
 
 
 def _ensure_artist(conn: DuckDBPyConnection, mbid: str, name: str) -> tuple[int, bool, list[str]]:
-    row = conn.execute(
-        "SELECT artist_id, identity_warnings FROM artist WHERE lower(musicbrainz_artist_mbid) = ? "
-        "ORDER BY identity_confidence DESC NULLS LAST, artist_id LIMIT 1",
+    rows = conn.execute(
+        "SELECT artist_id FROM artist WHERE lower(musicbrainz_artist_mbid) = ? ORDER BY artist_id",
         [mbid],
-    ).fetchone()
-    if row:
-        return int(row[0]), False, json.loads(row[1] or "[]")
+    ).fetchall()
+    if rows:
+        # A deterministic attachment preserves the observation for inspection; multiple
+        # claims remain quarantined and are never a canonical identity selection.
+        artist_id = int(rows[0][0])
+        return (
+            artist_id,
+            False,
+            listenbrainz_identity_warnings(
+                conn, artist_id, {"artist_mbid": mbid, "artist_name": name}
+            ),
+        )
     key = normalize_key(name)
     conflict = conn.execute(
         "SELECT 1 FROM artist WHERE split_part(artist_key, '::mbid:', 1) = ? "

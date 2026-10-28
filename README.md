@@ -122,6 +122,14 @@ scrobble-recs doctor --config ./config.json
 
 Import creates local normalized artists, tracks, scrobbles, and diagnostics. `doctor` checks the configuration, database, import quality, cache, and API-key state without requiring network access.
 
+Each import replaces listening history and its derived facts, while retaining canonical artist IDs
+and historical runs, exposures, and judgments. A unique normalized artist name with compatible MBID
+hints reuses its local identity, including artists previously acquired from providers. Conflicting
+names or MBID claims produce a separate, stable quarantined identity and an inspectable
+`import_identity_conflict` warning. They do not receive another artist's historical exposure credit.
+Matching track metadata is refreshed and tracks absent from the new history are removed. Importing
+the same export repeatedly keeps identities stable; retained artists can have no current listens.
+
 ### 4. Enrich persisted evidence (optional, recommended)
 
 Plan first if you want to see the amount of work without making network calls. Last.fm enrichment is cache-first and resumable; it persists similarity edges, artist tags, and tag top-artist data. `--depth 2` also enriches the hop-one frontier and can be bounded with `--max-frontier-artists`.
@@ -320,8 +328,10 @@ and replace memberships for the same seed and request settings. Outstanding queu
 must drain before a new refresh cycle starts, so bounded calls eventually process every seed.
 Skipped seeds are requeued when planning finds them eligible again. A new synchronous `enrich`
 invocation recovers interrupted `running` rows before planning; planning itself leaves active work
-untouched. Failed work remains failed until `enrich-retry`. Candidate MBIDs are matched before names;
-a conflicting name preserves separate identities with an inspectable warning. Observations preserve provider mode, response
+untouched. Failed work remains failed until `enrich-retry`. Candidate MBIDs are hints: multiple local
+claims always quarantine membership. Provider/local names must agree through normalization or a
+persisted MusicBrainz alias. Retrieval rechecks current identity and observation
+warnings, so stale high confidence cannot bypass quarantine. Observations preserve provider mode, response
 position, bounded recording MBIDs/listen counts, cache key, fetch time, and provider payload hash.
 Response position and listen counts are provenance, with no similarity score or source rank.
 
@@ -334,6 +344,14 @@ outside the production pool. Source ablation excludes ListenBrainz from those me
 retrieval without deleting stored evidence; paired reports over unchanged local evidence have
 the same snapshot ID. Freeze enrichment between comparisons. Last.fm-only recommendation output
 is preserved when ListenBrainz is disabled, unavailable, or collected with candidate generation off.
+
+For the opt-in challenger, admission rule `unranked_radio_independent_reinforcement_v1` accepts
+safe ListenBrainz membership from a query seed when independently reinforced by query-relevant
+semantic overlap or an enabled, supported MusicBrainz relationship to a query seed. Unrelated tags,
+unsupported relationships, and ambiguous identities do not qualify. Radio and catalog memberships
+remain unranked and contribute no invented numerical similarity; admission alone does not guarantee
+a positive ranking score or slate inclusion. Fusion and the numerical artist challenger remain
+disabled by default.
 
 ### Acquire optional MusicBrainz catalog facts
 

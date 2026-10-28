@@ -335,7 +335,7 @@ class ScrobbleRecsTui(App[None]):
         )
 
 
-class RecommendationTable(DataTable[str]):
+class RecommendationTable(DataTable[str | Text]):
     """Compact recommendation table with test-visible plain content."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -359,7 +359,7 @@ class RecommendationTable(DataTable[str]):
             classification = row.feedback_state or row.classification
             self.add_row(
                 f"{row.rank:03d}",
-                _truncate(row.artist, 28),
+                Text(_truncate(row.artist, 28)),
                 f"{row.score:.3f}",
                 tags,
                 _truncate(classification, 10),
@@ -533,7 +533,7 @@ class ExperimentScreen(Screen[None]):
                     table.add_row(
                         side,
                         str(item.position),
-                        item.artist,
+                        Text(item.artist),
                         ", ".join(self.judgment.labels.get(item.artist_id, ())),
                         "*" if item.artist_id == self.judgment.best_discovery_artist_id else "",
                         key=str(item.artist_id),

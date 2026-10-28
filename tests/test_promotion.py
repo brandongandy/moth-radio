@@ -715,3 +715,38 @@ def test_ablation_underlying_variant_and_status_must_match_the_expected_removal(
     else:
         row["deltas"] = {name: 0 for name in row["deltas"]}
     assert "incomplete_ablations" in decide(evidence).reasons
+
+
+@pytest.mark.parametrize(
+    "changed_definition", [None, "namespace", "population", "source", "basis", "version", "k"]
+)
+def test_only_comparable_ablation_guards_can_explain_a_catalog_diversity_gain(
+    evidence, changed_definition
+):
+    for pair in evidence["comparison"]["pairs"]:
+        pair["control"]["result"]["graded_ndcg_at_50"] = 0.6
+        pair["control"]["result"]["guardrails"]["catalog_diversity"].update(
+            value=0, token_counts={"one": 2}
+        )
+        for row in pair["ablations"]:
+            row["metrics"]["result"]["graded_ndcg_at_50"] = 0.6
+            row["deltas"]["graded_ndcg_at_50"] = 0
+            if row["contributing"]:
+                metric = row["metrics"]["result"]["guardrails"]["catalog_diversity"]
+                metric.update(value=0, token_counts={"one": 2})
+                if changed_definition is not None:
+                    metric[changed_definition] = (
+                        50
+                        if changed_definition == "k"
+                        else "artist_type"
+                        if changed_definition == "namespace"
+                        else "different-definition"
+                    )
+                row.update(guardrail_effect=True, observed_effect=True)
+    decision = decide(evidence)
+    if changed_definition is None:
+        assert decision.eligible  # Like-for-like catalog evidence is the sole gain/explanation.
+    else:
+        assert not decision.eligible
+        assert "incomplete_ablations" in decision.reasons
+        assert "unexplained_ablation_gain" in decision.reasons

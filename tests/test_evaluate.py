@@ -281,6 +281,78 @@ def test_named_effective_labels_add_unplayed_relevance_without_changing_ranking(
         conn.close()
 
 
+@pytest.mark.parametrize(
+    "future_times",
+    [
+        ("2024-12-31 23:30:00", "2025-01-01 00:30:00"),
+        ("2024-01-31 23:30:00", "2025-01-31 23:30:00"),
+    ],
+)
+def test_multi_day_adoption_includes_unplayed_selected_discoveries_and_excludes_known(
+    tmp_path, future_times
+):
+    conn, config = _setup_db(tmp_path)
+    try:
+        conn.execute("DELETE FROM scrobble WHERE played_at >= '2024-01-03'")
+        ids = [
+            int(row[0])
+            for row in conn.execute(
+                "SELECT artist_id FROM artist WHERE canonical_name IN "
+                "('Bauhaus', 'Siouxsie and the Banshees') ORDER BY artist_id"
+            ).fetchall()
+        ]
+        known = conn.execute(
+            "SELECT artist_id FROM artist WHERE canonical_name = 'The Cure'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO scrobble (scrobble_id, artist_key, track_key, played_at, is_duplicate) "
+            "SELECT i, artist_key, 'year-boundary', t, false "
+            "FROM artist, (VALUES (99000, ?::TIMESTAMP), (99001, ?::TIMESTAMP)) r(i, t) "
+            "WHERE artist_id = ?",
+            [*future_times, ids[0]],
+        )
+        result = evaluate_recommendations(
+            conn,
+            config,
+            train_until=datetime(2024, 1, 3),
+            test_from=datetime(2024, 1, 3),
+            test_until=datetime(2025, 2, 1),
+        )
+        conn.execute(
+            "UPDATE recommendation SET score_band = 'candidate_only' WHERE run_id = ?",
+            [result.run_id],
+        )
+        conn.execute(
+            "UPDATE recommendation SET score_band = 'plausible' "
+            "WHERE run_id = ? AND artist_id IN (?, ?)",
+            [result.run_id, *ids],
+        )
+        conn.execute(
+            "INSERT INTO recommendation (run_id, rank, artist_id, score_band) "
+            "VALUES (?, 40, ?, 'plausible')",
+            [result.run_id, known],
+        )
+        measured = evaluate_model._graded_run_metrics(
+            conn,
+            result.run_id,
+            train_until=datetime(2024, 1, 3),
+            test_from=datetime(2024, 1, 3),
+            test_until=datetime(2025, 2, 1),
+            evaluation_task="general",
+            target_artist_id=None,
+        )
+        rate = measured["graded_metrics"]["multi_day_adoption_rate_at_50"]
+        assert (rate["numerator"], rate["denominator"], rate["value"]) == (1, 2, 0.5)
+        relevance = measured["graded_metrics"]["relevance"]
+        assert relevance[str(ids[0])]["future_active_days"] == 2
+        assert relevance[str(ids[0])]["future_active_months"] == 2
+        assert relevance[str(ids[0])]["grade"] == 3
+        assert str(ids[1]) not in relevance  # no fabricated relevance for an unplayed discovery
+        assert str(known) not in relevance
+    finally:
+        conn.close()
+
+
 def _latest_seed_summary(conn) -> dict[str, object]:
     (seed_summary_json,) = conn.execute(
         "SELECT seed_summary FROM recommendation_run ORDER BY created_at DESC LIMIT 1"

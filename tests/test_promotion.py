@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from datetime import datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -45,6 +46,7 @@ def evidence():
                 pool_ids=[1, 2],
                 selected_ids=[1, 2],
                 future_new_ids=[1, 2],
+                candidate_features={str(i): {"values": {"feedback_score": 0}} for i in (1, 2)},
                 runtime=dict(
                     boundary="isolated-import+generation+metrics+logical-export+cleanup-v1",
                     sample_count=1,
@@ -66,26 +68,66 @@ def evidence():
                     boundary="durable+shared-logical-snapshot+canonical-result-export+distinct-artifact-v1",
                 ),
             )
+            result["run_id"] = pair[name]["run_id"]
         for identity in fixture["ablations"]:
             variant = deepcopy(pair["challenger"])
-            active = identity in ("provider:lastfm", "signal:semantic")
+            removed = fixture["ablation_inputs"][identity]
+            active = any(source in ("lastfm_similarity", "semantic") for source in removed)
+            disabled = identity.split(":")[1] in ("listenbrainz", "musicbrainz")
+            variant["run_id"] += "-without-" + identity
+            variant["result"]["run_id"] = variant["run_id"]
+            artifact = variant["artifact"]
+            artifact["behavior_config"]["recommendation"]["fusion"]["excluded_sources"] = sorted(
+                removed
+            )
+            artifact["behavior_config_fingerprint"] = sha256(
+                json.dumps(
+                    artifact["behavior_config"], sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest()
+            artifact["artifact_id"] += "-without-" + identity
             if active:
                 variant["result"]["graded_ndcg_at_50"] = 0.5
+                for source in removed:
+                    for field in (
+                        "candidate_count_by_source",
+                        "future_hit_count_by_source",
+                        "unique_candidate_count_by_source",
+                        "unique_future_hit_count_by_source",
+                    ):
+                        variant["result"][field].pop(source, None)
+            scalars = (
+                "pool_recall",
+                "eligible_recall",
+                "pool_coverage",
+                "eligible_coverage",
+                "selected_slate_recall_at_50",
+                "graded_ndcg_at_10",
+                "graded_ndcg_at_25",
+                "graded_ndcg_at_50",
+            )
             pair["ablations"].append(
                 {
                     **key,
                     "ablation_id": identity,
                     "kind": identity.split(":")[0],
-                    "removed_inputs": [identity.split(":")[1]],
+                    "removed_inputs": removed,
                     "baseline_artifact": fixture["artifacts"]["challenger"],
                     "stable_state_id": "fixture-state",
                     "evidence_snapshot_id": "fixture-snapshot",
-                    "enabled": active,
+                    "enabled": not disabled,
                     "contributing": active,
-                    "status": "available" if active else "disabled",
+                    "status": "available"
+                    if active
+                    else "disabled"
+                    if disabled
+                    else "noncontributing",
                     "reason": None,
                     "metrics": variant,
-                    "deltas": {"graded_ndcg_at_50": -0.1 if active else 0},
+                    "deltas": {
+                        field: variant["result"][field] - pair["challenger"]["result"][field]
+                        for field in scalars
+                    },
                     "unique_candidate_count": 0,
                     "unique_future_hit_count": 0,
                     "rank_effect": False,
@@ -306,7 +348,17 @@ def test_missing_and_incompatible_evidence_fails_closed(evidence, mutation, reas
     ],
 )
 def test_each_guardrail_blocks_independently(evidence, guard, value, reason):
-    evidence["comparison"]["pairs"][0]["challenger"]["result"]["guardrails"][guard]["value"] = value
+    metric = evidence["comparison"]["pairs"][0]["challenger"]["result"]["guardrails"][guard]
+    metric["value"] = value
+    if metric.get("numerator") is not None:
+        metric.update(numerator=round(value * 100), denominator=100, total_eligible_population=100)
+    if guard == "provider_concentration":
+        metric.update(
+            provider_counts={"lastfm": 81, "listenbrainz": 19},
+            membership_denominator=100,
+            denominator=100,
+            total_eligible_population=100,
+        )
     assert reason in decide(evidence).reasons
 
 
@@ -391,10 +443,17 @@ def test_storage_requires_consistent_provenance_and_known_artifact_size(evidence
 
 def test_disabled_catalog_and_unchanged_acquisition_need_explicit_applicability(evidence):
     for pair in evidence["comparison"]["pairs"]:
-        for name in ("control", "challenger"):
+        for variant in [
+            pair["control"],
+            pair["challenger"],
+            *(row["metrics"] for row in pair["ablations"]),
+        ]:
             for guard in ("catalog_diversity", "provider_failure_rate"):
-                pair[name]["result"]["guardrails"][guard].update(
-                    value=None, available=False, availability="not_applicable"
+                variant["result"]["guardrails"][guard].update(
+                    value=None,
+                    available=False,
+                    availability="not_applicable",
+                    reason="explicit disabled fixture",
                 )
         pair["guardrail_applicability"] = {
             "catalog_diversity": {
@@ -439,6 +498,8 @@ def test_each_artist_target_requires_matching_blinded_evidence_and_no_row_regres
             pair[name]["source_context"].update(query_kind="artist", target_artist_id=target)
         for row in pair["ablations"]:
             row.update(evaluation_task="artist", target_artist_id=target)
+            row["metrics"]["result"].update(evaluation_task="artist", target_artist_id=target)
+            row["metrics"]["source_context"].update(query_kind="artist", target_artist_id=target)
     experiment = evidence["blinded_experiments"][0]
     experiment["task"] = "artist"
     experiment["definition"]["target_artist_id"] = 7
@@ -447,6 +508,9 @@ def test_each_artist_target_requires_matching_blinded_evidence_and_no_row_regres
     assert "missing_blinded_evidence" in decide(evidence).reasons
     second = deepcopy(experiment)
     second["experiment_id"] = "second-target"
+    second["promotion_evidence"]["exposures"][0].update(
+        exposure_id="second-target-exposure", judgment_id="second-target-judgment"
+    )
     second["definition"]["target_artist_id"] = 8
     for context in second["definition"]["source_contexts"].values():
         context.update(target_artist_id=8)
@@ -496,3 +560,158 @@ def test_duplicate_measured_replays_do_not_conflict_only_because_of_run_ids_or_t
     decision = decide(evidence)
     assert decision.eligible
     assert decision.metrics["distinct_supported_cutoffs"] == 3
+
+
+def test_duplicate_winning_experiment_cannot_turn_two_control_votes_into_tie(evidence):
+    control = evidence["blinded_experiments"][0]
+    first = control["promotion_evidence"]["exposures"][0]
+    first["effective_list_choice"] = "right"
+    second = deepcopy(first)
+    second.update(exposure_id="control-2", judgment_id="control-judgment-2")
+    control["promotion_evidence"]["exposures"].append(second)
+    winning = deepcopy(control)
+    winning["experiment_id"] = "one-challenger-vote"
+    winning["promotion_evidence"]["exposures"] = [
+        {
+            **deepcopy(first),
+            "exposure_id": "challenger-1",
+            "judgment_id": "challenger-judgment-1",
+            "effective_list_choice": "left",
+        }
+    ]
+    evidence["blinded_experiments"].append(winning)
+    assert "blinded_loss" in decide(evidence).reasons
+    evidence["blinded_experiments"].append(deepcopy(winning))
+    decision = decide(evidence)
+    assert "blinded_loss" in decision.reasons
+    assert decision.metrics["blinded_votes"]["challenger"] == 1
+    assert decision.metrics["blinded_votes"]["denominator"] == 3
+
+
+@pytest.mark.parametrize("collision", ["experiment", "exposure", "judgment"])
+def test_conflicting_blinded_identity_ownership_is_invalid(evidence, collision):
+    original = evidence["blinded_experiments"][0]
+    duplicate = deepcopy(original)
+    duplicate["experiment_id"] = (
+        "different-experiment" if collision != "experiment" else original["experiment_id"]
+    )
+    exposure = duplicate["promotion_evidence"]["exposures"][0]
+    exposure.update(effective_list_choice="left")
+    if collision != "exposure":
+        exposure["exposure_id"] = "different-exposure"
+    if collision != "judgment":
+        exposure["judgment_id"] = "different-judgment"
+    evidence["blinded_experiments"].append(duplicate)
+    decision = decide(evidence)
+    assert "invalid_evidence" in decision.reasons
+    assert decision.metrics["blinded_votes"]["denominator"] == 0
+
+
+@pytest.mark.parametrize(
+    "contradiction",
+    [
+        "claimed_full",
+        "missing_total",
+        "wrong_numerator",
+        "missing_numerator",
+        "catalog_namespace",
+        "population",
+    ],
+)
+def test_guardrail_support_and_definition_must_be_internally_consistent(evidence, contradiction):
+    guards = evidence["comparison"]["pairs"][0]["challenger"]["result"]["guardrails"]
+    metric = guards["novelty"]
+    if contradiction == "claimed_full":
+        metric.update(denominator=1, total_eligible_population=100, coverage=1)
+    elif contradiction == "missing_total":
+        del metric["total_eligible_population"]
+    elif contradiction == "wrong_numerator":
+        metric["numerator"] = 0
+    elif contradiction == "missing_numerator":
+        del metric["numerator"]
+    elif contradiction == "catalog_namespace":
+        guards["catalog_diversity"]["namespace"] = "artist_type"
+    else:
+        metric["population"] = "a different population"
+    assert "incomplete_guardrails" in decide(evidence).reasons
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "scalar_only",
+        "guardrails",
+        "runtime",
+        "storage",
+        "candidate_count_by_source",
+        "graded_metrics",
+    ],
+)
+def test_ablation_requires_complete_measured_sections(evidence, missing):
+    for pair in evidence["comparison"]["pairs"]:
+        for row in pair["ablations"]:
+            if missing == "scalar_only":
+                row["metrics"] = {"result": {"graded_ndcg_at_50": 0.5}}
+            elif missing in ("runtime", "storage"):
+                row["metrics"].pop(missing)
+            else:
+                row["metrics"]["result"].pop(missing)
+    decision = decide(evidence)
+    assert "incomplete_ablations" in decision.reasons
+    assert "unexplained_ablation_gain" in decision.reasons
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        "empty_removal",
+        "kind",
+        "run",
+        "config",
+        "artifact",
+        "state",
+        "snapshot",
+        "query",
+        "window",
+        "disabled",
+        "noncontributing",
+        "unsupported",
+        "deltas",
+    ],
+)
+def test_ablation_underlying_variant_and_status_must_match_the_expected_removal(evidence, mismatch):
+    pair = evidence["comparison"]["pairs"][0]
+    row = pair["ablations"][0]
+    actual = row["metrics"]
+    if mismatch == "empty_removal":
+        row["removed_inputs"] = []
+    elif mismatch == "kind":
+        row["kind"] = "signal"
+    elif mismatch == "run":
+        actual["run_id"] = pair["challenger"]["run_id"]
+    elif mismatch == "config":
+        actual["artifact"]["behavior_config"]["recommendation"]["scoring"]["seed_idf_alpha"] = 0.5
+        actual["artifact"]["behavior_config_fingerprint"] = sha256(
+            json.dumps(
+                actual["artifact"]["behavior_config"], sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
+    elif mismatch == "artifact":
+        actual["artifact"]["content_fingerprint"] = "unrelated-code"
+    elif mismatch == "state":
+        actual["stable_state_id"] = "other-state"
+    elif mismatch == "snapshot":
+        actual["result"]["evidence_snapshot_id"] = "other-snapshot"
+    elif mismatch == "query":
+        actual["source_context"]["query_kind"] = "artist"
+    elif mismatch == "window":
+        actual["result"]["test_until"] = "2099-01-01"
+    elif mismatch == "disabled":
+        row.update(enabled=False, contributing=False, status="disabled")
+    elif mismatch == "noncontributing":
+        row.update(contributing=False, status="noncontributing")
+    elif mismatch == "unsupported":
+        row["status"] = "unsupported"
+    else:
+        row["deltas"] = {name: 0 for name in row["deltas"]}
+    assert "incomplete_ablations" in decide(evidence).reasons

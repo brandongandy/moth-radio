@@ -7,11 +7,12 @@
       "feature_schema_version": "fixture-features-v1",
       "slate_policy_version": "fixture-slate-v1",
       "content_fingerprint": "fixture-content-v1",
-      "behavior_config_fingerprint": "6e119b7f9f83e317e07a68ba91e1e34a2b38bf093450212a3a11d736f9e39549",
+      "behavior_config_fingerprint": "2b91e9dc77ba89b4e9062775238f83348b32189d27737a637a21893a7eb33b9e",
       "behavior_config": {
         "recommendation": {
           "scoring": {
-            "engine": "legacy"
+            "engine": "legacy",
+            "seed_idf_alpha": 0
           },
           "catalog_evidence": {
             "enabled": false
@@ -49,11 +50,12 @@
       "feature_schema_version": "fixture-features-v1",
       "slate_policy_version": "fixture-slate-v1",
       "content_fingerprint": "fixture-content-v1",
-      "behavior_config_fingerprint": "801e6534ed12c7d428c5f1dcfca5bcaaebefacf04c86723641151888963d3f62",
+      "behavior_config_fingerprint": "2a89897db14e91624a3b86167bd1cb753ab1685bacad97574c8ab07a1d4a55a2",
       "behavior_config": {
         "recommendation": {
           "scoring": {
-            "engine": "fusion"
+            "engine": "fusion",
+            "seed_idf_alpha": 0
           },
           "catalog_evidence": {
             "enabled": false
@@ -106,7 +108,7 @@
         "value": 0.5,
         "available": true,
         "availability": "available",
-        "numerator": 1,
+        "numerator": 1.0,
         "denominator": 2,
         "total_eligible_population": 2,
         "coverage": 1,
@@ -115,13 +117,14 @@
         "version": "promotion-guardrails-v1",
         "snapshot_id": "fixture-snapshot",
         "cutoff": "2024-01-01T00:00:00",
-        "reason": null
+        "reason": null,
+        "population": "fixture novelty supported population"
       },
       "tag_diversity": {
-        "value": 0.5,
+        "value": 1.0,
         "available": true,
         "availability": "available",
-        "numerator": 1,
+        "numerator": null,
         "denominator": 2,
         "total_eligible_population": 2,
         "coverage": 1,
@@ -130,13 +133,18 @@
         "version": "promotion-guardrails-v1",
         "snapshot_id": "fixture-snapshot",
         "cutoff": "2024-01-01T00:00:00",
-        "reason": null
+        "reason": null,
+        "population": "fixture tag_diversity supported population",
+        "token_counts": {
+          "one": 1,
+          "two": 1
+        }
       },
       "catalog_diversity": {
-        "value": 0.5,
+        "value": 1.0,
         "available": true,
         "availability": "available",
-        "numerator": 1,
+        "numerator": null,
         "denominator": 2,
         "total_eligible_population": 2,
         "coverage": 1,
@@ -145,13 +153,19 @@
         "version": "promotion-guardrails-v1",
         "snapshot_id": "fixture-snapshot",
         "cutoff": "2024-01-01T00:00:00",
-        "reason": null
+        "reason": null,
+        "population": "fixture catalog_diversity supported population",
+        "token_counts": {
+          "one": 1,
+          "two": 1
+        },
+        "namespace": "relationship_type"
       },
       "family_agreement": {
         "value": 0.5,
         "available": true,
         "availability": "available",
-        "numerator": 1,
+        "numerator": 1.0,
         "denominator": 2,
         "total_eligible_population": 2,
         "coverage": 1,
@@ -160,13 +174,14 @@
         "version": "promotion-guardrails-v1",
         "snapshot_id": "fixture-snapshot",
         "cutoff": "2024-01-01T00:00:00",
-        "reason": null
+        "reason": null,
+        "population": "fixture family_agreement supported population"
       },
       "fatigue": {
         "value": 0.5,
         "available": true,
         "availability": "available",
-        "numerator": 1,
+        "numerator": 1.0,
         "denominator": 2,
         "total_eligible_population": 2,
         "coverage": 1,
@@ -175,13 +190,14 @@
         "version": "promotion-guardrails-v1",
         "snapshot_id": "fixture-snapshot",
         "cutoff": "2024-01-01T00:00:00",
-        "reason": null
+        "reason": null,
+        "population": "fixture fatigue supported population"
       },
       "stale_source_rate": {
         "value": 0.5,
         "available": true,
         "availability": "available",
-        "numerator": 1,
+        "numerator": 1.0,
         "denominator": 2,
         "total_eligible_population": 2,
         "coverage": 1,
@@ -190,13 +206,14 @@
         "version": "promotion-guardrails-v1",
         "snapshot_id": "fixture-snapshot",
         "cutoff": "2024-01-01T00:00:00",
-        "reason": null
+        "reason": null,
+        "population": "fixture stale_source_rate supported population"
       },
       "provider_failure_rate": {
         "value": 0.5,
         "available": true,
         "availability": "available",
-        "numerator": 1,
+        "numerator": 1.0,
         "denominator": 2,
         "total_eligible_population": 2,
         "coverage": 1,
@@ -205,13 +222,14 @@
         "version": "promotion-guardrails-v1",
         "snapshot_id": "fixture-snapshot",
         "cutoff": "2024-01-01T00:00:00",
-        "reason": null
+        "reason": null,
+        "population": "fixture provider_failure_rate supported population"
       },
       "identity_ambiguous_rate": {
         "value": 0,
         "available": true,
         "availability": "available",
-        "numerator": 1,
+        "numerator": 0,
         "denominator": 2,
         "total_eligible_population": 2,
         "coverage": 1,
@@ -220,13 +238,14 @@
         "version": "promotion-guardrails-v1",
         "snapshot_id": "fixture-snapshot",
         "cutoff": "2024-01-01T00:00:00",
-        "reason": null
+        "reason": null,
+        "population": "fixture identity_ambiguous_rate supported population"
       },
       "identity_resolved_rate": {
         "value": 1,
         "available": true,
         "availability": "available",
-        "numerator": 1,
+        "numerator": 2,
         "denominator": 2,
         "total_eligible_population": 2,
         "coverage": 1,
@@ -235,13 +254,14 @@
         "version": "promotion-guardrails-v1",
         "snapshot_id": "fixture-snapshot",
         "cutoff": "2024-01-01T00:00:00",
-        "reason": null
+        "reason": null,
+        "population": "fixture identity_resolved_rate supported population"
       },
       "provider_concentration": {
         "value": 0.5,
         "available": true,
         "availability": "available",
-        "numerator": 1,
+        "numerator": null,
         "denominator": 2,
         "total_eligible_population": 2,
         "coverage": 1,
@@ -250,13 +270,19 @@
         "version": "promotion-guardrails-v1",
         "snapshot_id": "fixture-snapshot",
         "cutoff": "2024-01-01T00:00:00",
-        "reason": null
+        "reason": null,
+        "population": "fixture provider_concentration supported population",
+        "provider_counts": {
+          "lastfm": 1,
+          "listenbrainz": 1
+        },
+        "membership_denominator": 2
       },
       "popularity_q50": {
         "value": 0.5,
         "available": true,
         "availability": "available",
-        "numerator": 1,
+        "numerator": null,
         "denominator": 2,
         "total_eligible_population": 2,
         "coverage": 1,
@@ -265,13 +291,14 @@
         "version": "promotion-guardrails-v1",
         "snapshot_id": "fixture-snapshot",
         "cutoff": "2024-01-01T00:00:00",
-        "reason": null
+        "reason": null,
+        "population": "fixture popularity_q50 supported population"
       },
       "popularity_q75": {
         "value": 0.5,
         "available": true,
         "availability": "available",
-        "numerator": 1,
+        "numerator": null,
         "denominator": 2,
         "total_eligible_population": 2,
         "coverage": 1,
@@ -280,13 +307,14 @@
         "version": "promotion-guardrails-v1",
         "snapshot_id": "fixture-snapshot",
         "cutoff": "2024-01-01T00:00:00",
-        "reason": null
+        "reason": null,
+        "population": "fixture popularity_q75 supported population"
       },
       "popularity_q90": {
         "value": 0.5,
         "available": true,
         "availability": "available",
-        "numerator": 1,
+        "numerator": null,
         "denominator": 2,
         "total_eligible_population": 2,
         "coverage": 1,
@@ -295,11 +323,53 @@
         "version": "promotion-guardrails-v1",
         "snapshot_id": "fixture-snapshot",
         "cutoff": "2024-01-01T00:00:00",
-        "reason": null
+        "reason": null,
+        "population": "fixture popularity_q90 supported population"
       }
     },
     "evaluation_task": "general",
-    "evidence_snapshot_id": "fixture-snapshot"
+    "evidence_snapshot_id": "fixture-snapshot",
+    "pool_candidate_count": 2,
+    "eligible_candidate_count": 2,
+    "identity_resolved_rate": 1,
+    "identity_ambiguous_rate": 0,
+    "novelty_rate": 0.5,
+    "cooldown_or_repeat_rate": 0,
+    "provider_concentration": 0.5,
+    "multi_family_share": 0.5,
+    "runtime_seconds": 1,
+    "selected_slate_ndcg_at_50": 0.5,
+    "selected_slate_tag_diversity_at_20": 1,
+    "popularity_distribution": {
+      "mean": 0.5,
+      "median": 0.5,
+      "missing_share": 0
+    },
+    "candidate_count_by_source": {
+      "lastfm_similarity": 2,
+      "semantic": 2
+    },
+    "future_hit_count_by_source": {
+      "lastfm_similarity": 1,
+      "semantic": 1
+    },
+    "unique_candidate_count_by_source": {
+      "lastfm_similarity": 0,
+      "semantic": 0
+    },
+    "unique_future_hit_count_by_source": {
+      "lastfm_similarity": 0,
+      "semantic": 0
+    },
+    "candidate_count_by_family": {
+      "collaborative": 2,
+      "semantic": 2,
+      "catalog": 0,
+      "personal": 0
+    },
+    "repeated_listen_recall_at_50": 0.5,
+    "multi_day_adoption_rate_at_50": 0.5,
+    "one_great_find_rate_at_50": 1
   },
   "context": {
     "query_kind": "general",
@@ -346,5 +416,36 @@
     "2024-01-01T00:00:00",
     "2024-02-01T00:00:00",
     "2024-03-01T00:00:00"
-  ]
+  ],
+  "ablation_inputs": {
+    "provider:lastfm": [
+      "lastfm_similarity",
+      "lastfm_walk",
+      "semantic"
+    ],
+    "provider:listenbrainz": [
+      "listenbrainz"
+    ],
+    "provider:musicbrainz": [
+      "musicbrainz"
+    ],
+    "signal:lastfm_similarity": [
+      "lastfm_similarity"
+    ],
+    "signal:lastfm_walk": [
+      "lastfm_walk"
+    ],
+    "signal:semantic": [
+      "semantic"
+    ],
+    "signal:listenbrainz": [
+      "listenbrainz"
+    ],
+    "signal:musicbrainz": [
+      "musicbrainz"
+    ],
+    "signal:local_feedback": [
+      "local_feedback"
+    ]
+  }
 }

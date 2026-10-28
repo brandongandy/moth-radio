@@ -18,7 +18,10 @@ from scrobble_recs.models.rolling_compare import (
     ABLATIONS,
     RUNTIME_BOUNDARY,
     RollingComparisonReport,
+    ablated_config,
+    ablation_state,
     guardrail_applicability,
+    supported_ablation,
 )
 
 REASONS = (
@@ -157,7 +160,45 @@ def _check_blinded(
     totals = dict(control=0, challenger=0, tie=0, denominator=0, abstentions=0, unanswered=0)
     groups: dict[int | None, dict[str, int]] = {}
     details = []
+    seen_experiments: dict[str, Any] = {}
+    unique_reports: dict[str, dict[str, Any]] = {}
+    conflicts: set[str] = set()
+    duplicates: list[str] = []
     for experiment in experiments:
+        experiment_id = experiment.get("experiment_id")
+        if not isinstance(experiment_id, str) or not experiment_id:
+            reasons.add("invalid_evidence")
+            continue
+        facts = {
+            key: experiment.get(key)
+            for key in ("task", "definition", "evidence_snapshot_id", "promotion_evidence")
+        }
+        if experiment_id in seen_experiments:
+            if seen_experiments[experiment_id] != facts:
+                reasons.add("invalid_evidence")
+                conflicts.add(experiment_id)
+            duplicates.append(experiment_id)
+            continue
+        seen_experiments[experiment_id] = facts
+        unique_reports[experiment_id] = experiment
+    owners: dict[tuple[str, str], str] = {}
+    for experiment_id, experiment in unique_reports.items():
+        for exposure in experiment.get("promotion_evidence", {}).get("exposures", []):
+            for field in ("exposure_id", "judgment_id"):
+                identity = exposure.get(field)
+                if identity is None and field == "judgment_id":
+                    continue
+                if not isinstance(identity, str) or not identity:
+                    conflicts.add(experiment_id)
+                    reasons.add("invalid_evidence")
+                    continue
+                key = field, identity
+                if key in owners:
+                    conflicts.update((experiment_id, owners[key]))
+                    reasons.add("invalid_evidence")
+                else:
+                    owners[key] = experiment_id
+    for experiment_id, experiment in unique_reports.items():
         definition = experiment.get("definition", {})
         target = definition.get("target_artist_id")
         mapping = definition.get("side_variants", {})
@@ -196,6 +237,7 @@ def _check_blinded(
             )
         if not linked:
             reasons.add("incompatible_blinded_evidence")
+        linked &= experiment_id not in conflicts
         exposures = experiment.get("promotion_evidence", {}).get("exposures", [])
         shown: set[int] = set()
         complete = bool(exposures) and bool(frozen)
@@ -206,6 +248,8 @@ def _check_blinded(
             if not identity or identity in exposure_ids:
                 reasons.add("invalid_evidence")
                 complete = False
+                linked = False
+                continue
             exposure_ids.add(identity)
             shown.update(exposure.get("shown_artist_ids", []))
             choice = exposure.get("effective_list_choice")
@@ -261,17 +305,89 @@ def _check_blinded(
         **totals,
         "target_groups": {str(key): value for key, value in groups.items()},
         "experiments": details,
+        "duplicate_experiment_ids": sorted(set(duplicates)),
     }
 
 
-def _guard_value(metric: Any) -> float | None:
-    if not isinstance(metric, dict) or not metric.get("available") or metric.get("coverage") != 1:
-        return None
-    if not all(metric.get(key) for key in ("source", "basis", "version", "snapshot_id", "cutoff")):
-        return None
+_RATIO_GUARDS = frozenset(
+    {
+        "novelty",
+        "family_agreement",
+        "fatigue",
+        "stale_source_rate",
+        "provider_failure_rate",
+        "identity_resolved_rate",
+        "identity_ambiguous_rate",
+    }
+)
+
+
+def _guard_support_valid(metric: Any, name: str) -> bool:
+    if not isinstance(metric, dict):
+        return False
+    if not all(
+        metric.get(key)
+        for key in ("source", "basis", "version", "snapshot_id", "cutoff", "population")
+    ):
+        return False
+    denominator, total = metric.get("denominator"), metric.get("total_eligible_population")
+    if (
+        type(denominator) is not int
+        or type(total) is not int
+        or denominator < 0
+        or total < denominator
+        or not _number(metric.get("coverage"))
+        or metric["coverage"] != (denominator / total if total else 0)
+    ):
+        return False
     value = metric.get("value")
-    if not _number(value) or not _number(metric.get("denominator")) or metric["denominator"] <= 0:
+    if value is None:
+        return (
+            metric.get("available") is False
+            and metric.get("availability") in ("unavailable", "not_applicable")
+            and bool(metric.get("reason"))
+        )
+    if (
+        metric.get("available") is not True
+        or metric.get("availability") != "available"
+        or denominator == 0
+    ):
+        return False
+    if not _number(value) or value < 0:
+        return False
+    numerator = metric.get("numerator")
+    if name in _RATIO_GUARDS or numerator is not None:
+        if not _number(numerator):
+            return False
+        assert isinstance(numerator, int | float)
+        if numerator < 0 or numerator > denominator or value != numerator / denominator:
+            return False
+    if name == "catalog_diversity" and not metric.get("namespace"):
+        return False
+    if name == "provider_concentration":
+        counts = metric.get("provider_counts", {})
+        if (
+            not counts
+            or any(
+                type(count) is not int or count < 0 or count > denominator
+                for count in counts.values()
+            )
+            or metric.get("membership_denominator") != sum(counts.values())
+            or not sum(counts.values())
+            or value != max(counts.values()) / sum(counts.values())
+        ):
+            return False
+    return True
+
+
+def _guard_value(metric: Any, name: str) -> float | None:
+    if (
+        not _guard_support_valid(metric, name)
+        or metric.get("available") is not True
+        or metric.get("coverage") != 1
+    ):
         return None
+    value = metric["value"]
     assert isinstance(value, int | float)
     return float(value)
 
@@ -308,8 +424,8 @@ def _check_guardrails(
                 "evidence": recorded,
             }
             continue
-        a, b = _guard_value(control), _guard_value(challenger)
-        definitions = ("source", "basis", "version")
+        a, b = _guard_value(control, name), _guard_value(challenger, name)
+        definitions = ("source", "basis", "version", "population", "namespace", "k")
         comparable = (
             a is not None
             and b is not None
@@ -429,6 +545,196 @@ def _check_costs(
     }
 
 
+_ABLATION_QUALITY = (
+    "pool_recall",
+    "eligible_recall",
+    "pool_coverage",
+    "eligible_coverage",
+    "selected_slate_recall_at_50",
+    "graded_ndcg_at_10",
+    "graded_ndcg_at_25",
+    "graded_ndcg_at_50",
+)
+_ABLATION_NUMBERS = (
+    *_ABLATION_QUALITY,
+    "recall_at_50",
+    "recall_at_100",
+    "ndcg_at_50",
+    "pool_candidate_count",
+    "eligible_candidate_count",
+    "identity_resolved_rate",
+    "identity_ambiguous_rate",
+    "novelty_rate",
+    "cooldown_or_repeat_rate",
+    "provider_concentration",
+    "multi_family_share",
+    "runtime_seconds",
+    "selected_slate_ndcg_at_50",
+    "selected_slate_tag_diversity_at_20",
+    "repeated_listen_recall_at_50",
+    "multi_day_adoption_rate_at_50",
+    "one_great_find_rate_at_50",
+)
+_ABLATION_COUNTS = (
+    "candidate_count_by_source",
+    "future_hit_count_by_source",
+    "unique_candidate_count_by_source",
+    "unique_future_hit_count_by_source",
+    "candidate_count_by_family",
+)
+
+
+def _complete_ablation_variant(
+    variant: dict[str, Any], baseline: dict[str, Any], key: dict[str, Any], identity: str
+) -> bool:
+    result = variant.get("result", {})
+    if not all(_number(result.get(name)) and result[name] >= 0 for name in _ABLATION_NUMBERS):
+        return False
+    if not all(
+        isinstance(result.get(name), dict)
+        and all(type(count) is int and count >= 0 for count in result[name].values())
+        for name in _ABLATION_COUNTS
+    ):
+        return False
+    if (
+        not isinstance(result.get("popularity_distribution"), dict)
+        or not all(_number(value) for value in result["popularity_distribution"].values())
+        or not result["popularity_distribution"]
+    ):
+        return False
+    graded = result.get("graded_metrics", {})
+    if (
+        type(graded.get("ndcg_available")) is not bool
+        or type(graded.get("positive_relevance_count")) is not int
+        or graded["positive_relevance_count"] < 0
+    ):
+        return False
+    if not all(
+        _guard_support_valid(result.get("guardrails", {}).get(name), name)
+        for name in GUARD_DIRECTIONS
+    ):
+        return False
+    expected_key = _pair_key(key)
+    if (
+        _pair_key(result) != expected_key
+        or result.get("evidence_snapshot_id") != baseline["result"]["evidence_snapshot_id"]
+    ):
+        return False
+    for name in ("pool_ids", "selected_ids", "future_new_ids"):
+        values = variant.get(name)
+        if (
+            not isinstance(values, list)
+            or len(values) != len(set(values))
+            or any(type(value) is not int or value < 1 for value in values)
+        ):
+            return False
+    if (
+        result["pool_candidate_count"] != len(variant["pool_ids"])
+        or not set(variant["selected_ids"]) <= set(variant["pool_ids"])
+        or set(variant.get("candidate_features", {}))
+        != {str(value) for value in variant["pool_ids"]}
+    ):
+        return False
+    if (
+        not variant.get("run_id")
+        or result.get("run_id") != variant["run_id"]
+        or variant.get("stable_state_id") != baseline.get("stable_state_id")
+    ):
+        return False
+    context = variant.get("source_context", {})
+    if (
+        context.get("query_kind") != expected_key[0]
+        or context.get("target_artist_id") != expected_key[1]
+        or context.get("evidence_snapshot_id") != result["evidence_snapshot_id"]
+    ):
+        return False
+    left, right = _semantic_context(baseline.get("source_context", {})), _semantic_context(context)
+    if "local_feedback" in ABLATIONS[identity]:
+        left.pop("taste_region_seeds", None)
+        right.pop("taste_region_seeds", None)
+    if left != right:
+        return False
+    for metric in result["guardrails"].values():
+        if (
+            metric.get("snapshot_id") != result["evidence_snapshot_id"]
+            or normalize_timestamp(datetime.fromisoformat(metric.get("cutoff", ""))).isoformat()
+            != expected_key[2]
+        ):
+            return False
+    artifact, base_artifact = variant.get("artifact", {}), baseline["artifact"]
+    if not _valid_artifact(artifact) or any(
+        artifact.get(name) != base_artifact.get(name)
+        for name in ARTIFACT_KEYS
+        if name not in ("artifact_id", "behavior_config_fingerprint")
+    ):
+        return False
+    config = base_artifact["behavior_config"]
+    expected_config = (
+        ablated_config(config, identity) if supported_ablation(config, identity) else config
+    )
+    if artifact.get("behavior_config") != expected_config:
+        return False
+    if expected_config != config and (
+        artifact["artifact_id"] == base_artifact["artifact_id"]
+        or variant["run_id"] == baseline["run_id"]
+    ):
+        return False
+    if supported_ablation(config, identity) and any(
+        result["candidate_count_by_source"].get(source, 0) for source in ABLATIONS[identity]
+    ):
+        return False
+    cost_reasons: set[str] = set()
+    _check_costs({"control": baseline, "challenger": variant}, PromotionConfig(), cost_reasons)
+    return not cost_reasons.intersection(
+        {"invalid_evidence", "missing_runtime_evidence", "missing_storage_evidence"}
+    )
+
+
+def _valid_ablation(row: dict[str, Any], pair: dict[str, Any]) -> bool:
+    baseline = pair["challenger"]
+    identity = row.get("ablation_id")
+    if identity not in ABLATIONS:
+        return False
+    try:
+        state = ablation_state(baseline, identity)
+        if (
+            row.get("kind") != identity.split(":")[0]
+            or row.get("removed_inputs") != list(ABLATIONS[identity])
+            or any(row.get(name) != value for name, value in state.items())
+            or state["status"] == "unsupported"
+            or _identity(row.get("baseline_artifact")) != _identity(baseline.get("artifact"))
+            or row.get("stable_state_id") != baseline.get("stable_state_id")
+            or row.get("evidence_snapshot_id") != baseline["result"]["evidence_snapshot_id"]
+            or _pair_key(row) != _pair_key(pair["key"])
+        ):
+            return False
+        variant = row.get("metrics", {})
+        if not _complete_ablation_variant(variant, baseline, pair["key"], identity):
+            return False
+        deltas = {
+            name: variant["result"][name] - baseline["result"][name] for name in _ABLATION_QUALITY
+        }
+        removed = set(baseline["pool_ids"]) - set(variant["pool_ids"])
+        rank = baseline["selected_ids"] != variant["selected_ids"]
+        guards = any(
+            value.get("value") != variant["result"]["guardrails"].get(name, {}).get("value")
+            for name, value in baseline["result"]["guardrails"].items()
+        )
+        effects = {
+            "deltas": deltas,
+            "unique_candidate_count": len(removed),
+            "unique_future_hit_count": len(removed & set(baseline["future_new_ids"])),
+            "rank_effect": rank,
+            "guardrail_effect": guards,
+            "observed_effect": bool(removed or rank or guards or any(deltas.values())),
+        }
+        return all(row.get(name) == value for name, value in effects.items()) and (
+            state["status"] == "available" or not effects["observed_effect"]
+        )
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+
+
 def _check_ablations(pair: dict[str, Any], reasons: set[str]) -> bool:
     rows = pair.get("ablations", [])
     identities = [row.get("ablation_id") for row in rows]
@@ -438,14 +744,7 @@ def _check_ablations(pair: dict[str, Any], reasons: set[str]) -> bool:
     control = pair["control"]
     explained = False
     for row in rows:
-        linked = (
-            _identity(row.get("baseline_artifact")) == _identity(baseline.get("artifact"))
-            and row.get("stable_state_id") == baseline.get("stable_state_id")
-            and row.get("evidence_snapshot_id")
-            == baseline.get("result", {}).get("evidence_snapshot_id")
-            and all(row.get(key) == value for key, value in pair.get("key", {}).items())
-            and row.get("status") in ("available", "disabled", "noncontributing")
-        )
+        linked = _valid_ablation(row, pair)
         if not linked:
             reasons.add("incomplete_ablations")
         actual = row.get("metrics", {}).get("result", {})
@@ -477,7 +776,7 @@ def _check_ablations(pair: dict[str, Any], reasons: set[str]) -> bool:
         if linked and row.get("enabled") and row.get("contributing"):
             for name, direction in GUARD_DIRECTIONS.items():
                 values = [
-                    _guard_value(result.get("guardrails", {}).get(name))
+                    _guard_value(result.get("guardrails", {}).get(name), name)
                     for result in (control.get("result", {}), baseline.get("result", {}), actual)
                 ]
                 if all(value is not None for value in values):

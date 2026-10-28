@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -107,19 +108,42 @@ def _targets(conn: DuckDBPyConnection, config: ScrobbleRecsConfig, cutoff: datet
     ]
 
 
-def _scoped_ablation(config: ScrobbleRecsConfig, ablation: str) -> ScrobbleRecsConfig:
-    scoped = config.model_copy(deep=True)
-    removed = ABLATIONS[ablation]
-    scoped.recommendation.fusion = type(scoped.recommendation.fusion).model_validate(
-        {
-            **scoped.recommendation.fusion.model_dump(),
-            "excluded_sources": sorted(
-                set(scoped.recommendation.fusion.excluded_sources) | set(removed)
-            ),
-        }
+def supported_ablation(payload: dict[str, Any], identity: str) -> bool:
+    return payload["recommendation"]["scoring"]["engine"] == "fusion" or ABLATIONS[identity] == (
+        "listenbrainz",
     )
-    if "semantic" in removed:
-        scoped.recommendation.scoring.seed_idf_alpha = 0
+
+
+def ablated_config(payload: dict[str, Any], identity: str) -> dict[str, Any]:
+    """One removal normalization for measured configs and their evidence validator."""
+    if not supported_ablation(payload, identity):
+        raise ValueError("unsupported source ablation for scorer")
+    scoped = deepcopy(payload)
+    removed = ABLATIONS[identity]
+    recommendation = scoped["recommendation"]
+    if recommendation["scoring"]["engine"] == "fusion":
+        recommendation["fusion"]["excluded_sources"] = sorted(
+            set(recommendation["fusion"]["excluded_sources"]) | set(removed)
+        )
+        if "semantic" in removed:
+            recommendation["scoring"]["seed_idf_alpha"] = 0
+    else:
+        scoped["apis"]["listenbrainz"]["enabled"] = False
+    return scoped
+
+
+def _scoped_ablation(config: ScrobbleRecsConfig, ablation: str) -> ScrobbleRecsConfig:
+    payload = ablated_config(config.model_dump(), ablation)
+    scoped = config.model_copy(deep=True)
+    if scoped.recommendation.scoring.engine == "fusion":
+        scoped.recommendation.fusion = type(scoped.recommendation.fusion).model_validate(
+            payload["recommendation"]["fusion"]
+        )
+        scoped.recommendation.scoring.seed_idf_alpha = payload["recommendation"]["scoring"][
+            "seed_idf_alpha"
+        ]
+    else:
+        scoped.apis.listenbrainz.enabled = payload["apis"]["listenbrainz"]["enabled"]
     return scoped
 
 
@@ -232,30 +256,24 @@ def _materialize_variant(
     }
 
 
-def _ablation_manifest(
-    identity: str,
-    baseline: dict[str, Any],
-    variant: dict[str, Any] | None,
-    key: dict[str, Any],
-    stable: str,
-    snapshot: str,
-) -> dict[str, Any]:
+def ablation_state(baseline: dict[str, Any], identity: str) -> dict[str, Any]:
     removed = ABLATIONS[identity]
     config = baseline["artifact"]["behavior_config"]
-    disabled = all(
+    fusion = config["recommendation"]["scoring"]["engine"] == "fusion"
+    disabled = fusion and all(
         source in config["recommendation"]["fusion"]["excluded_sources"] for source in removed
     )
     if removed == ("listenbrainz",):
         disabled |= not (
             config["apis"]["listenbrainz"]["enabled"]
-            and config["apis"]["listenbrainz"]["candidate_generation_enabled"]
+            and (not fusion or config["apis"]["listenbrainz"]["candidate_generation_enabled"])
         )
     if removed == ("musicbrainz",):
         disabled |= not (
             config["apis"]["musicbrainz"]["enabled"]
             and config["recommendation"]["catalog_evidence"]["enabled"]
         )
-    supported = config["recommendation"]["scoring"]["engine"] == "fusion"
+    supported = supported_ablation(config, identity)
     source_counts = baseline["result"]["candidate_count_by_source"]
     aliases = {"lastfm_similarity": "lastfm", "semantic": "lastfm_tag"}
     contributing = any(
@@ -276,6 +294,19 @@ def _ablation_manifest(
         if not contributing
         else "unsupported"
     )
+    return {"enabled": not disabled, "contributing": bool(contributing), "status": status}
+
+
+def _ablation_manifest(
+    identity: str,
+    baseline: dict[str, Any],
+    variant: dict[str, Any] | None,
+    key: dict[str, Any],
+    stable: str,
+    snapshot: str,
+) -> dict[str, Any]:
+    removed = ABLATIONS[identity]
+    state = ablation_state(baseline, identity)
     actual = variant or baseline
     scalar_names = (
         "pool_recall",
@@ -302,10 +333,8 @@ def _ablation_manifest(
         "baseline_artifact": baseline["artifact"],
         "stable_state_id": stable,
         "evidence_snapshot_id": snapshot,
-        "enabled": not disabled,
-        "contributing": contributing,
-        "status": status,
-        "reason": "nonfusion ablation unsupported" if status == "unsupported" else None,
+        **state,
+        "reason": "nonfusion ablation unsupported" if state["status"] == "unsupported" else None,
         "boundary": (
             "optional positive preferences removed; hard reject/hide/cooldown safety retained"
         )
@@ -409,9 +438,12 @@ def compare_rolling_recommendations(
         finally:
             conn.execute("ROLLBACK")
         capture_seconds = perf_counter() - started
-        runs_per_query = 2 + (
-            len(ablations) if challenger_config.recommendation.scoring.engine == "fusion" else 0
-        )
+        supported = [
+            identity
+            for identity in ablations
+            if supported_ablation(challenger_config.model_dump(), identity)
+        ]
+        runs_per_query = 2 + len(supported)
         allocation = capture_seconds / (len(queries) * runs_per_query) if queries else 0.0
         for window, target, snapshot in queries:
             key = {
@@ -440,7 +472,7 @@ def compare_rolling_recommendations(
             manifests = []
             for identity in ablations:
                 removed = None
-                if challenger_config.recommendation.scoring.engine == "fusion":
+                if identity in supported:
                     removed = _materialize_variant(
                         directory,
                         export,

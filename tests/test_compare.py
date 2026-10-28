@@ -51,6 +51,11 @@ def test_rolling_comparison_captures_same_state_complete_ablations_and_logical_c
             assert cost["storage"]["durable_bytes"] >= 0
             assert cost["storage"]["artifact_bytes"] > 0
         assert pair["ablations"][0]["baseline_artifact"] == pair["challenger"]["artifact"]
+        from scrobble_recs.models.promotion import _valid_ablation
+        from scrobble_recs.models.report_json import report_value
+
+        captured = report_value(pair)
+        assert all(_valid_ablation(row, captured) for row in captured["ablations"])
     finally:
         conn.close()
 
@@ -228,6 +233,68 @@ def test_logical_storage_materializes_exact_finite_canonical_export_bytes(tmp_pa
             [2, "2024-01-01T00:00:00Z", {"blob_hex": "616263"}, "Björk"],
         ]
         assert logical_storage(conn)["durable_bytes"] == measured["durable_bytes"]
+    finally:
+        conn.close()
+
+
+def test_nonfusion_radio_ablation_measures_active_disabled_and_noncontributing_inputs(tmp_path):
+    from test_evaluate import _insert_radio_observations
+
+    from scrobble_recs.models.compare import _with_engine
+    from scrobble_recs.models.evaluate import EvaluationWindow
+    from scrobble_recs.models.rolling_compare import compare_rolling_recommendations
+
+    conn, config = _setup(tmp_path)
+    try:
+        target = _new_artist(conn, "Radio Future", "radio future")
+        conn.execute(
+            "INSERT INTO scrobble (scrobble_id, artist_key, track_key, played_at, is_duplicate) "
+            "VALUES (99001, 'radio future', 'radio', '2024-01-04', false)"
+        )
+        window = EvaluationWindow(datetime(2024, 1, 3), datetime(2024, 1, 3), datetime(2024, 4, 3))
+        for engine in ("legacy", "walk"):
+            scoped = _with_engine(config, engine)
+            for enabled, has_observations, status in (
+                (True, False, "noncontributing"),
+                (False, True, "disabled"),
+                (True, True, "available"),
+            ):
+                conn.execute(
+                    "DELETE FROM artist_evidence_observation WHERE source = 'listenbrainz'"
+                )
+                if has_observations:
+                    _insert_radio_observations(conn, _artist_id(conn, "seed one"), target)
+                scoped.apis.listenbrainz.enabled = enabled
+                scoped.apis.listenbrainz.candidate_generation_enabled = True
+                report = compare_rolling_recommendations(
+                    conn,
+                    scoped,
+                    scoped,
+                    windows=[window],
+                    ablations=("provider:listenbrainz", "signal:listenbrainz"),
+                )
+                baseline = report.pairs[0]["challenger"]
+                for row in report.pairs[0]["ablations"]:
+                    assert row["status"] == status
+                    assert row["metrics"]["run_id"] != baseline["run_id"]
+                    assert (
+                        row["metrics"]["result"]["evidence_snapshot_id"]
+                        == baseline["result"]["evidence_snapshot_id"]
+                    )
+                    assert (
+                        row["metrics"]["artifact"]["behavior_config"]["apis"]["listenbrainz"][
+                            "enabled"
+                        ]
+                        is False
+                    )
+                    assert (
+                        row["metrics"]["result"]["candidate_count_by_source"].get("listenbrainz", 0)
+                        == 0
+                    )
+                    if status == "available":
+                        assert baseline["result"]["future_hit_count_by_source"]["listenbrainz"] == 1
+                    else:
+                        assert row["observed_effect"] is False
     finally:
         conn.close()
 

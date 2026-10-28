@@ -1,0 +1,12 @@
+{
+  "context": {
+    "query_kind": "general", "mode": "balanced", "novelty_intent": "discover",
+    "history_window": {"start": "2024-01-01T00:00:00", "end": "2025-01-01T00:00:00"},
+    "history_cutoff": "2025-01-01T00:00:00", "feedback_cutoff": "2025-01-01T00:00:00",
+    "taste_region_seeds": [{"artist_id": 9, "weight": 1.0, "regions": ["recent", "lifetime"]}],
+    "evidence_snapshot_id": "frozen-evidence", "evidence_freshness": {},
+    "config_hash": "PRIVATE_CONTROL_CONFIG", "versions": {"ranker": "PRIVATE_RANKER"}
+  },
+  "control": [1, 2, 3], "challenger": [2, 4],
+  "names": {"1": "One", "2": "Shared", "3": "Three", "4": "Four", "5": "Unexposed"}
+}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, cast
@@ -52,6 +53,14 @@ from scrobble_recs.models.evaluate import (
     EvaluationWindow,
     evaluate_recommendations,
     evaluate_rolling_recommendations,
+)
+from scrobble_recs.models.experiments import (
+    JudgmentLabel,
+    SideChoice,
+    create_blinded_experiment,
+    experiment_report,
+    next_blinded_exposure,
+    record_judgment,
 )
 from scrobble_recs.models.feedback import record_feedback_event, rerank_recommendation_run
 from scrobble_recs.models.profile_builder import build_profile
@@ -946,6 +955,108 @@ def tui_command(
     conn = initialize_database(resolved_config)
     try:
         ScrobbleRecsTui(conn).run()
+    finally:
+        conn.close()
+
+
+@app.command("experiment-create")
+def experiment_create_command(
+    config: Annotated[Path, typer.Option("--config", "-c")],
+    control_run_id: Annotated[str, typer.Option("--control-run-id")],
+    challenger_run_id: Annotated[str, typer.Option("--challenger-run-id")],
+    seed: Annotated[int, typer.Option("--seed")],
+) -> None:
+    """Freeze two compatible persisted runs for local blinded judging."""
+    conn = initialize_database(load_config(config))
+    try:
+        identity = create_blinded_experiment(
+            conn,
+            control_run_id=control_run_id,
+            challenger_run_id=challenger_run_id,
+            randomization_seed=seed,
+        )
+        typer.echo(json.dumps({"experiment_id": identity}, sort_keys=True))
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@app.command("experiment-next")
+def experiment_next_command(
+    config: Annotated[Path, typer.Option("--config", "-c")],
+    experiment_id: Annotated[str, typer.Option("--experiment-id")],
+    slate_size: Annotated[int, typer.Option("--slate-size")] = 10,
+) -> None:
+    """Display or resume a persisted neutral slate; JSON null means exhausted."""
+    conn = initialize_database(load_config(config))
+    try:
+        exposure = next_blinded_exposure(conn, experiment_id=experiment_id, slate_size=slate_size)
+        typer.echo(
+            json.dumps(asdict(exposure) if exposure else None, sort_keys=True, allow_nan=False)
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@app.command("experiment-judge")
+def experiment_judge_command(
+    config: Annotated[Path, typer.Option("--config", "-c")],
+    exposure_id: Annotated[str, typer.Option("--exposure-id")],
+    preferred_side: Annotated[str | None, typer.Option("--preferred-side")] = None,
+    list_choice: Annotated[str | None, typer.Option("--list-choice")] = None,
+    best_discovery_artist_id: Annotated[
+        int | None, typer.Option("--best-discovery-artist-id")
+    ] = None,
+    label: Annotated[
+        list[str] | None, typer.Option("--label", help="Repeat ARTIST_ID:LABEL.")
+    ] = None,
+    confidence: Annotated[float | None, typer.Option("--confidence")] = None,
+    note: Annotated[str | None, typer.Option("--note")] = None,
+) -> None:
+    """Replace the complete judgment snapshot. Omitted fields clear previous answers."""
+    labels: dict[int, list[JudgmentLabel]] = {}
+    try:
+        for entry in label or []:
+            artist, value = entry.split(":", 1)
+            labels.setdefault(int(artist), []).append(cast(JudgmentLabel, value))
+    except ValueError as exc:
+        raise typer.BadParameter("labels require ARTIST_ID:LABEL") from exc
+    conn = initialize_database(load_config(config))
+    try:
+        judgment = record_judgment(
+            conn,
+            exposure_id=exposure_id,
+            preferred_side=cast(SideChoice | None, preferred_side),
+            list_choice=cast(SideChoice | None, list_choice),
+            best_discovery_artist_id=best_discovery_artist_id,
+            labels=labels,
+            confidence=confidence,
+            note=note,
+        )
+        typer.echo(json.dumps({"judgment_id": judgment}, sort_keys=True))
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@app.command("experiment-report")
+def experiment_report_command(
+    config: Annotated[Path, typer.Option("--config", "-c")],
+    experiment_id: Annotated[str, typer.Option("--experiment-id")],
+    outcome_cutoff: Annotated[str, typer.Option("--outcome-cutoff")],
+) -> None:
+    """Reveal attribution and materialize local listening outcomes before a UTC cutoff."""
+    cutoff = _parse_timestamp(outcome_cutoff)
+    conn = initialize_database(load_config(config))
+    try:
+        report = experiment_report(conn, experiment_id, outcome_cutoff=cutoff)
+        typer.echo(json.dumps(asdict(report), sort_keys=True, allow_nan=False))
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     finally:
         conn.close()
 

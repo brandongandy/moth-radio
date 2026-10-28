@@ -14,6 +14,59 @@ The Python package and command-line tool are named `scrobble-recs`. Your listeni
 
 **AI Disclosure:** This is a purpose-built tool for my own uses, designed by me and written entirely by AI. DeepSeek and Codex were used in the development of this tool.
 
+## Blinded local recommendation experiments
+
+Compare two distinct persisted runs with matching query kind, target, semantic history/feedback
+context and nonempty evidence snapshot. Scorer settings and versions may differ. Historical runs
+without recorded provenance remain browsable but cannot establish a compatible experiment.
+
+```bash
+scrobble-recs experiment-create --config ./config.json --control-run-id CONTROL_UUID --challenger-run-id CHALLENGER_UUID --seed 7
+scrobble-recs experiment-next --config ./config.json --experiment-id EXPERIMENT_UUID --slate-size 10
+scrobble-recs experiment-judge --config ./config.json --exposure-id EXPOSURE_UUID --label 123:want_to_try --note "Try later"
+scrobble-recs experiment-next --config ./config.json --experiment-id EXPERIMENT_UUID
+scrobble-recs experiment-judge --config ./config.json --exposure-id EXPOSURE_UUID --list-choice left --best-discovery-artist-id 123 --label 123:strong_fit --confidence 0.8
+scrobble-recs experiment-report --config ./config.json --experiment-id EXPERIMENT_UUID --outcome-cutoff 2030-01-01T00:00:00Z
+```
+
+Commands emit JSON; `experiment-next` emits `null` when exhausted. Replace the placeholder UUIDs and
+artist ID with IDs from your local runs and shown items. Slates and names freeze at creation, before
+later feedback can change a source run. The seed fixes hidden side assignment. Duplicates appear once
+across the experiment while preserving private source memberships. `--slate-size` caps each side;
+incomplete pages always reopen with their original order, regardless of a newly requested size.
+
+The six labels are `want_to_try`, `strong_fit`, `surprising_good`, `already_known`, `wrong_direction`
+and `reject`. Repeat `--label ARTIST_ID:LABEL` to label more items. **Each judgment replaces the whole
+effective snapshot:** omitted fields and an omitted label mapping clear prior answers. Label-only,
+preferred-side-only (`--preferred-side`) and best-discovery-only submissions are resumable partial
+evidence. An explicit `--list-choice left|right|tie|none` completes a page; `none` is an abstention,
+while omission means unanswered. Best discovery and preferred side are independent of list choice.
+Confidence is optional and must lie in `[0,1]`. Judgments do not record ordinary feedback or rerank.
+
+In the TUI, press `x` from a persisted run to open its experiments, then `x` to cycle them. Move with
+arrow keys; `1`–`6` toggle the selected artist's labels, `b` toggles best discovery, `p` cycles preferred
+side and `c` cycles list choice (unanswered, left, right, tie, none). Tab accesses optional confidence
+and note fields. `s` saves the full partial/current state, `n` saves and advances after a list choice,
+and Escape returns to the run browser. Saved fields restore when reopened. Source identity and
+scoring details are hidden throughout judging; `experiment-report` intentionally reveals attribution.
+
+Reports count current effective judgments once per exposure. Listening outcomes use only recorded
+shown artists and nonduplicate scrobbles strictly after exposure and strictly before the UTC cutoff.
+“Adoption” means any post-exposure listening, including previously known artists; “repeat” means two
+or more plays. The earliest exposure owns listening credit for a repeated artist within an experiment.
+Shared artists split labels, best discovery, listening, plays and artist-active-day units equally
+between contributing variants; list choices follow the hidden side assignment. Reports expose
+denominators, null rates for empty windows, and raw shared counts. Recomputing at earlier/later cutoffs
+replaces local outcome rows. Different experiments are separate observations, not independent causal
+discoveries to sum together.
+
+Guardrail deltas use frozen persisted run facts: mean `1-knownness`, mean identity confidence,
+primary-tag entropy and provider membership concentration where recorded facts support them.
+Partial coverage is explicit; unavailable historical popularity or other facts remain null. These
+experiments do not promote a scorer or enable fusion. New artist-query relationship snapshots count
+recorded exposures before their cutoff; when none precede it, the explicit run-appearance fallback
+remains. All experiment commands and TUI interactions operate locally without API calls.
+
 ## Algorithms
 
 Moth Radio is a local, graph-based recommender. In essence, it works like this:

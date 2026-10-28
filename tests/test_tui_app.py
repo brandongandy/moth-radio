@@ -9,6 +9,70 @@ from scrobble_recs.db import initialize_database
 from scrobble_recs.tui.app import ScrobbleRecsTui
 
 
+def test_blinded_tui_saves_resumes_and_never_calls_network_or_ranking(tmp_path, monkeypatch):
+    import httpx
+    from test_experiments import create, seed_runs
+
+    import scrobble_recs.models.recommend as recommend_module
+    import scrobble_recs.tui.app as app_module
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("network/ranking forbidden while judging")
+
+    monkeypatch.setattr(httpx, "Client", forbidden)
+    monkeypatch.setattr(httpx, "AsyncClient", forbidden)
+    monkeypatch.setattr(app_module, "record_feedback_event", forbidden)
+    monkeypatch.setattr(app_module, "rerank_recommendation_run", forbidden)
+    monkeypatch.setattr(recommend_module, "generate_recommendations", forbidden)
+    from scrobble_recs.apis.lastfm import LastFmClient
+    from scrobble_recs.apis.listenbrainz import ListenBrainzClient
+    from scrobble_recs.apis.musicbrainz import MusicBrainzClient
+
+    for client in (LastFmClient, MusicBrainzClient, ListenBrainzClient):
+        monkeypatch.setattr(client, "__init__", forbidden)
+    conn = initialize_database(load_config(write_config(tmp_path)))
+    seed_runs(conn)
+    create(conn)
+
+    async def exercise():
+        first_order = None
+        for reopening in (False, True):
+            app = ScrobbleRecsTui(conn)
+            async with app.run_test(size=(110, 42)) as pilot:
+                await pilot.press("x")
+                await pilot.pause()
+                screen = app.screen
+                assert screen.__class__.__name__ == "ExperimentScreen"
+                table = screen.query_one("#experiment-items", DataTable)
+                rows = [table.get_row_at(i)[:3] for i in range(table.row_count)]
+                assert "PRIVATE" not in str(rows)
+                assert first_order is None or rows == first_order
+                first_order = rows
+                if reopening:
+                    assert screen.judgment.labels
+                    await pilot.press("c", "n")
+                    await pilot.pause()
+                    assert (
+                        "exhausted"
+                        in screen.query_one("#experiment-status").renderable.plain.lower()
+                    )
+                else:
+                    await pilot.press("1", "b", "s")
+                    await pilot.pause()
+                    assert screen.judgment.labels
+                    # Inherited actions must neither rerank nor reveal debug provenance.
+                    await pilot.press("r", "a", "e", "R", "m", "h", "?")
+                    assert app.screen is screen
+                await pilot.press("escape")
+                await pilot.pause()
+                assert app.screen.__class__.__name__ != "ExperimentScreen"
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        conn.close()
+
+
 def write_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "config.json"
     config_path.write_text(

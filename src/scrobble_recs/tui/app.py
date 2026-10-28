@@ -8,9 +8,15 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Header, Link, Static
+from textual.screen import ModalScreen, Screen
+from textual.widgets import DataTable, Footer, Header, Input, Link, Static
 
+from scrobble_recs.models.experiments import (
+    LABELS,
+    BlindedExposure,
+    EffectiveJudgment,
+    SideChoice,
+)
 from scrobble_recs.models.feedback import record_feedback_event, rerank_recommendation_run
 from scrobble_recs.tui.data import (
     RecommendationDetail,
@@ -135,6 +141,7 @@ class ScrobbleRecsTui(App[None]):
         Binding("f", "cycle_tag_filter", "Tag"),
         Binding("e", "toggle_debug_scores", "Scores"),
         Binding("R", "next_run", "Run"),
+        Binding("x", "experiments", "Experiments"),
         Binding("u", "undo_unavailable", "Undo"),
         Binding("?", "show_help", "Help"),
     ]
@@ -207,6 +214,18 @@ class ScrobbleRecsTui(App[None]):
         self.run_id = run_ids[(current_index + 1) % len(run_ids)]
         self.selected_index = 0
         self._reload_rows()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        # Application actions include feedback/reranking and score detail. A judging
+        # screen owns its bindings; no parent action may mutate or reveal its source.
+        return False if isinstance(self.screen, ExperimentScreen) else True
+
+    def action_experiments(self) -> None:
+        experiments = self.store.list_experiment_ids(self.run_id)
+        if not experiments:
+            self.query_one("#status", Static).update("No experiments for this persisted run")
+            return
+        self.push_screen(ExperimentScreen(self.store, experiments))
 
     def action_feedback(self, action: str) -> None:
         detail = self._selected_detail()
@@ -435,6 +454,194 @@ class HelpModal(ModalScreen[None]):
 
     def action_close(self) -> None:
         self.dismiss()
+
+
+class ExperimentScreen(Screen[None]):
+    """Neutral local slates with complete-state partial saves and explicit choices."""
+
+    BINDINGS: ClassVar[list[Binding | tuple[str, str] | tuple[str, str, str]]] = [
+        Binding("escape", "back", "Back"),
+        Binding("s", "save", "Save partial"),
+        Binding("n", "advance", "Save / next"),
+        Binding("c", "choice", "List choice"),
+        Binding("p", "preferred", "Preferred side"),
+        Binding("b", "best", "Best discovery"),
+        Binding("x", "next_experiment", "Experiment"),
+        *[
+            Binding(str(index), f"label({index - 1})", label, show=False)
+            for index, label in enumerate(LABELS, 1)
+        ],
+    ]
+
+    def __init__(self, store: TuiRecommendationStore, experiment_ids: list[str]) -> None:
+        super().__init__()
+        self.store = store
+        self.experiment_ids = experiment_ids
+        self.experiment_index = 0
+        self.exposure: BlindedExposure | None = None
+        self.judgment = EffectiveJudgment()
+
+    def compose(self) -> ComposeResult:
+        yield _InspectableStatic("Blinded local evaluation", id="experiment-title")
+        yield DataTable(id="experiment-items", cursor_type="row")
+        yield _InspectableStatic("", id="experiment-choices")
+        yield _InspectableStatic(
+            "Labels on selected artist: "
+            + "  ".join(f"{i} {label}" for i, label in enumerate(LABELS, 1))
+        )
+        yield Input(placeholder="Optional confidence, 0 to 1", id="experiment-confidence")
+        yield Input(placeholder="Optional note", id="experiment-note")
+        yield _InspectableStatic("", id="experiment-status")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        table = self.query_one("#experiment-items", DataTable)
+        table.add_columns("Side", "#", "Artist", "Labels", "Best")
+        self._load()
+        table.focus()
+
+    def _load(self) -> None:
+        self.exposure = self.store.next_exposure(self.experiment_ids[self.experiment_index])
+        self.judgment = (
+            self.exposure.judgment
+            if self.exposure and self.exposure.judgment
+            else EffectiveJudgment()
+        )
+        self.query_one("#experiment-confidence", Input).value = (
+            "" if self.judgment.confidence is None else str(self.judgment.confidence)
+        )
+        self.query_one("#experiment-note", Input).value = self.judgment.note or ""
+        self._render_judgment()
+        status = (
+            "Exhausted: all recorded slates completed"
+            if self.exposure is None
+            else (
+                "Resumed saved partial" if self.exposure.judgment else "Persisted slate; unanswered"
+            )
+        )
+        self.query_one("#experiment-status", _InspectableStatic).update(status)
+
+    def _render_judgment(self) -> None:
+        table = self.query_one("#experiment-items", DataTable)
+        cursor = table.cursor_row
+        table.clear()
+        if self.exposure:
+            for side, items in (("left", self.exposure.left), ("right", self.exposure.right)):
+                for item in items:
+                    table.add_row(
+                        side,
+                        str(item.position),
+                        item.artist,
+                        ", ".join(self.judgment.labels.get(item.artist_id, ())),
+                        "*" if item.artist_id == self.judgment.best_discovery_artist_id else "",
+                        key=str(item.artist_id),
+                    )
+            empty = ", ".join(
+                side
+                for side, items in (("left", self.exposure.left), ("right", self.exposure.right))
+                if not items
+            )
+        else:
+            empty = "left, right"
+        table.move_cursor(row=min(cursor, max(0, table.row_count - 1)))
+        self.query_one("#experiment-choices", _InspectableStatic).update(
+            f"List: {self.judgment.list_choice or 'unanswered'} | "
+            f"Preferred: {self.judgment.preferred_side or 'unanswered'} | "
+            f"Best discovery: {self.judgment.best_discovery_artist_id or 'unanswered'} | "
+            f"Empty sides: {empty or 'none'}"
+        )
+
+    def _selected(self) -> int | None:
+        table = self.query_one("#experiment-items", DataTable)
+        if not table.row_count:
+            return None
+        return int(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value or "0")
+
+    def action_label(self, index: int) -> None:
+        artist = self._selected()
+        if artist is None:
+            return
+        labels = dict(self.judgment.labels)
+        selected = set(labels.get(artist, ()))
+        label = LABELS[index]
+        if label in selected:
+            selected.remove(label)
+        else:
+            selected.add(label)
+        if selected:
+            labels[artist] = tuple(sorted(selected))
+        else:
+            labels.pop(artist, None)
+        self.judgment = replace(self.judgment, labels=labels)
+        self._render_judgment()
+
+    def action_best(self) -> None:
+        selected = self._selected()
+        self.judgment = replace(
+            self.judgment,
+            best_discovery_artist_id=(
+                None if selected == self.judgment.best_discovery_artist_id else selected
+            ),
+        )
+        self._render_judgment()
+
+    @staticmethod
+    def _cycle(value: SideChoice | None) -> SideChoice | None:
+        choices: tuple[SideChoice | None, ...] = (None, "left", "right", "tie", "none")
+        return choices[(choices.index(value) + 1) % len(choices)]
+
+    def action_choice(self) -> None:
+        self.judgment = replace(self.judgment, list_choice=self._cycle(self.judgment.list_choice))
+        self._render_judgment()
+
+    def action_preferred(self) -> None:
+        self.judgment = replace(
+            self.judgment, preferred_side=self._cycle(self.judgment.preferred_side)
+        )
+        self._render_judgment()
+
+    def _save(self) -> bool:
+        if self.exposure is None:
+            return False
+        try:
+            confidence = self.query_one("#experiment-confidence", Input).value.strip()
+            self.judgment = replace(
+                self.judgment,
+                confidence=float(confidence) if confidence else None,
+                note=self.query_one("#experiment-note", Input).value or None,
+            )
+            self.store.judge_exposure(
+                self.exposure.exposure_id,
+                preferred_side=self.judgment.preferred_side,
+                list_choice=self.judgment.list_choice,
+                best_discovery_artist_id=self.judgment.best_discovery_artist_id,
+                labels=self.judgment.labels,
+                confidence=self.judgment.confidence,
+                note=self.judgment.note,
+            )
+        except ValueError as exc:
+            self.query_one("#experiment-status", _InspectableStatic).update(f"Cannot save: {exc}")
+            return False
+        self.query_one("#experiment-status", _InspectableStatic).update(
+            "Saved complete judgment"
+            if self.judgment.list_choice is not None
+            else "Saved partial judgment"
+        )
+        return True
+
+    def action_save(self) -> None:
+        self._save()
+
+    def action_advance(self) -> None:
+        if self._save():
+            self._load()
+
+    def action_next_experiment(self) -> None:
+        self.experiment_index = (self.experiment_index + 1) % len(self.experiment_ids)
+        self._load()
+
+    def action_back(self) -> None:
+        self.app.pop_screen()
 
 
 def _join_or_none(values: tuple[str, ...]) -> str:

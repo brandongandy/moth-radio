@@ -2,7 +2,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from textual.widgets import DataTable, Link
+from textual.widgets import DataTable, Input, Link
 
 from scrobble_recs.config import load_config
 from scrobble_recs.db import initialize_database
@@ -66,6 +66,69 @@ def test_blinded_tui_saves_resumes_and_never_calls_network_or_ranking(tmp_path, 
                 await pilot.press("escape")
                 await pilot.pause()
                 assert app.screen.__class__.__name__ != "ExperimentScreen"
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        conn.close()
+
+
+def test_blinded_tui_keyboard_inputs_save_resume_and_preserve_action_isolation(
+    tmp_path, monkeypatch
+):
+    from test_experiments import create, seed_runs
+
+    import scrobble_recs.tui.app as app_module
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("ordinary feedback/reranking forbidden while judging")
+
+    monkeypatch.setattr(app_module, "record_feedback_event", forbidden)
+    monkeypatch.setattr(app_module, "rerank_recommendation_run", forbidden)
+    conn = initialize_database(load_config(write_config(tmp_path)))
+    seed_runs(conn)
+    experiment = create(conn)
+
+    async def exercise():
+        for reopening in (False, True):
+            app = ScrobbleRecsTui(conn)
+            async with app.run_test(size=(110, 42)) as pilot:
+                run_id = app.run_id
+                await pilot.press("x")
+                screen = app.screen
+                table = screen.query_one("#experiment-items", DataTable)
+                confidence = screen.query_one("#experiment-confidence", Input)
+                note = screen.query_one("#experiment-note", Input)
+                assert screen.exposure.experiment_id == experiment
+                assert app.focused is table
+                if not reopening:
+                    await pilot.press("tab")
+                    assert app.focused is confidence
+                    await pilot.press("0", ".", "8", "tab")
+                    assert app.focused is note
+                    await pilot.press("T", "r", "y", "space", "l", "a", "t", "e", "r")
+                    assert confidence.value == "0.8" and note.value == "Try later"
+                    await pilot.press("shift+tab")
+                    assert app.focused is confidence
+                    await pilot.press("shift+tab")
+                    assert app.focused is table
+                    await pilot.press("tab", "tab", "tab")
+                    assert app.focused is table
+                    await pilot.press("s")
+                    assert screen.judgment.confidence == 0.8
+                    assert screen.judgment.note == "Try later"
+                else:
+                    assert confidence.value == "0.8" and note.value == "Try later"
+                    assert screen.judgment.confidence == 0.8
+                    assert screen.judgment.note == "Try later"
+                    await pilot.press("c", "n")
+                    assert screen.exposure is None
+                await pilot.press("r", "a", "o", "w", "m", "l", "h", "e", "R", "?")
+                assert app.screen is screen
+                assert app.run_id == run_id
+                assert not app.show_debug_scores
+                await pilot.press("escape")
+                assert app.screen is not screen
 
     try:
         asyncio.run(exercise())

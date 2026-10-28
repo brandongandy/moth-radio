@@ -78,6 +78,199 @@ class FakeClient:
         return self.groups
 
 
+def recommend_acquired(conn, config, query_kind="general"):
+    from scrobble_recs.models.profile_window import ListeningWindow
+    from scrobble_recs.models.recommend import generate_recommendations
+    from scrobble_recs.models.recommendation_query import RecommendationRequest
+
+    config.apis.listenbrainz.candidate_generation_enabled = True
+    config.recommendation.scoring.engine = "legacy" if query_kind == "artist" else "fusion"
+    config.recommendation.fusion.enabled = True
+    config.recommendation.calibration.enabled = False
+    config.recommendation.artist_challenger.enabled = True
+    conn.execute(
+        "INSERT INTO scrobble (scrobble_id, artist_key, track_key, played_at, played_date) "
+        "VALUES (1, 'seed 1', 'song', '2024-01-01', '2024-01-01')"
+    )
+    conn.execute("UPDATE artist_evidence_observation SET fetched_at = '2024-01-01'")
+    return generate_recommendations(
+        conn,
+        config,
+        limit=10,
+        as_of=datetime(2025, 1, 1),
+        history_window=ListeningWindow(datetime(2020, 1, 1), datetime(2025, 1, 1)),
+        historical_cutoff=datetime(2025, 1, 1),
+        request=RecommendationRequest(query_kind, 1 if query_kind == "artist" else None),
+    )
+
+
+@pytest.mark.parametrize("conflict", ["multiple", "name", "stored_warning", "late_multiple"])
+def test_acquired_radio_quarantines_unsafe_identity_through_artist_recommendation(staged, conflict):
+    conn, config = staged
+    conn.execute(
+        "INSERT INTO artist (artist_id, canonical_name, artist_key, "
+        "musicbrainz_artist_mbid, identity_confidence, identity_warnings) "
+        "VALUES (10, ?, 'candidate', ?, .99, ?)",
+        [
+            "Wrong Local" if conflict == "name" else "Candidate",
+            TARGET,
+            '["name_mbid_conflict"]' if conflict == "stored_warning" else "[]",
+        ],
+    )
+    if conflict == "multiple":
+        conn.execute(
+            "INSERT INTO artist (artist_id, canonical_name, artist_key, "
+            "musicbrainz_artist_mbid, identity_confidence) "
+            "VALUES (11, 'Wrong Local', 'wrong', ?, .99)",
+            [TARGET],
+        )
+    run_listenbrainz_enrichment(conn, config, client=FakeClient())
+    if conflict == "late_multiple":
+        conn.execute(
+            "INSERT INTO artist (artist_id, canonical_name, artist_key, "
+            "musicbrainz_artist_mbid, identity_confidence) "
+            "VALUES (11, 'Wrong Local', 'wrong', ?, .99)",
+            [TARGET],
+        )
+    # Deliberately stale confidence must not turn warning-bearing membership into evidence.
+    conn.execute("UPDATE artist_evidence_observation SET identity_confidence = .99")
+    stats = recommend_acquired(conn, config, "artist")
+    assert (
+        conn.execute(
+            "SELECT artist_id FROM recommendation WHERE run_id = ?", [stats.run_id]
+        ).fetchall()
+        == []
+    )
+    diagnostics = json.loads(
+        conn.execute(
+            "SELECT seed_summary FROM recommendation_run WHERE run_id = ?", [stats.run_id]
+        ).fetchone()[0]
+    )
+    quarantined = diagnostics["retrieval_diagnostics"]["invalid_observations"]
+    assert quarantined[0]["reason"] == "unsafe_identity"
+    assert quarantined[0]["identity_warnings"]
+    if conflict != "late_multiple":
+        payload = json.loads(
+            conn.execute("SELECT evidence FROM artist_evidence_observation").fetchone()[0]
+        )
+        assert payload["identity_warnings"]
+
+
+@pytest.mark.parametrize("corroboration", ["normalized_name", "musicbrainz_alias"])
+def test_acquired_radio_accepts_corroborated_provider_names(staged, corroboration):
+    conn, config = staged
+    conn.execute(
+        "INSERT INTO artist (artist_id, canonical_name, artist_key, "
+        "musicbrainz_artist_mbid, identity_confidence) VALUES (10, ?, 'candidate', ?, .95)",
+        [
+            " ＣＡＮＤＩＤＡＴＥ " if corroboration == "normalized_name" else "Canonical Name",
+            TARGET,
+        ],
+    )
+    if corroboration == "musicbrainz_alias":
+        conn.execute(
+            "INSERT INTO artist_alias (artist_id, alias, normalized_alias, source, fetched_at) "
+            "VALUES (10, 'Candidate', 'candidate', 'musicbrainz', '2024-01-01')"
+        )
+    run_listenbrainz_enrichment(conn, config, client=FakeClient())
+    stats = recommend_acquired(conn, config, "artist")
+    assert conn.execute(
+        "SELECT artist_id FROM recommendation WHERE run_id = ?", [stats.run_id]
+    ).fetchall() == [(10,)]
+    payload = json.loads(
+        conn.execute("SELECT evidence FROM artist_evidence_observation").fetchone()[0]
+    )
+    assert payload["identity_warnings"] == []
+
+
+@pytest.mark.parametrize(
+    "reinforcement, expected",
+    [
+        ("semantic", True),
+        ("catalog", True),
+        ("none", False),
+        ("unrelated", False),
+        ("unsupported_catalog", False),
+        ("unrelated_catalog", False),
+        ("conflicting_catalog", False),
+        ("unsafe", False),
+    ],
+)
+def test_production_radio_general_fusion_requires_independent_relevant_evidence(
+    staged, reinforcement, expected
+):
+    from scrobble_recs.models.evidence import EvidenceObservation, persist_evidence_observation
+
+    conn, config = staged
+    run_listenbrainz_enrichment(conn, config, client=FakeClient())
+    candidate = conn.execute("SELECT target_artist_id FROM artist_evidence_observation").fetchone()[
+        0
+    ]
+    if reinforcement in ("semantic", "unrelated", "unsafe"):
+        conn.execute(
+            "INSERT INTO artist_tag (artist_id, tag, source, normalized_weight, fetched_at) "
+            "VALUES (1, 'dream pop', 'lastfm', 1, '2024-01-01'), (?, ?, 'lastfm', 1, '2024-01-01')",
+            [candidate, "metal" if reinforcement == "unrelated" else "dream pop"],
+        )
+    if "catalog" in reinforcement:
+        config.apis.musicbrainz.enabled = True
+        config.recommendation.catalog_evidence.enabled = True
+        config.recommendation.discovery_evidence.catalog_relationships_enabled = True
+        config.recommendation.catalog_evidence.allowed_relationship_types = ["member of band"]
+        persist_evidence_observation(
+            conn,
+            EvidenceObservation(
+                "musicbrainz",
+                "catalog",
+                "catalog_relationship",
+                5 if reinforcement == "unrelated_catalog" else 1,
+                candidate,
+                None,
+                None,
+                None,
+                datetime(2024, 1, 1),
+                0.95,
+                {
+                    "relationship_type": "influenced by"
+                    if reinforcement == "unsupported_catalog"
+                    else "member of band",
+                    "supported_relationship": True,
+                },
+            ),
+            observation_key="catalog-corroboration",
+        )
+        if reinforcement == "conflicting_catalog":
+            conn.execute(
+                "UPDATE artist_evidence_observation SET evidence = json_merge_patch(evidence, "
+                "'{\"identity_warnings\":[\"name_mbid_conflict\"]}') WHERE source = 'musicbrainz'"
+            )
+    if reinforcement == "unsafe":
+        conn.execute(
+            "UPDATE artist SET identity_warnings = '[\"name_mbid_conflict\"]' WHERE artist_id = ?",
+            [candidate],
+        )
+    stats = recommend_acquired(conn, config)
+    ids = conn.execute(
+        "SELECT artist_id FROM recommendation WHERE run_id = ?", [stats.run_id]
+    ).fetchall()
+    assert ids == ([(candidate,)] if reinforcement == "semantic" else [])
+    candidate_row = conn.execute(
+        "SELECT admission, evidence, feature_record FROM recommendation_candidate "
+        "WHERE run_id = ? AND artist_id = ?",
+        [stats.run_id, candidate],
+    ).fetchone()
+    assert bool(candidate_row and json.loads(candidate_row[0])["admitted"]) is expected
+    if expected:
+        admission, evidence, features = candidate_row
+        assert "unranked_radio_independent_reinforcement_v1" in json.loads(admission)["reasons"]
+        assert all(
+            row["source_rank"] is None and row["raw_score"] is None
+            for row in json.loads(evidence)["observations"]
+            if row["source"] == "listenbrainz"
+        )
+        assert "fusion_source_listenbrainz" not in json.loads(features)["values"]
+
+
 def test_listenbrainz_does_not_implicitly_acquire_musicbrainz_recordings(staged, monkeypatch):
     from scrobble_recs.apis.musicbrainz import MusicBrainzClient
 

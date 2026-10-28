@@ -105,7 +105,34 @@ def decide_candidate_admission(
             )
         strengths.append((row.family, strength))
     reason: str | None = None
+    radio = any(
+        row.source == "listenbrainz"
+        and row.relationship_kind == "artist_radio_membership"
+        and row.source_artist_id in (seed_ids or set())
+        and _safe_identity_observation(row, config)
+        for row in rows
+    )
+    semantic = (
+        tag_score > 0
+        and tag_score >= config.minimum_tag_reinforcement
+        and any(row.family == "semantic" and row.source != "listenbrainz" for row in rows)
+    )
+    catalog = config.catalog_relationships_enabled and any(
+        row.source == "musicbrainz"
+        and row.relationship_kind == "catalog_relationship"
+        and row.source_artist_id in (seed_ids or set())
+        and _safe_identity_observation(row, config)
+        and row.evidence.get("supported_relationship") is True
+        for row in rows
+    )
     if (
+        radio
+        and not low_identity
+        and (semantic or catalog)
+        and 1 + int(semantic) + int(catalog) >= config.minimum_independent_families
+    ):
+        reason = "unranked_radio_independent_reinforcement_v1"
+    elif (
         any(family == "collaborative" and strength == "strong" for family, strength in strengths)
         and len(families) >= 2
     ):
@@ -142,6 +169,20 @@ def decide_candidate_admission(
     if reason is None:
         return result(False, "missing_source_aware_evidence")
     return result(True, reason, *(("low_confidence",) if low_identity else ()))
+
+
+def _safe_identity_observation(row: EvidenceObservation, config: DiscoveryEvidenceConfig) -> bool:
+    warnings = row.evidence.get("identity_warnings", [])
+    return (
+        row.identity_confidence >= config.identity_safety_threshold
+        and isinstance(warnings, list)
+        and all(isinstance(warning, str) for warning in warnings)
+        and not any(
+            token in warning.lower()
+            for warning in warnings
+            for token in ("ambiguous", "conflict", "multiple", "invalid")
+        )
+    )
 
 
 def _lastfm_edge(row: EvidenceObservation) -> float:

@@ -14,6 +14,7 @@ from duckdb import DuckDBPyConnection
 
 from scrobble_recs.models.profile_window import normalize_timestamp
 from scrobble_recs.models.recommendation_query import QueryContext
+from scrobble_recs.normalize.strings import normalize_key
 
 EvidenceFamily = Literal["collaborative", "semantic", "catalog", "personal"]
 RelationshipKind = Literal[
@@ -25,6 +26,51 @@ RelationshipKind = Literal[
     "personal_feedback",
 ]
 _RESERVED_LEGACY_KEYS = frozenset({"legacy", "confidence_projection", "stored_identity_confidence"})
+
+
+def listenbrainz_identity_warnings(
+    conn: DuckDBPyConnection,
+    artist_id: int,
+    evidence: dict[str, object],
+    *,
+    cutoff: datetime | None = None,
+) -> list[str]:
+    """Revalidate a provider claim against local identity, independently of its score."""
+    row = conn.execute(
+        "SELECT canonical_name, musicbrainz_artist_mbid, identity_warnings, resolution_status "
+        "FROM artist WHERE artist_id = ?",
+        [artist_id],
+    ).fetchone()
+    if row is None:
+        return ["missing_local_identity"]
+    warnings = list(json.loads(row[2] or "[]"))
+    stored = evidence.get("identity_warnings", [])
+    if not isinstance(stored, list) or not all(isinstance(value, str) for value in stored):
+        return ["invalid_identity_warnings"]
+    warnings.extend(stored)
+    if any(word in str(row[3]).lower() for word in ("ambiguous", "conflict", "multiple")):
+        warnings.append("ambiguous_local_identity")
+    mbid = str(row[1] or "").lower()
+    claimed_mbid = evidence.get("artist_mbid")
+    if claimed_mbid is not None and str(claimed_mbid).lower() != mbid:
+        warnings.append("local_mbid_conflict")
+    if mbid:
+        count = conn.execute(
+            "SELECT count(*) FROM artist WHERE lower(musicbrainz_artist_mbid) = ?", [mbid]
+        ).fetchone()
+        assert count is not None
+        if count[0] != 1:
+            warnings.append("multiple_local_mbid_matches")
+    name = evidence.get("artist_name")
+    if isinstance(name, str) and normalize_key(name) != normalize_key(row[0]):
+        alias = conn.execute(
+            "SELECT 1 FROM artist_alias WHERE artist_id = ? AND source = 'musicbrainz' "
+            "AND normalized_alias = ? AND (? IS NULL OR fetched_at <= ?) LIMIT 1",
+            [artist_id, normalize_key(name), cutoff, cutoff],
+        ).fetchone()
+        if alias is None:
+            warnings.append("name_mbid_conflict")
+    return sorted(set(warnings))
 
 
 @dataclass(frozen=True)
@@ -347,6 +393,26 @@ def load_candidate_evidence(
                 if key not in _RESERVED_LEGACY_KEYS
             }
             json.dumps(stored_payload, allow_nan=False)
+            if stored[0] == "listenbrainz":
+                warnings = listenbrainz_identity_warnings(
+                    conn, stored[4], stored_payload, cutoff=cutoff
+                )
+                if any(
+                    token in warning.lower()
+                    for warning in warnings
+                    for token in ("ambiguous", "conflict", "multiple", "missing_local", "invalid")
+                ):
+                    if invalid_observations is not None:
+                        invalid_observations.append(
+                            {
+                                "source": stored[0],
+                                "source_artist_id": stored[3],
+                                "target_artist_id": stored[4],
+                                "reason": "unsafe_identity",
+                                "identity_warnings": warnings,
+                            }
+                        )
+                    continue
             if stored[1] == "catalog" and allowed_catalog_relationship_types is not None:
                 if (
                     stored[2] != "catalog_relationship"

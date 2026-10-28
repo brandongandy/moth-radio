@@ -1056,3 +1056,41 @@ challenger. The fix-round entry records the current behavior.
   formatted**; `mypy src`: **no issues in 60 source files**; `git diff --check`: passed. Commands used
   the repository-root virtualenv through its absolute local path, abbreviated here to avoid committing
   a machine-local path. Self-review found no remaining reviewed defect or changed policy/gate semantics.
+
+#### Final whole-branch fix wave — Durable identities and source-aware admission
+
+- Replacement CSV imports now retain canonical artist IDs and resolved metadata. Unique normalized
+  names with compatible hints reuse existing local keys, including provider-created identities.
+  Conflicting MBIDs, multiple local claims (even without a CSV MBID), and ambiguous status create
+  deterministic quarantined import identities with inspectable warnings. Existing experiments,
+  exposures and judgments remain unchanged; new listening credits the original exposed artist.
+  Listening facts still replace the previous history. Matching tracks use metadata upserts and absent
+  tracks are removed, avoiding DuckDB's reopened-database delete/reinsert unique-index failure.
+  No schema migration was needed; the cost is retaining catalog rows without current listening.
+- ListenBrainz acquisition records normalized-name/MBID conflicts and multiple local claims.
+  A persisted MusicBrainz alias can corroborate a unique identity's name. Retrieval independently
+  rechecks observation warnings and current local claims; stale high numeric confidence cannot admit
+  quarantined membership. Original identity confidence/status snapshots remain inspectable.
+- Versioned rule `unranked_radio_independent_reinforcement_v1` admits safe query-seed radio membership
+  reinforced by relevant semantic overlap or an enabled, supported, safe catalog relationship to a
+  query seed. Unsupported/unrelated/conflicting facts do not qualify. Membership stays unranked and
+  contributes no fabricated score; catalog-plus-radio admission alone need not reach a positive-score
+  slate. General semantic-plus-radio integration now produces a recommendation without Last.fm edges.
+- Experiment and recommendation table artist cells render literal Rich `Text`, preserving bracketed
+  and unmatched-markup names in the actual Textual workflow. README documents the import/admission
+  behavior. Fusion and numerical artist challengers remain default-off; promotion/rollback gates and
+  deterministic controls are unchanged.
+- RED evidence: integration selection **11 failed, 5 passed in 2.41s** reproduced lost attribution,
+  destroyed historical identities, four unsafe ListenBrainz recommendations, and missing general
+  semantic/catalog admission. The actual TUI raised `MarkupError` for `Literal [/band]`. Focused
+  provider/admission/TUI GREEN: **12 passed in 1.42s**. Import/reopen coverage exposed **1 failed,
+  32 passed in 2.72s**, fixed by track upserts. Catalog-warning RED: **1 failed, 4 passed in 0.79s**;
+  missing-hint/ambiguous-status import RED: **2 failed in 0.76s**. Final import/enrichment regression
+  command passed **84 tests in 7.80s**. Tests use deterministic fixture CSVs and fake provider clients.
+- First full run: **1 failed, 1323 passed in 106.93s**; the remaining failure expected replacement
+  imports to delete catalog rows. Updated that assertion to retain identities and verify that only
+  replacement-history artists have listening facts. Final `PYTHONPATH=src ../../.venv/bin/python -m
+  pytest`: **1326 passed in 109.26s**. Separate control-fingerprint, migration-preservation/idempotence,
+  and persisted-only generation/TUI checks: **7 passed in 2.88s**. Ruff lint: **All checks passed**;
+  Ruff format check: **112 files already formatted**; mypy: **no issues in 60 source files**;
+  `git diff --check`: passed. Commands use the repository-root virtualenv via the relative path shown.

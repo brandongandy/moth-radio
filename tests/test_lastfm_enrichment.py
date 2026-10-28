@@ -455,7 +455,12 @@ def test_import_replaces_profile_derived_enrichment_but_preserves_api_cache(
     assert conn.execute("SELECT count(*) FROM artist_similarity_edge").fetchone() == (0,)
     assert conn.execute("SELECT count(*) FROM artist_tag").fetchone() == (0,)
     assert conn.execute("SELECT count(*) FROM tag_top_artist").fetchone() == (0,)
-    assert conn.execute("SELECT canonical_name FROM artist").fetchall() == [("New Order",)]
+    assert conn.execute(
+        "SELECT a.canonical_name FROM artist a JOIN artist_listening_fact f USING (artist_id)"
+    ).fetchall() == [("New Order",)]
+    assert conn.execute(
+        "SELECT count(*) FROM artist WHERE canonical_name = 'The Cure'"
+    ).fetchone() == (1,)
     conn.close()
 
 

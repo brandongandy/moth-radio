@@ -392,6 +392,13 @@ def _guard_value(metric: Any, name: str) -> float | None:
     return float(value)
 
 
+def _same_guard_definition(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    return all(
+        left.get(key) == right.get(key)
+        for key in ("source", "basis", "version", "population", "namespace", "k")
+    )
+
+
 def _check_guardrails(
     pair: dict[str, Any],
     config: PromotionConfig,
@@ -425,12 +432,7 @@ def _check_guardrails(
             }
             continue
         a, b = _guard_value(control, name), _guard_value(challenger, name)
-        definitions = ("source", "basis", "version", "population", "namespace", "k")
-        comparable = (
-            a is not None
-            and b is not None
-            and all(control.get(key) == challenger.get(key) for key in definitions)
-        )
+        comparable = a is not None and b is not None and _same_guard_definition(control, challenger)
         comparable &= (
             all(
                 metric.get("snapshot_id")
@@ -611,6 +613,9 @@ def _complete_ablation_variant(
         return False
     if not all(
         _guard_support_valid(result.get("guardrails", {}).get(name), name)
+        and _same_guard_definition(
+            baseline["result"].get("guardrails", {}).get(name, {}), result["guardrails"][name]
+        )
         for name in GUARD_DIRECTIONS
     ):
         return False
@@ -775,10 +780,16 @@ def _check_ablations(pair: dict[str, Any], reasons: set[str]) -> bool:
                 explained = True
         if linked and row.get("enabled") and row.get("contributing"):
             for name, direction in GUARD_DIRECTIONS.items():
-                values = [
-                    _guard_value(result.get("guardrails", {}).get(name), name)
+                guards = [
+                    result.get("guardrails", {}).get(name, {})
                     for result in (control.get("result", {}), baseline.get("result", {}), actual)
                 ]
+                if not (
+                    _same_guard_definition(guards[0], guards[1])
+                    and _same_guard_definition(guards[1], guards[2])
+                ):
+                    continue
+                values = [_guard_value(metric, name) for metric in guards]
                 if all(value is not None for value in values):
                     a, b, c = values
                     assert a is not None and b is not None and c is not None

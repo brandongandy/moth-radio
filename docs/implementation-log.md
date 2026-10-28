@@ -909,3 +909,26 @@ challenger. The fix-round entry records the current behavior.
   ownership preflight before vote aggregation, historical freeze behavior and unchanged scorer
   defaults. No blocking concern remains from this review round; logical-export memory/runtime
   limitations documented above remain unchanged.
+
+#### Task 11 fix round 2 — Comparable ablation guard definitions
+
+- Closed the residual I2 path with one shared comparison of source, basis, version, population,
+  descriptor namespace and cutoff-k metadata. Control/challenger guards, complete ablation
+  validation and three-way explanatory guard effects all use the same predicate. Incompatible
+  removal definitions now produce `incomplete_ablations` and cannot explain gain.
+- Added a catalog-only improvement regression with ranking/recall gains held at zero. Matching
+  relationship-type evidence stays eligible; changing only an ablation's namespace, population,
+  source, basis, version or k produces ineligibility plus `unexplained_ablation_gain`. The initial
+  focused reproduction observed **6 failed, 1 passed, 93 deselected** before implementation.
+- Final promotion command `PYTHONPATH=src ../../.venv/bin/python -m pytest tests/test_promotion.py -q`
+  — **100 passed in 2.49 seconds**. Full command
+  `PYTHONPATH=src ../../.venv/bin/python -m pytest` — **1168 passed in 76.63 seconds**;
+  `PYTHONPATH=src ../../.venv/bin/python -m ruff check .` — **All checks passed**;
+  `PYTHONPATH=src ../../.venv/bin/python -m ruff format --check .` — **109 files already formatted**;
+  `PYTHONPATH=src ../../.venv/bin/python -m mypy src` — **no issues in 59 source files**;
+  `git diff --check` — passed.
+  Commands used the repository-root virtualenv via its absolute local path; relative spelling
+  here avoids committing a machine-local path.
+- Self-review confirmed matching-definition eligibility remains available, every incompatible
+  catalog definition fails completeness and explanatory gain, and no policy, defaults, activation
+  or Task 12 behavior changed. The deferred Minor about cross-test helpers remains untouched.

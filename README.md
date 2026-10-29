@@ -14,6 +14,13 @@ The Python package and command-line tool are named `scrobble-recs`. Your listeni
 
 **AI Disclosure:** This is a purpose-built tool for my own uses, designed by me and written entirely by AI. DeepSeek and Codex were used in the development of this tool.
 
+### Current rollout status
+
+- The deterministic scorer remains the production control. Source-family fusion and learned preference ranking are reversible, explicit challengers; neither activates or becomes the default without compatible local promotion evidence.
+- Last.fm, ListenBrainz, and MusicBrainz enrichment is optional and cache-first. Missing providers degrade independently, and recommendation generation never needs live API access.
+- CSV reimports preserve canonical local artist identities so persisted runs, exposures, feedback, and downstream outcomes remain attributable. Conflicting or ambiguous MBID hints are quarantined rather than silently merged.
+- General and artist-conditioned queries share retrieval, admission, personal relevance, slate policy, persistence, and evaluation contracts. The TUI and exports continue to read persisted runs only.
+
 ## Blinded local recommendation experiments
 
 Compare two distinct persisted runs with matching query kind, target, semantic history/feedback
@@ -69,11 +76,11 @@ remains. All experiment commands and TUI interactions operate locally without AP
 
 ## Algorithms
 
-Moth Radio is a local, graph-based recommender. In essence, it works like this:
+Moth Radio is a local, source-aware artist recommender. In essence, it works like this:
 
-Listening history → seed artists → graph/tag candidates → eligibility gate → calibrated scoring → novelty penalties/bonuses → diversity rerank → persisted run
+Listening history → immutable query context → source-local candidates → evidence admission/fusion → personal relevance → slate policy/diversity → persisted run
 
-When a recommendation is generated, the inputs, eligibility decision, score components, and reranking evidence are also persisted so you can see the criteria behind the recommendation.
+The deterministic scorer is the permanent control. Optional fusion and learned-preference challengers reuse the same admission and slate-policy boundaries and must be selected explicitly. When a recommendation is generated, the inputs, eligibility decision, source contributions, relevance features, policy effects, and version identities are persisted so you can inspect, replay, compare, and safely fall back.
 
 See the Appendix for a full overview of the recommendation algorithm.
 
@@ -837,11 +844,11 @@ Use deterministic fixtures, temporary DuckDB databases, and behavioral tests. Do
 
 ## Appendix: Recommendation Algorithm
 
-Moth Radio is a local, graph-based recommender. Each `recommend` run computes candidates and ranks them from your listening history plus the persisted Last.fm graph.
+Moth Radio is a local, source-aware artist recommender. Each `recommend` run computes candidates and ranks them from your listening history plus persisted provider evidence. The default control uses the verified Last.fm graph/tag path; optional challengers can add source-family fusion or a promoted local preference artifact without changing the retrieval, admission, or slate-policy contracts.
 
 ```text
-Listening history → seed artists → graph/tag candidates → eligibility gate
-→ calibrated scoring → novelty penalties/bonuses → diversity rerank → persisted run
+Listening history → immutable query context → source-local retrieval
+→ evidence admission/fusion → personal relevance → slate policy/diversity → persisted run
 ```
 
 ### Optional source-family fusion challenger
@@ -923,7 +930,9 @@ It normally uses a 12-month history window. Modes change the mix: `explore` favo
 Candidates are the union of:
 
 - artists reached by persisted Last.fm “similar artist” edges from seeds;
-- artists in persisted top-artist lists for tags connected to your seeds.
+- artists in persisted top-artist lists for tags connected to your seeds;
+- persisted ListenBrainz artist-radio memberships when candidate generation is explicitly enabled;
+- supported persisted MusicBrainz catalog relationships when catalog candidate generation is explicitly enabled.
 
 Normal discovery excludes artists you have already played, seed artists themselves, hidden artists, and artists in the recent feedback cooldown.
 
@@ -936,6 +945,11 @@ A candidate must have direct graph evidence. With the current defaults, it passe
 
 For general discovery, this deliberately prevents tag-only recommendations. Artist-conditioned
 queries can admit shared target semantic facets inside their explicit neighborhood.
+
+With the fusion challenger selected, unranked ListenBrainz membership can support general admission
+only when independently reinforced by query-relevant semantic overlap or an enabled, supported
+catalog relationship. Unrelated facts and warning-bearing or ambiguous identities remain excluded.
+Membership never receives an invented provider score or rank.
 
 ### 4. Scoring
 
